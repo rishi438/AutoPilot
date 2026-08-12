@@ -11,6 +11,8 @@ Supports two backends:
 import logging
 from time import perf_counter
 from typing import Any, Dict, Optional, List
+
+import httpx
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -43,6 +45,13 @@ DEFAULT_TOP_K: int = 40
 MAX_RETRIES: int = 3
 RETRY_MIN_WAIT: int = 2  # seconds
 RETRY_MAX_WAIT: int = 10  # seconds
+
+# Local LLM known models — values accepted by the local endpoint.
+LOCAL_LLM_MODELS = {
+    "deepseek-r1:14b",
+    "qwen2.5:14b",
+    "llama3.1:8b",
+}
 
 # Configure module loggers
 logger = logging.getLogger(__name__)
@@ -118,6 +127,22 @@ def _text_indicates_gemini_quota_exhausted(text: str) -> bool:
         or "resource_exhausted" in lower
         or "generativelanguage" in lower
     ):
+        return True
+    return False
+
+
+def _text_indicates_gemini_service_unavailable(text: str) -> bool:
+    """Return True for Gemini service outages or high-demand 503-style failures."""
+    if not text:
+        return False
+    upper = text.upper()
+    if "503" in upper:
+        return True
+    if "UNAVAILABLE" in upper:
+        return True
+    if "SERVICE_UNAVAILABLE" in upper:
+        return True
+    if "HIGH_DEMAND" in upper or "HIGH DEMAND" in upper:
         return True
     return False
 
@@ -202,6 +227,11 @@ class GeminiClient:
         # Google AI Studio API key
         self.api_key = getattr(settings, 'gemini_api_key', None)
         
+        # Local LLM fallback settings
+        self.local_llm_url = getattr(settings, 'local_llm_url', None)
+        self.local_llm_model = getattr(settings, 'local_llm_model', None)
+        self.local_llm_timeout = getattr(settings, 'local_llm_timeout', DEFAULT_TIMEOUT)
+
         # Validate Vertex AI config
         if self.use_vertex_ai and not self.vertex_project:
             logger.warning("USE_VERTEX_AI=true but VERTEX_AI_PROJECT not set. Falling back to Google AI Studio.")
@@ -220,6 +250,20 @@ class GeminiClient:
             )
 
         # google-genai uses Client(api_key=...) per-call — no global configure needed.
+
+    def _is_local_model(self, model: Optional[str]) -> bool:
+        """Return True when the requested model should be routed to a local LLM endpoint."""
+        return bool(model and model in LOCAL_LLM_MODELS)
+
+    def _should_fallback_to_local(self, exc: GeminiError) -> bool:
+        """Return True when a Gemini failure should be retried against local LLM."""
+        if not self.local_llm_url:
+            return False
+        combined = _exception_chain_text(exc)
+        return (
+            _text_indicates_gemini_service_unavailable(combined)
+            or _text_indicates_gemini_quota_exhausted(combined)
+        )
 
     async def generate(
         self,
@@ -323,7 +367,17 @@ class GeminiClient:
         Raises:
             GeminiError: If all retries fail
         """
-        # Route to appropriate backend
+        # Route local model requests to the local endpoint before checking Gemini/Vertex.
+        if self._is_local_model(model):
+            return await self._generate_with_local_llm(
+                prompt=prompt,
+                model=model,
+                system=system,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+        # Route to the configured backend
         if self.use_vertex_ai:
             return await self._generate_with_vertex_ai(
                 prompt=prompt,
@@ -332,14 +386,108 @@ class GeminiClient:
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
-        else:
-            return await self._generate_with_google_ai(
+
+        effective_api_key = user_api_key or self.api_key
+        if effective_api_key:
+            try:
+                return await self._generate_with_google_ai(
+                    prompt=prompt,
+                    model=model,
+                    system=system,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    user_api_key=user_api_key,
+                )
+            except GeminiError as exc:
+                if self._should_fallback_to_local(exc):
+                    logger.warning(
+                        "[LLM] Gemini service unavailable; falling back to local LLM"
+                    )
+                    return await self._generate_with_local_llm(
+                        prompt=prompt,
+                        model=model,
+                        system=system,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                raise
+
+        if self.local_llm_url:
+            return await self._generate_with_local_llm(
                 prompt=prompt,
                 model=model,
                 system=system,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                user_api_key=user_api_key,
+            )
+
+        raise GeminiError(
+            "No API key available. Please configure your Gemini API key in Settings or set LOCAL_LLM_URL for a local fallback."
+        )
+
+    async def _generate_with_local_llm(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+        system: Optional[str] = None,
+        temperature: float = DEFAULT_TEMPERATURE,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+    ) -> Dict[str, Any]:
+        """Generate using a local LLM endpoint when no Gemini API key is available."""
+        if not self.local_llm_url:
+            raise GeminiError(
+                "No local LLM endpoint is configured. Set LOCAL_LLM_URL in env."
+            )
+
+        model_to_use = model if self._is_local_model(model) else self.local_llm_model
+        if not model_to_use:
+            raise GeminiError(
+                "Local LLM model is not configured. Set LOCAL_LLM_MODEL in env or provide a supported local model name."
+            )
+
+        try:
+            request_body = {
+                "model": model_to_use,
+                "prompt": f"{system}\n\n{prompt}" if system else prompt,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": False,
+            }
+            print(f"Sending request to local LLM at {self.local_llm_url} with body: {request_body}")
+
+            async with httpx.AsyncClient(timeout=self.local_llm_timeout) as client:
+                response = await client.post(
+                    self.local_llm_url,
+                    json=request_body,
+                )
+
+            if response.status_code != 200:
+                raise GeminiError(
+                    f"Local LLM request failed: {response.status_code} {response.text}"
+                )
+
+            data = response.json()
+            print(f"Received response from local LLM: {data}")
+            text = data.get("text") or data.get("response") or data.get("result")
+            if not isinstance(text, str):
+                raise GeminiError(
+                    "Local LLM response missing text field."
+                )
+
+            return {
+                "model": model_to_use,
+                "response": text,
+                "done": True,
+            }
+        except httpx.HTTPError as http_err:
+            raise GeminiError(
+                f"Local LLM request failed: {http_err}",
+                original_error=http_err,
+            )
+        except ValueError as parse_err:
+            raise GeminiError(
+                f"Invalid JSON from local LLM: {parse_err}",
+                original_error=parse_err,
             )
 
     async def _generate_with_vertex_ai(

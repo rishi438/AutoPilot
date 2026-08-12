@@ -217,8 +217,7 @@ class CoverLetterWriterAgent:
             prefs: Dict[str, Any] = state.get("workflow_preferences") or {}
             user_tone: str = prefs.get("cover_letter_tone", "professional")
             # Only use preferred_model in BYOK mode (user has their own key)
-            user_model: Optional[str] = prefs.get("preferred_model") if self._current_user_api_key else None
-
+            user_model: Optional[str] = prefs.get("preferred_model") 
             # Validate
             if not user_profile:
                 raise ValueError("User profile is required for cover letter writing")

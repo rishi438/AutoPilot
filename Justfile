@@ -13,6 +13,10 @@
 # One-time sibling copy for safe Just/Docker tests (macOS/Linux; needs python3):
 #   just sandbox-for-testing
 
+# `just` defaults to sh on Windows. This setting is Windows-only, so macOS and
+# Linux retain their normal shell behavior. Keep it for Just 1.51 compatibility.
+set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
+
 # Cross-platform paths into the virtual environment
 python_cmd := if os() == "windows" { "python" }              else { "python3" }
 python     := if os() == "windows" { "venv\\Scripts\\python" } else { "venv/bin/python" }
@@ -43,48 +47,107 @@ sandbox-for-testing:
     {{python_cmd}} scripts/make_just_test_sandbox.py
 
 # ---------------------------------------------------------------------------
-# Option A — Docker
+# Option A — Docker/podman
 # ---------------------------------------------------------------------------
 
-# Checks that Docker is installed and the daemon is running.
-# Does NOT install or start Docker — the user is responsible for that.
+# Checks that Docker/podman is installed and the daemon is running.
+# Does NOT install or start Docker/podman — the user is responsible for that.
+[windows]
+[private]
+_ensure-podman:
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/container_runtime.ps1 ensure podman
+
+[unix]
+[private]
+_ensure-podman:
+    docker info
+
+[windows]
+[private]
+_compose-podman +ARGS:
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/container_runtime.ps1 compose podman {{ARGS}}
+
+[unix]
+[private]
+_compose-podman +ARGS:
+    docker compose {{ARGS}}
+
+[windows]
+[private]
+_ensure-docker:
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/container_runtime.ps1 ensure docker
+
+[unix]
 [private]
 _ensure-docker:
     docker info
 
+[windows]
+[private]
+_compose-docker +ARGS:
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/container_runtime.ps1 compose docker {{ARGS}}
+
+[unix]
+[private]
+_compose-docker +ARGS:
+    docker compose {{ARGS}}
+
 # Generate .env + start all services (foreground)
-start: _ensure-docker _create-env
-    docker compose pull --ignore-buildable
-    docker compose up --build
+start: _ensure-podman _create-env
+    just _compose-podman pull --ignore-buildable
+    just _compose-podman up --build
 
 # Generate .env + start all services (background)
 start-d: _ensure-docker _create-env
-    docker compose pull --ignore-buildable
-    docker compose up --build -d
+    just _compose-docker pull --ignore-buildable
+    just _compose-docker up --build -d
 
 # Stop all services, keep data
 docker-down:
-    docker compose down
+    just _compose-docker down
 
 # Stop all services and wipe all data
 docker-reset:
-    docker compose down -v
+    just _compose-docker down -v
 
 # Tail the app logs
 docker-logs:
-    docker compose logs -f app
+    just _compose-docker logs -f app
 
 # Build the Docker image
 docker-build:
-    docker compose build
+    just _compose-docker build
+
+# Podman lifecycle commands for services started with `just start`.
+podman-down:
+    just _compose-podman down
+
+podman-reset:
+    just _compose-podman down -v
+
+podman-logs:
+    just _compose-podman logs -f app
+
+podman-build:
+    just _compose-podman build
 
 # ---------------------------------------------------------------------------
 # Option C — Manual (you run PostgreSQL and Redis yourself)
 # ---------------------------------------------------------------------------
 
+# A venv is reusable. Avoid recreating it when its Windows interpreter is in use.
+[windows]
+[private]
+_create-venv:
+    if (-not (Test-Path 'venv\\Scripts\\python.exe')) { python -m venv venv } else { Write-Output '  venv already exists - skipping.' }
+
+[unix]
+[private]
+_create-venv:
+    test -x venv/bin/python || {{python_cmd}} -m venv venv
+
 # Full setup: venv + Python/Node deps + frontend build + .env
-setup: _create-env _npm-install build-frontend
-    {{python_cmd}} -m venv venv
+setup: _create-env _npm-install build-frontend _create-venv
     {{python}} -m pip install --upgrade pip
     {{python}} -m pip install -r requirements.txt
     @echo ""

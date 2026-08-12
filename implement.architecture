@@ -1,0 +1,127 @@
+┌─────────────────────────────────────────────┐
+│                Job Sources                  │
+├─────────────────────────────────────────────┤
+│ LinkedIn                                    │
+│ Naukri                                      │
+│ Indeed                                      │
+│ Instahyre                                   │
+│ Workday                                     │
+│ Greenhouse                                  │
+│ Lever                                       │
+└─────────────────────┬───────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────┐
+│              Job Discovery                  │
+│ Search + Scraping + Deduplication           │
+└─────────────────────┬───────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────┐
+│               Job Analysis                  │
+│ JD Parsing + ATS Keywords + Match Score     │
+└─────────────────────┬───────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────┐
+│          Resume Tailoring Engine            │
+├─────────────────────────────────────────────┤
+│ Keyword Extraction                          │
+│ Skill Matching                              │
+│ Bullet Rewriting                            │
+│ ATS Optimization                            │
+│ Section Reordering                          │
+│ DOCX Builder                                │
+│ PDF Export                                  │
+└─────────────────────┬───────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────┐
+│               Apply Engine                  │
+└─────────────────────┬───────────────────────┘
+                      │
+        ┌─────────────┼──────────────┐
+        ▼             ▼              ▼
+
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ Workday ATS  │ │ Greenhouse   │ │ Lever ATS    │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │
+       ▼                ▼                ▼
+
+┌─────────────────────────────────────────────┐
+│          Dynamic Form Engine                │
+├─────────────────────────────────────────────┤
+│ Field Extractor                             │
+│ Field Classifier                            │
+│ Question Detector                           │
+│ Resume Upload Handler                       │
+└─────────────────────┬───────────────────────┘
+                      │
+          ┌───────────┴───────────┐
+          ▼                       ▼
+
+┌─────────────────┐    ┌─────────────────────┐
+│ Profile KB      │    │ AI Answer Engine    │
+├─────────────────┤    ├─────────────────────┤
+│ Name            │    │ Why us?             │
+│ Email           │    │ Motivation          │
+│ Phone           │    │ Experience essays   │
+│ Visa status     │    │ Open questions      │
+│ Salary          │    │ Custom responses    │
+│ Notice period   │    │                     │
+└────────┬────────┘    └─────────┬───────────┘
+         │                       │
+         └───────────┬───────────┘
+                     ▼
+
+┌─────────────────────────────────────────────┐
+│          Playwright Form Filler             │
+│                                             │
+│ Upload Resume                               │
+│ Fill Fields                                 │
+│ Submit Application                          │
+└─────────────────────┬───────────────────────┘
+                      │
+                      ▼
+
+┌─────────────────────────────────────────────┐
+│              Naukri Adapter                 │
+├─────────────────────────────────────────────┤
+│ Login Session                               │
+│ Search Filters                              │
+│ Easy Apply Detection                        │
+│ Recruiter Match Score                       │
+│ Resume Selection                            │
+│ Auto Apply                                  │
+└─────────────────────┬───────────────────────┘
+                      │
+                      ▼
+
+┌─────────────────────────────────────────────┐
+│           Application Tracker               │
+├─────────────────────────────────────────────┤
+│ Company                                     │
+│ Role                                        │
+│ Source                                      │
+│ Resume Version                              │
+│ Match Score                                 │
+│ Applied Date                                │
+│ Status                                      │
+│ Answers Submitted                           │
+└─────────────────────┬───────────────────────┘
+                      │
+                      ▼
+
+┌─────────────────────────────────────────────┐
+│                 Dashboard                   │
+├─────────────────────────────────────────────┤
+│ Applications                                │
+│ Resume Used                                 │
+│ Cover Letter Used                           │
+│ Interview Rate                              │
+│ Response Rate                               │
+│ Resume Analytics                            │
+│ Portal Analytics                            │
+│ Skill Gap Analytics                         │
+└─────────────────────────────────────────────┘

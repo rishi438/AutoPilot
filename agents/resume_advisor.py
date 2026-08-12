@@ -224,7 +224,7 @@ class ResumeAdvisorAgent:
             company_research: Optional[Dict[str, Any]] = state.get("company_research")
             prefs: Dict[str, Any] = state.get("workflow_preferences") or {}
             resume_length: str = prefs.get("resume_length", "concise")
-            user_model: Optional[str] = prefs.get("preferred_model") if self._current_user_api_key else None
+            user_model: Optional[str] = prefs.get("preferred_model") 
 
             if not user_profile:
                 raise ValueError("User profile is required for resume advisory")

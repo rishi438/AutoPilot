@@ -25,7 +25,7 @@ from api.extension_autofill_rules import (
     filter_skipped_for_assigned_uids,
     merge_assignment_dicts,
 )
-from models.database import User, UserProfile as UserProfileModel, UserResumeAsset
+from models.database import User, UserProfile as UserProfileModel
 from utils.auth import get_current_user_with_complete_profile
 from utils.cache import (
     cache_tool_result,
@@ -49,6 +49,12 @@ from utils.security import sanitize_text
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _get_user_resume_asset_model():
+    from models.database import UserResumeAsset
+
+    return UserResumeAsset
 
 # =============================================================================
 # CONSTANTS
@@ -273,6 +279,7 @@ async def _load_profile_bundle(
     else:
         snap["profile"] = {}
 
+    UserResumeAsset = _get_user_resume_asset_model()
     ra_res = await db.execute(select(UserResumeAsset).where(UserResumeAsset.user_id == user_id))
     ra = ra_res.scalar_one_or_none()
     if ra:

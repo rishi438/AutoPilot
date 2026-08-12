@@ -70,6 +70,20 @@ class Settings(BaseSettings):
         description="Google Gemini API key (optional - users can provide their own in Settings)"
     )
     gemini_model: str = "gemini-3.5-flash"
+
+    # Local LLM Configuration
+    local_llm_url: Optional[str] = Field(
+        default=None,
+        description="URL of the local LLM endpoint for self-hosted generation fallback."
+    )
+    local_llm_model: Optional[str] = Field(
+        default=None,
+        description="Local LLM model name to use when the request does not explicitly specify a local model."
+    )
+    local_llm_timeout: int = Field(
+        default=180,
+        description="Timeout in seconds for requests sent to the local LLM endpoint."
+    )
     
     # Vertex AI Configuration (alternative backend - higher rate limits, no free tier limits)
     # Requires: gcloud auth application-default login (or GOOGLE_APPLICATION_CREDENTIALS)

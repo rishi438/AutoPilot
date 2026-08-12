@@ -47,6 +47,7 @@ class ApplicationStatus(str, Enum):
     """Job application status types."""
 
     DRAFT = "draft"
+    PENDING = "pending"
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -184,6 +185,24 @@ class User(Base):
         "UserResumeAsset",
         back_populates="user",
         uselist=False,
+        lazy="noload",
+        cascade="all, delete-orphan",
+    )
+    resume_versions: Mapped[List["ResumeVersion"]] = relationship(
+        "ResumeVersion",
+        back_populates="user",
+        lazy="noload",
+        cascade="all, delete-orphan",
+    )
+    job_form_answers: Mapped[List["JobFormAnswer"]] = relationship(
+        "JobFormAnswer",
+        back_populates="user",
+        lazy="noload",
+        cascade="all, delete-orphan",
+    )
+    portal_sessions: Mapped[List["PortalSession"]] = relationship(
+        "PortalSession",
+        back_populates="user",
         lazy="noload",
         cascade="all, delete-orphan",
     )
@@ -719,6 +738,148 @@ class JobApplication(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+class ResumeVersion(Base):
+    __tablename__ = "resume_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    company_name: Mapped[str] = mapped_column(
+        String(100)
+    )
+    job_title: Mapped[str] = mapped_column(
+        String(100), index=True
+    )
+    source_resume: Mapped[str] = mapped_column(
+        String(200)
+    )
+    docx_path: Mapped[Optional[str]] = mapped_column(
+        String(200), nullable=True, default=None
+    )
+    pdf_path: Mapped[Optional[str]] = mapped_column(
+        String(200), nullable=True, default=None
+    )
+    ats_score: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0, server_default="0"
+    )
+    keywords_added: Mapped[Optional[List[str]]] = mapped_column(
+        JSONB, nullable=True, default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+    user: Mapped["User"] = relationship(
+        "User",
+        back_populates="resume_versions"
+    )
+    __table_args__ = (
+        Index("ix_resume_user_created", "user_id", "created_at"),
+        Index("ix_resume_user_company", "user_id", "company_name", "job_title"),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert resume version to dictionary for API responses."""
+        return {
+            "id": str(self.id),
+            "user_id": str(self.user_id),
+            "company_name": self.company_name,
+            "job_title": self.job_title,
+            "source_resume": self.source_resume,
+            "docx_path": self.docx_path,
+            "pdf_path": self.pdf_path,
+            "ats_score": self.ats_score,
+            "keywords_added": self.keywords_added or [],
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class JobFormAnswer(Base):
+    __tablename__ = "job_form_answers"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    question: Mapped[str] = mapped_column(
+        String(200)
+    )
+    answer: Mapped[str] = mapped_column(
+        Text
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+    user: Mapped["User"] = relationship(
+        "User",
+        back_populates="job_form_answers"
+    )
+    __table_args__ = (
+        Index("ix_form_answer_user_question", "user_id", "question"),
+        Index("ix_form_answer_user_created", "user_id", "created_at"),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert job form answer to dictionary for API responses."""
+        return {
+            "id": str(self.id),
+            "user_id": str(self.user_id),
+            "question": self.question,
+            "answer": self.answer,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class PortalSession(Base):
+    __tablename__ = "portal_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
+
+    portal_name: Mapped[str] = mapped_column(
+        String(50)
+    )
+
+    storage_state_path: Mapped[str] = mapped_column(
+        String(500)
+    )
+
+    last_login_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now()
+    )
+
+    expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now()
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now()
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="portal_sessions")
 
 
 # =============================================================================

@@ -105,3 +105,5 @@ e2e/dist/
 
 # Local Just/Docker sandbox experiments (see `just sandbox-for-testing`)
 sandbox-just-test/
+.dual-graph/
+.podman-config/

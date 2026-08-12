@@ -412,6 +412,8 @@ class JobApplicationWorkflow:
                 **DEFAULT_WORKFLOW_PREFERENCES,
                 **(user_data.get("application_preferences") or {}),
             }
+            # Force local Deepseek for workflow document generation
+            workflow_preferences["preferred_model"] = "deepseek-r1:14b"
 
             # Create initial state
             initial_state: WorkflowState = create_initial_state(
@@ -1485,6 +1487,8 @@ class JobApplicationWorkflow:
                 **DEFAULT_WORKFLOW_PREFERENCES,
                 **(restored_user_data.get("application_preferences") or {}),
             }
+            # Force local Deepseek for workflow document generation on resumed state
+            restored_prefs["preferred_model"] = "deepseek-r1:14b"
             state = WorkflowState(
                 user_id=str(doc.user_id),
                 session_id=doc.session_id,

@@ -38,13 +38,29 @@ from utils.encryption import (
 from utils.gemini_api_key_format import validate_gemini_api_key
 from utils.logging_config import get_structured_logger, mask_email
 from utils.error_responses import APIError, ErrorCode, internal_error, no_api_key_error, not_found_error, not_implemented_error, rate_limit_error, validation_error
-from models.database import User, UserProfile as UserProfileModel, JobApplication, WorkflowSession, UserWorkflowPreferences, UserResumeAsset
+from models.database import User, UserProfile as UserProfileModel, JobApplication, WorkflowSession, UserWorkflowPreferences
 
 logger = logging.getLogger(__name__)
 structured_logger = get_structured_logger(__name__)
 settings = get_settings()
 
 router = APIRouter()
+
+
+def _get_user_resume_asset_model():
+    """Attempt to import and return the `UserResumeAsset` ORM model.
+
+    Returns None if the import fails so callers can degrade gracefully
+    (e.g. during migrations or when the models package is partially unavailable).
+    """
+    try:
+        import importlib
+
+        mod = importlib.import_module("models.database")
+        return getattr(mod, "UserResumeAsset", None)
+    except Exception:
+        logger.exception("Failed to import UserResumeAsset from models.database")
+        return None
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -111,6 +127,8 @@ _VALID_WORK_AUTHORIZATION = frozenset(
         "us_citizen",
     }
 )
+# Maximum allowed salary (upper sanity limit) for desired salary validation
+MAX_DESIRED_SALARY: int = 5_000_000
 # Minimum lengths
 MIN_LENGTH: int = 1
 MIN_SKILLS_ITEMS: int = 1
@@ -801,8 +819,10 @@ class CareerPreferencesRequest(BaseModel):
                 raise ValueError(f"Salary {key} must be an integer")
             if amount < 0:
                 raise ValueError(f"Salary {key} must be positive")
-            if amount > 2000000:
-                raise ValueError(f"Salary {key} seems unreasonably high")
+            if amount > MAX_DESIRED_SALARY:
+                raise ValueError(
+                    f"Salary {key} seems unreasonably high (maximum allowed {MAX_DESIRED_SALARY:,})"
+                )
             normalized[key] = amount
 
         if "min" in normalized and "max" in normalized and normalized["min"] >= normalized["max"]:
@@ -914,8 +934,11 @@ async def _upsert_user_resume_asset(
     base_dir = settings.user_resume_storage_dir
     rel, sha_hex, _ext = save_resume_bytes(base_dir, user_id, content, filename)
     mime = _MIME_BY_RESUME_EXT.get(file_extension, "application/octet-stream")
-    res = await db.execute(select(UserResumeAsset).where(UserResumeAsset.user_id == user_id))
-    row = res.scalar_one_or_none()
+    UserResumeAsset = _get_user_resume_asset_model()
+    row = None
+    if UserResumeAsset is not None:
+        res = await db.execute(select(UserResumeAsset).where(UserResumeAsset.user_id == user_id))
+        row = res.scalar_one_or_none()
     safe_name = (filename or "resume")[:255]
     if row:
         delete_resume_file(base_dir, row.storage_relative_path)
@@ -926,6 +949,12 @@ async def _upsert_user_resume_asset(
         row.sha256_hex = sha_hex
         row.updated_at = datetime.now(timezone.utc)
     else:
+        if UserResumeAsset is None:
+            logger.warning(
+                "UserResumeAsset model unavailable; saved resume bytes without DB metadata for user %s",
+                user_id,
+            )
+            return
         db.add(
             UserResumeAsset(
                 id=uuid.uuid4(),
@@ -1062,6 +1091,10 @@ async def download_stored_resume(
 ):
     """Download the user's stored resume file (from parse-resume or future uploads)."""
     user_id = get_user_id_from_token(current_user)
+    UserResumeAsset = _get_user_resume_asset_model()
+    if UserResumeAsset is None:
+        # Model not available (migration/runtime); behave as if no stored resume
+        raise not_found_error(resource_type="Stored resume")
     res = await db.execute(select(UserResumeAsset).where(UserResumeAsset.user_id == user_id))
     row = res.scalar_one_or_none()
     if not row:
@@ -1087,6 +1120,10 @@ async def delete_stored_resume(
 ):
     """Remove stored resume file metadata and on-disk bytes."""
     user_id = get_user_id_from_token(current_user)
+    UserResumeAsset = _get_user_resume_asset_model()
+    if UserResumeAsset is None:
+        # Model not available; cannot delete DB metadata
+        raise not_found_error(resource_type="Stored resume")
     res = await db.execute(select(UserResumeAsset).where(UserResumeAsset.user_id == user_id))
     row = res.scalar_one_or_none()
     if not row:
@@ -1157,8 +1194,11 @@ async def get_profile_data(
 
         # Profile data structure
         profile_data = user_profile.to_dict() if user_profile else {}
-        resume_q = await db.execute(select(UserResumeAsset).where(UserResumeAsset.user_id == user_id))
-        resume_row = resume_q.scalar_one_or_none()
+        UserResumeAsset = _get_user_resume_asset_model()
+        resume_row = None
+        if UserResumeAsset is not None:
+            resume_q = await db.execute(select(UserResumeAsset).where(UserResumeAsset.user_id == user_id))
+            resume_row = resume_q.scalar_one_or_none()
         if resume_row:
             profile_data["resume_file"] = {"has_file": True, **resume_row.to_dict()}
         else:
@@ -1934,9 +1974,9 @@ def _check_career_preferences_completion(user_profile: Optional[UserProfileModel
     if not user_profile:
         return False
 
-    desired_company_sizes = user_profile.desired_company_sizes or []
-    job_types = user_profile.job_types or []
-    work_arrangements = user_profile.work_arrangements or []
+    desired_company_sizes = getattr(user_profile, "desired_company_sizes", None) or []
+    job_types = getattr(user_profile, "job_types", None) or []
+    work_arrangements = getattr(user_profile, "work_arrangements", None) or []
     career_fields_ok = (
         len(desired_company_sizes) > 0
         and len(job_types) > 0
@@ -1945,7 +1985,7 @@ def _check_career_preferences_completion(user_profile: Optional[UserProfileModel
     if not career_fields_ok:
         return False
 
-    wa = (user_profile.work_authorization or "").strip()
+    wa = (getattr(user_profile, "work_authorization", None) or "").strip()
     if wa in _VALID_WORK_AUTHORIZATION:
         return True
 

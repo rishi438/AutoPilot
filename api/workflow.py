@@ -1106,6 +1106,13 @@ async def regenerate_cover_letter(
             from utils.encryption import decrypt_api_key
             user_api_key = decrypt_api_key(user_record.gemini_api_key_encrypted)
 
+        # Load workflow preferences so preferred_model and resume/cover settings are preserved.
+        prefs_result = await db.execute(
+            select(UserWorkflowPreferences).where(UserWorkflowPreferences.user_id == user_id)
+        )
+        prefs_row = prefs_result.scalar_one_or_none()
+        workflow_preferences = prefs_row.to_dict() if prefs_row else {}
+
         # Build minimal workflow state for the cover letter agent
         from agents.cover_letter_writer import CoverLetterWriterAgent
         from utils.llm_client import get_gemini_client
@@ -1120,6 +1127,7 @@ async def regenerate_cover_letter(
             "company_research": workflow_session.company_research,
             "session_id": session_id,
             "user_api_key": user_api_key,
+            "workflow_preferences": workflow_preferences,
             "cover_letter": None,
             "error_messages": [],
             "warning_messages": [],
@@ -1170,7 +1178,7 @@ async def regenerate_resume(
 
         rate_result = await check_rate_limit_with_headers(
             identifier=f"{user_id}:regen_resume",
-            limit=5,
+            limit=500 if settings.debug else 5,
             window_seconds=3600,
         )
         response.headers["X-RateLimit-Limit"] = str(rate_result.limit)
@@ -1211,6 +1219,14 @@ async def regenerate_resume(
             from utils.encryption import decrypt_api_key
             user_api_key = decrypt_api_key(user_record.gemini_api_key_encrypted)
 
+        prefs_result = await db.execute(
+            select(UserWorkflowPreferences).where(UserWorkflowPreferences.user_id == user_id)
+        )
+        prefs_row = prefs_result.scalar_one_or_none()
+        workflow_preferences = prefs_row.to_dict() if prefs_row else {}
+        # Force Deepseek model for resume regeneration
+        workflow_preferences["preferred_model"] = "deepseek-r1:14b"
+
         from agents.resume_advisor import ResumeAdvisorAgent
         from utils.llm_client import get_gemini_client
 
@@ -1224,6 +1240,7 @@ async def regenerate_resume(
             "company_research": workflow_session.company_research,
             "session_id": session_id,
             "user_api_key": user_api_key,
+            "workflow_preferences": workflow_preferences,
             "resume_recommendations": None,
             "error_messages": [],
             "warning_messages": [],
@@ -1274,7 +1291,7 @@ async def generate_interview_prep(
 
         rate_result = await check_rate_limit_with_headers(
             identifier=f"{user_id}:gen_interview_prep",
-            limit=5,
+            limit=500,
             window_seconds=3600,
         )
         response.headers["X-RateLimit-Limit"] = str(rate_result.limit)

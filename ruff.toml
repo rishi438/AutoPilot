@@ -1,0 +1,24 @@
+target-version = "py313"
+line-length = 88
+extend-exclude = [
+  "venv",
+  ".podman-config",
+  "coverage_html",
+  "generated",
+  "uploads",
+  "ui/node_modules",
+  "ui/static/dist",
+  "ui/static/vendor",
+  "e2e/node_modules",
+  "e2e/playwright-report",
+  "e2e/test-results",
+]
+
+[lint]
+# Keep repository-wide lint focused on defects until the legacy tree has been
+# modernised. Pre-commit extends this for every newly changed Python file.
+select = ["E9", "F63", "F7", "F82"]
+
+[lint.per-file-ignores]
+# FastAPI resolves dependency marker calls from function defaults by design.
+"api/*.py" = ["B008"]

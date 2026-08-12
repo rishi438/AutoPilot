@@ -242,6 +242,10 @@ command.current(cfg, verbose=True);"
 test:
 	$(PYTHON) -m pytest tests/ -v
 
+# Run tests with the project-wide coverage threshold
+test-cov:
+	$(PYTHON) -m pytest tests/ -v --cov=. --cov-report=term-missing --cov-report=html:coverage_html --cov-report=xml:coverage.xml --cov-config=.coveragerc --cov-fail-under=45
+
 # Run linter
 lint:
 	$(PYTHON) -m ruff check .

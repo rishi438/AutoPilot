@@ -185,6 +185,10 @@ dev: build-frontend
 test:
     {{python}} -m pytest tests/ -v
 
+# Run the test suite with the project-wide coverage threshold.
+test-cov:
+    {{python}} -m pytest tests/ -v --cov=. --cov-report=term-missing --cov-report=html:coverage_html --cov-report=xml:coverage.xml --cov-config=.coveragerc --cov-fail-under=45
+
 # Run the linter
 lint:
     {{python}} -m ruff check .

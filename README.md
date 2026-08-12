@@ -323,7 +323,8 @@ make build-frontend    # rebuilds dist/ and updates manifest.json
 |---------|-------------|
 | `make start-local` | No Docker: install services + setup + migrate + start app (macOS) |
 | `make stop-local` | Stop PostgreSQL and Redis Homebrew services |
-| `make start` / `just start` | Docker: generate `.env` + start all services (foreground) |
+| `make start` | Docker: generate `.env` + start all services (foreground) |
+| `just start` | Podman: install if needed + start all services (foreground) |
 | `make start-d` / `just start-d` | Docker: generate `.env` + start all services (background) |
 | `make docker-down` / `just docker-down` | Stop Docker services, keep data |
 | `make docker-reset` / `just docker-reset` | Stop Docker services, wipe data volumes |
@@ -333,6 +334,7 @@ make build-frontend    # rebuilds dist/ and updates manifest.json
 | `make migrate` / `just migrate` | Run Alembic database migrations |
 | `make build-frontend` / `just build-frontend` | Compile and content-hash JS/CSS assets |
 | `make test` / `just test` | Run the test suite |
+| `make test-cov` / `just test-cov` | Run tests with the project coverage threshold |
 | `make lint` / `just lint` | Run ruff linter |
 | `make clean` | Remove venv and compiled artefacts |
 

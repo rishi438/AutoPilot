@@ -117,6 +117,7 @@ pip-requirements-parser==32.0.1
 pip_audit==2.10.0
 platformdirs==4.3.8
 pluggy==1.6.0
+pre-commit==4.6.0
 propcache==0.4.1
 proto-plus==1.26.1
 protobuf==5.29.6
@@ -139,6 +140,7 @@ pyparsing==3.2.3
 PySocks==1.7.1
 pytest==8.4.1
 pytest-asyncio==1.0.0
+pytest-cov==7.1.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.1.1
 python-multipart==0.0.22
@@ -153,6 +155,7 @@ requests==2.32.4
 requests-toolbelt==1.0.0
 rich==14.3.3
 rsa==4.9.1
+ruff==0.16.2
 scipy==1.18.0
 setuptools==82.0.0
 simplejson==3.20.1

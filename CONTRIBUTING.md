@@ -166,6 +166,7 @@ Edit `.env` — update `DATABASE_URL` and `REDIS_URL` to point at your local ins
 ```bash
 make migrate     # or: just migrate   — run database migrations
 make dev         # or: just dev       — start at http://localhost:8000
+pre-commit install                    # install the local commit hooks once
 ```
 
 > **macOS:** Always use `make setup` / `make dev` rather than bare `pip install`. They strip the `com.apple.quarantine` flag from venv `.so` files and esbuild binaries so Gatekeeper doesn't block them.
@@ -183,11 +184,18 @@ pytest tests/test_api/ tests/test_agents/ -v
 # With coverage report
 pytest tests/test_api/ tests/test_agents/ --cov=. --cov-report=html
 
+# Full project coverage check
+make test-cov     # or: just test-cov
+
 # Single module
 pytest tests/test_api/test_auth.py -v
 ```
 
 > **Note:** `tests/test_api/` contains integration tests (no live server needed — uses an in-process ASGI client). The root-level `tests/test_*.py` files are **live-server tests** that require a running instance at `localhost:8000` — do not run these in CI.
+
+Before committing, run `pre-commit run --all-files`. The hooks validate common
+file formats, reject secrets and invalid Python, apply Ruff import/lint fixes,
+and format Python with Black.
 
 ### E2E Browser Tests (Playwright)
 

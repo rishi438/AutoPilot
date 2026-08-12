@@ -1,0 +1,44 @@
+minimum_pre_commit_version: "4.0.0"
+default_language_version:
+  python: python3
+
+exclude: >-
+  ^(venv/|\.podman-config/|coverage_html/|generated/|uploads/|
+  ui/node_modules/|ui/static/dist/|ui/static/vendor/|e2e/node_modules/|
+  e2e/playwright-report/|e2e/test-results/)
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: check-ast
+      - id: check-case-conflict
+      - id: check-docstring-first
+      - id: check-illegal-windows-names
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-toml
+      - id: check-yaml
+      - id: debug-statements
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: trailing-whitespace
+
+  # Ruff owns lint fixes and import sorting; Black remains the only formatter.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.2
+    hooks:
+      - id: ruff-check
+        args: ["--fix", "--extend-select=E4,E7,F,I,UP,B"]
+        types_or: [python, pyi]
+
+  - repo: https://github.com/psf/black-pre-commit-mirror
+    rev: 25.1.0
+    hooks:
+      - id: black
+        language_version: python3

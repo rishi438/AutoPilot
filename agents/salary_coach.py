@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, List
 
 from utils.llm_client import get_gemini_client
 from utils.llm_parsing import parse_json_from_llm_response
+from utils.llm_prompting import build_llm_system_prompt
 from utils.logging_config import get_structured_logger
 
 # =============================================================================
@@ -20,20 +21,22 @@ structured_logger = get_structured_logger(__name__)
 
 # LLM Configuration
 LLM_TEMPERATURE = 0.6
-LLM_MAX_TOKENS = 16000  # Unified agent output cap
+LLM_MAX_TOKENS = 3000
 
 # =============================================================================
 # PROMPT TEMPLATES
 # =============================================================================
 
-SYSTEM_CONTEXT = """You are an expert salary negotiation coach with deep experience helping \
-professionals at all levels secure better compensation packages. You understand market dynamics, \
-negotiation psychology, and company perspectives. You write negotiation scripts that are \
-word-for-word ready to say out loud — specific, assertive, and professional. \
-NEVER use placeholder brackets like [X] or [your achievement] in any script. \
-Every script line must be complete, natural-sounding prose tailored to the specific role and company.
-
-YEARS OF EXPERIENCE RULE: The "Years of Experience" field is the candidate's TOTAL career years — NEVER use it as domain-specific experience in scripts. When referencing experience in a specific skill or domain (e.g. "X years of backend experience"), only do so if derivable from their actual work history. If uncertain, say "my experience in [skill]" without a specific year count."""
+SYSTEM_CONTEXT = build_llm_system_prompt(
+    "Compensation negotiation coach",
+    "Create a grounded negotiation strategy from the supplied offer and candidate constraints.",
+    extra_rules=(
+        "Do not invent market rates, targets, leverage, or walk-away numbers when explicit market data is absent.",
+        "Preserve the offer's supplied currency and never assume US dollars.",
+        "Treat total career years as domain-specific experience only when work history supports that claim.",
+        "Write scripts as complete natural prose without placeholders.",
+    ),
+)
 
 NEGOTIATION_PROMPT = """Generate a comprehensive salary negotiation strategy and scripts for this specific situation.
 
@@ -70,13 +73,14 @@ must be word-for-word ready to say. No placeholder text, no brackets like [X], \
 no "mention your achievement here" style instructions.
 2. Reference the actual company name ({company_name}) and role ({job_title}) in the scripts \
 where natural — this makes them feel personal, not generic.
-3. The recommended_target in market_analysis must be a specific dollar amount or range, \
-not vague language like "market rate" — derive it from the offered salary and market context.
-4. The walk_away_point must state specific conditions (e.g., concrete salary floor, \
-equity threshold, timeline) — not vague advice.
+3. The recommended_target in market_analysis may be numeric only when the supplied target \
+range or market evidence supports it. Otherwise write "Insufficient market data".
+4. The walk_away_point may include a number only when the candidate supplied that \
+non-negotiable; otherwise state that the candidate must choose it.
 5. Pushback scenarios must cover the 2-3 most likely objections for this specific \
 company type and role, with a concrete response script for each.
-6. Alternative asks must list realistic options with a specific dollar value or range.
+6. Preserve the supplied currency. Do not assign a monetary value to alternative asks unless \
+the input supports it; use "Not specified" when it does not.
 7. MINIMUM ARRAY LENGTHS (non-negotiable): pushback_responses ≥ 3 items, \
 alternative_asks ≥ 3 items, dos ≥ 4 items, donts ≥ 4 items.
 
@@ -85,7 +89,7 @@ Return your response as JSON with this exact structure:
     "market_analysis": {{
         "salary_assessment": "Specific assessment of the offered salary vs market for this role/location",
         "market_position": "Where this offer falls — below/at/above market with context",
-        "recommended_target": "Specific counter offer amount (e.g., $145,000)",
+        "recommended_target": "Supported counter amount/range in the supplied currency, or 'Insufficient market data'",
         "negotiation_room": "Estimated negotiation room with reasoning",
         "leverage_assessment": "Honest assessment of candidate's negotiating leverage"
     }},
@@ -111,7 +115,7 @@ Return your response as JSON with this exact structure:
     "alternative_asks": [
         {{
             "item": "Specific benefit to negotiate (e.g., Signing Bonus)",
-            "value": "Dollar range (e.g., $10,000–$20,000)",
+            "value": "Supported value in the supplied currency, or 'Not specified'",
             "script": "Word-for-word ask for this alternative",
             "likelihood": "high/medium/low"
         }}
@@ -138,7 +142,7 @@ Return your response as JSON with this exact structure:
 class SalaryCoachAgent:
     """
     Agent for generating salary negotiation strategies and scripts.
-    
+
     Provides personalized negotiation guidance based on job offer,
     candidate profile, and market conditions.
     """
@@ -174,7 +178,7 @@ class SalaryCoachAgent:
     ) -> Dict[str, Any]:
         """
         Generate a comprehensive salary negotiation strategy.
-        
+
         Args:
             job_title: Position title
             company_name: Name of the company
@@ -197,65 +201,90 @@ class SalaryCoachAgent:
             non_negotiables: Deal breakers
             style_preference: Preferred negotiation style
             user_api_key: Optional user API key for BYOK mode
-            
+
         Returns:
             Dict containing negotiation strategy and scripts
         """
         self._current_user_api_key = user_api_key
-        
+
         try:
             # Initialize Gemini client
             self.gemini_client = await get_gemini_client()
-            
+
             # Format inputs with defaults
             location_str = location or "Not specified"
             company_size_str = company_size or "Not specified"
             industry_str = industry or "Not specified"
             offered_benefits_str = offered_benefits or "Standard benefits"
             current_salary_str = current_salary or "Not disclosed"
-            achievements_str = ", ".join(achievements) if achievements else "Not specified"
-            unique_value_str = ", ".join(unique_value) if unique_value else "Not specified"
+            achievements_str = (
+                ", ".join(achievements) if achievements else "Not specified"
+            )
+            unique_value_str = (
+                ", ".join(unique_value) if unique_value else "Not specified"
+            )
             other_offers_str = other_offers or "None disclosed"
             urgency_str = urgency or "Normal timeline"
-            target_range_str = target_range or "Market rate"
-            market_info_str = market_info or "Use general market knowledge"
-            priority_areas_str = ", ".join(priority_areas) if priority_areas else "Base salary"
-            flexibility_areas_str = ", ".join(flexibility_areas) if flexibility_areas else "Open to discussion"
-            non_negotiables_str = ", ".join(non_negotiables) if non_negotiables else "None specified"
+            target_range_str = (
+                target_range or "Not specified; do not calculate a target"
+            )
+            market_info_str = (
+                market_info or "No market data supplied; do not estimate market rates"
+            )
+            priority_areas_str = (
+                ", ".join(priority_areas) if priority_areas else "Base salary"
+            )
+            flexibility_areas_str = (
+                ", ".join(flexibility_areas)
+                if flexibility_areas
+                else "Open to discussion"
+            )
+            non_negotiables_str = (
+                ", ".join(non_negotiables) if non_negotiables else "None specified"
+            )
             style_str = style_preference or "Professional and assertive"
-            years_exp_str = str(years_experience) if years_experience is not None else "Not specified"
-            
+            years_exp_str = (
+                str(years_experience)
+                if years_experience is not None
+                else "Not specified"
+            )
+
             # Add additional context if provided
             additional_info = ""
             if additional_context:
-                additional_info = f"\n\nAdditional Context from Candidate:\n{additional_context}"
-            
+                additional_info = (
+                    f"\n\nAdditional Context from Candidate:\n{additional_context}"
+                )
+
             # Build prompt
-            prompt = NEGOTIATION_PROMPT.format(
-                job_title=job_title,
-                company_name=company_name,
-                company_size=company_size_str,
-                industry=industry_str,
-                location=location_str,
-                offered_salary=offered_salary,
-                offered_benefits=offered_benefits_str,
-                years_experience=years_exp_str,
-                current_salary=current_salary_str,
-                achievements=achievements_str,
-                unique_value=unique_value_str,
-                other_offers=other_offers_str,
-                urgency=urgency_str,
-                target_range=target_range_str,
-                market_info=market_info_str,
-                priority_areas=priority_areas_str,
-                flexibility_areas=flexibility_areas_str,
-                non_negotiables=non_negotiables_str,
-                style_preference=style_str,
-            ) + additional_info
-            
+            prompt = (
+                NEGOTIATION_PROMPT.format(
+                    job_title=job_title,
+                    company_name=company_name,
+                    company_size=company_size_str,
+                    industry=industry_str,
+                    location=location_str,
+                    offered_salary=offered_salary,
+                    offered_benefits=offered_benefits_str,
+                    years_experience=years_exp_str,
+                    current_salary=current_salary_str,
+                    achievements=achievements_str,
+                    unique_value=unique_value_str,
+                    other_offers=other_offers_str,
+                    urgency=urgency_str,
+                    target_range=target_range_str,
+                    market_info=market_info_str,
+                    priority_areas=priority_areas_str,
+                    flexibility_areas=flexibility_areas_str,
+                    non_negotiables=non_negotiables_str,
+                    style_preference=style_str,
+                )
+                + additional_info
+            )
+
             structured_logger.log_agent_start("salary_coach", None)
             start_time = datetime.now(timezone.utc)
-            
+
             # Generate response
             response = await self.gemini_client.generate(
                 prompt=prompt,
@@ -263,30 +292,35 @@ class SalaryCoachAgent:
                 temperature=LLM_TEMPERATURE,
                 max_tokens=LLM_MAX_TOKENS,
                 user_api_key=self._current_user_api_key,
+                structured_output=True,
             )
-            
-            duration_ms = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
-            
+
+            duration_ms = (
+                datetime.now(timezone.utc) - start_time
+            ).total_seconds() * 1000
+
             # Check for filtered content
             if response.get("filtered"):
                 structured_logger.log_agent_complete("salary_coach", None, duration_ms)
                 return self._create_filtered_result(response.get("response", ""))
-            
+
             response_text = response.get("response", "")
-            
+
             # Parse JSON response
             parsed = parse_json_from_llm_response(response_text)
-            
+
             if not parsed:
-                logger.error(f"Failed to parse salary coach response: {response_text[:200]}")
+                logger.error(
+                    "Failed to parse salary coach response (%d characters)",
+                    len(response_text),
+                )
                 structured_logger.log_agent_error(
-                    "salary_coach", None, 
-                    Exception("JSON parse failed"), duration_ms
+                    "salary_coach", None, Exception("JSON parse failed"), duration_ms
                 )
                 return self._create_parse_error_result(response_text, job_title)
-            
+
             structured_logger.log_agent_complete("salary_coach", None, duration_ms)
-            
+
             return {
                 "market_analysis": parsed.get("market_analysis", {}),
                 "strategy_overview": parsed.get("strategy_overview", {}),
@@ -304,9 +338,11 @@ class SalaryCoachAgent:
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "version": "1.0",
             }
-            
+
         except Exception as e:
-            logger.error(f"Salary negotiation strategy generation failed: {e}", exc_info=True)
+            logger.error(
+                f"Salary negotiation strategy generation failed: {e}", exc_info=True
+            )
             raise
 
     def _create_filtered_result(self, filter_message: str) -> Dict[str, Any]:
@@ -317,7 +353,7 @@ class SalaryCoachAgent:
                 "approach": "Content generation was filtered",
                 "key_messages": [],
                 "timing_recommendation": "Please try again",
-                "confidence_level": "low"
+                "confidence_level": "low",
             },
             "main_script": {},
             "pushback_responses": [],
@@ -340,21 +376,19 @@ class SalaryCoachAgent:
         return {
             "market_analysis": {},
             "strategy_overview": {
-                "approach": "See raw analysis below",
+                "approach": "The generated response could not be validated. Please try again.",
                 "key_messages": [],
-                "timing_recommendation": "Review the analysis",
-                "confidence_level": "low"
+                "timing_recommendation": "Regenerate before using this strategy",
+                "confidence_level": "low",
             },
-            "main_script": {
-                "opening": raw_response[:2000] if len(raw_response) > 2000 else raw_response
-            },
+            "main_script": {},
             "pushback_responses": [],
             "alternative_asks": [],
             "email_template": {},
             "dos_and_donts": {"dos": [], "donts": []},
             "red_flags": [],
             "walk_away_point": "",
-            "final_tips": ["Review the raw analysis for guidance"],
+            "final_tips": ["Regenerate the strategy before negotiating"],
             "job_title": job_title,
             "parse_error": True,
             "generated_at": datetime.now(timezone.utc).isoformat(),

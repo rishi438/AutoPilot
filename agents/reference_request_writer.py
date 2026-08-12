@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, List
 
 from utils.llm_client import get_gemini_client
 from utils.llm_parsing import parse_json_from_llm_response
+from utils.llm_prompting import build_llm_system_prompt
 from utils.logging_config import get_structured_logger
 
 # =============================================================================
@@ -20,18 +21,20 @@ structured_logger = get_structured_logger(__name__)
 
 # LLM Configuration
 LLM_TEMPERATURE = 0.7
-LLM_MAX_TOKENS = 16000  # Unified agent output cap
+LLM_MAX_TOKENS = 1024
 
 # =============================================================================
 # PROMPT TEMPLATES
 # =============================================================================
 
-SYSTEM_CONTEXT = """You are an expert career coach specializing in professional networking
-and communication. You help job seekers craft thoughtful, respectful reference requests that
-maintain professional relationships while effectively asking for support. Your emails balance
-professionalism with warmth and make it easy for the reference to say yes (or gracefully decline).
-NEVER use placeholder brackets like [Your Name], [Reference Name], [Company], [Position], or
-any fill-in-the-blank markers. Write complete, ready-to-send text."""
+SYSTEM_CONTEXT = build_llm_system_prompt(
+    "Professional networking editor",
+    "Draft a respectful reference-request email using the supplied relationship and job facts.",
+    extra_rules=(
+        "Write complete, ready-to-send prose without placeholders or fill-in-the-blank markers.",
+        "Omit optional company, role, timing, or accomplishment details when unsupported.",
+    ),
+)
 
 REFERENCE_REQUEST_PROMPT = """Generate a professional email requesting someone to be a job reference.
 
@@ -74,8 +77,8 @@ Return your response as JSON with this exact structure:
 class ReferenceRequestWriterAgent:
     """
     Agent for generating professional reference request emails.
-    
-    Creates thoughtful, respectful requests that maintain professional 
+
+    Creates thoughtful, respectful requests that maintain professional
     relationships while effectively asking for support in the job search.
     """
 
@@ -99,7 +102,7 @@ class ReferenceRequestWriterAgent:
     ) -> Dict[str, Any]:
         """
         Generate a professional reference request email.
-        
+
         Args:
             reference_name: Name of the person to request as reference
             reference_relationship: Relationship (former manager, colleague, etc.)
@@ -111,30 +114,36 @@ class ReferenceRequestWriterAgent:
             time_since_contact: Optional time since last contact
             user_name: Optional sender's name
             user_api_key: Optional user API key for BYOK mode
-            
+
         Returns:
             Dict containing subject_line, email_body, talking_points,
             follow_up_timeline, tips
         """
         self._current_user_api_key = user_api_key
-        
+
         try:
             # Initialize Gemini client
             self.gemini_client = await get_gemini_client()
-            
+
             # Format optional inputs
-            reference_company_str = reference_company if reference_company else "Not specified"
-            years_str = str(years_worked_together) if years_worked_together else "Not specified"
+            reference_company_str = (
+                reference_company if reference_company else "Not specified"
+            )
+            years_str = (
+                str(years_worked_together) if years_worked_together else "Not specified"
+            )
             target_job_str = target_job_title if target_job_title else "Not specified"
             target_company_str = target_company if target_company else "Not specified"
             accomplishments_str = (
-                ", ".join(key_accomplishments) 
-                if key_accomplishments 
+                ", ".join(key_accomplishments)
+                if key_accomplishments
                 else "Not specified"
             )
-            time_since_str = time_since_contact if time_since_contact else "Not specified"
+            time_since_str = (
+                time_since_contact if time_since_contact else "Not specified"
+            )
             user_name_str = user_name if user_name else "the applicant"
-            
+
             # Build prompt
             prompt = REFERENCE_REQUEST_PROMPT.format(
                 reference_name=reference_name,
@@ -147,10 +156,10 @@ class ReferenceRequestWriterAgent:
                 time_since_contact=time_since_str,
                 user_name=user_name_str,
             )
-            
+
             structured_logger.log_agent_start("reference_request_writer", None)
             start_time = datetime.now(timezone.utc)
-            
+
             # Generate response
             response = await self.gemini_client.generate(
                 prompt=prompt,
@@ -158,46 +167,58 @@ class ReferenceRequestWriterAgent:
                 temperature=LLM_TEMPERATURE,
                 max_tokens=LLM_MAX_TOKENS,
                 user_api_key=self._current_user_api_key,
+                structured_output=True,
             )
-            
-            duration_ms = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
-            
+
+            duration_ms = (
+                datetime.now(timezone.utc) - start_time
+            ).total_seconds() * 1000
+
             # Check for filtered content
             if response.get("filtered"):
-                structured_logger.log_agent_complete("reference_request_writer", None, duration_ms)
-                return self._create_filtered_result(response.get("response", ""), target_job_str)
-            
+                structured_logger.log_agent_complete(
+                    "reference_request_writer", None, duration_ms
+                )
+                return self._create_filtered_result(
+                    response.get("response", ""), target_job_str
+                )
+
             response_text = response.get("response", "")
-            
+
             # Parse JSON response
             parsed = parse_json_from_llm_response(response_text)
-            
+
             if not parsed:
-                logger.error(f"Failed to parse reference request response: {response_text[:200]}")
+                logger.error(
+                    "Failed to parse reference request response (%d characters)",
+                    len(response_text),
+                )
                 structured_logger.log_agent_error(
-                    "reference_request_writer", None,
-                    Exception("JSON parse failed"), duration_ms
+                    "reference_request_writer",
+                    None,
+                    Exception("JSON parse failed"),
+                    duration_ms,
                 )
                 return self._create_parse_error_result(response_text, target_job_str)
-            
-            structured_logger.log_agent_complete("reference_request_writer", None, duration_ms)
-            
+
+            structured_logger.log_agent_complete(
+                "reference_request_writer", None, duration_ms
+            )
+
             return {
                 "subject_line": parsed.get(
-                    "subject_line",
-                    f"Reference Request - {target_job_str}"
+                    "subject_line", f"Reference Request - {target_job_str}"
                 ),
                 "email_body": parsed.get("email_body", ""),
                 "talking_points": parsed.get("talking_points", []),
                 "follow_up_timeline": parsed.get(
-                    "follow_up_timeline",
-                    "Follow up in 1 week if no response"
+                    "follow_up_timeline", "Follow up in 1 week if no response"
                 ),
                 "tips": parsed.get("tips", []),
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "version": "1.0",
             }
-            
+
         except Exception as e:
             logger.error(f"Reference request generation failed: {e}", exc_info=True)
             raise
@@ -224,7 +245,7 @@ class ReferenceRequestWriterAgent:
         """Create a result when JSON parsing failed."""
         return {
             "subject_line": f"Reference Request - {target_job}",
-            "email_body": raw_response if len(raw_response) < 2000 else raw_response[:2000],
+            "email_body": "The generated response could not be validated. Please try again.",
             "talking_points": [],
             "follow_up_timeline": "Follow up in 1 week if no response",
             "tips": [],

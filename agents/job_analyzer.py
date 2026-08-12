@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional, List
 from utils.text_processing import clean_text
 from workflows.state_schema import WorkflowState, InputMethod, JobAnalysisResult
 from utils.llm_parsing import parse_json_from_llm_response
+from utils.llm_prompting import build_llm_system_prompt
 from utils.cache import (
     get_cached_job_analysis,
     cache_job_analysis,
@@ -68,51 +69,35 @@ def _normalize_string_list(val: Any, *, split_lines: bool = False) -> List[str]:
         return [s]
     return []
 
+
 # =============================================================================
 # CONSTANTS
 # =============================================================================
 
 # Content processing constraints
 MIN_JOB_TEXT_LENGTH: int = 50  # Minimum characters for valid job posting
-MAX_CONTENT_LENGTH_FOR_AI: int = 50000  # Align with extension cap / cache key normalization
+MAX_CONTENT_LENGTH_FOR_AI: int = (
+    50000  # Align with extension cap / cache key normalization
+)
 
 # AI processing parameters
 AI_TEMPERATURE: float = 0.1  # Low temperature for consistent extraction
-AI_MAX_TOKENS: int = 16000  # Aligned with unified agent output cap
+AI_MAX_TOKENS: int = 4096
 
 # =============================================================================
 # PROMPTS
 # =============================================================================
 
-AI_SYSTEM_CONTEXT: str = """You are an expert job posting analyst with 15+ years of experience in HR, recruiting, and ATS systems.
-
-## YOUR EXPERTISE:
-
-**Job Posting Analysis:**
-- You can extract structured data from any job posting format
-- You understand industry-specific terminology across all sectors
-- You recognize implicit requirements that aren't explicitly stated
-- You know the difference between "required" and "nice-to-have" qualifications
-
-**ATS Knowledge:**
-- You understand how Applicant Tracking Systems parse job postings
-- You know which keywords recruiters search for
-- You can identify ATS-optimized terms vs. casual language
-- You understand keyword variations (e.g., "JS" = "JavaScript")
-
-**Industry Intelligence:**
-- You recognize company sizes from context clues
-- You understand salary ranges by role and location
-- You can classify roles accurately across industries
-- You identify remote vs. hybrid vs. onsite from subtle cues
-
-## YOUR PRINCIPLES:
-- Extract EXACTLY what's stated - don't infer unless obvious
-- Be PRECISE with skills - "Python" and "Python 3" are different
-- Distinguish REQUIRED vs PREFERRED qualifications carefully
-- When uncertain, use null rather than guessing
-- Capture ALL skills mentioned, even in passing
-- Identify HIDDEN requirements (e.g., "fast-paced" = adaptability needed)"""
+AI_SYSTEM_CONTEXT: str = build_llm_system_prompt(
+    "Profession-neutral job-posting extractor",
+    "Extract the requested structured fields from the supplied job posting.",
+    extra_rules=(
+        "Extract only explicitly stated facts; do not infer hidden requirements, company details, or market data.",
+        "Distinguish required from preferred qualifications using the posting's own wording.",
+        "Preserve exact job titles, skill names, dates, and compensation units when present.",
+        "Use null or an empty list whenever the posting does not support a field.",
+    ),
+)
 
 JOB_ANALYSIS_PROMPT: str = """Analyze this job posting and extract ALL structured information.
 
@@ -199,7 +184,7 @@ Extract information into this EXACT JSON structure. Output ONLY valid JSON, no e
 4. For ATS keywords, include variations (React, React.js, ReactJS)
 5. Set to null if information is not present - don't guess
 6. For salary, extract numbers only if explicitly stated
-7. Look for hidden skills in responsibilities section
+7. Do not convert responsibilities into unstated required skills
 8. Include soft skills mentioned in "ideal candidate" sections
 9. responsibilities MUST be a JSON array of strings — never one long prose paragraph as a substitute. Break "What you'll do" into one element per bullet or discrete duty (minimum 3 items when the posting lists multiple duties).
 10. company_name: use the employer named in the posting header, "Company:", or overview. For confidential or recruiter posts with no named legal entity, use null — do not invent a company (the dashboard will show "Unknown").
@@ -227,7 +212,14 @@ def _validate_posted_date(date_str: Optional[str]) -> Optional[str]:
     try:
         raw = str(date_str).strip()
         parsed = None
-        for fmt in ("%Y-%m-%d", "%Y-%m", "%B %d, %Y", "%b %d, %Y", "%m/%d/%Y", "%d/%m/%Y"):
+        for fmt in (
+            "%Y-%m-%d",
+            "%Y-%m",
+            "%B %d, %Y",
+            "%b %d, %Y",
+            "%m/%d/%Y",
+            "%d/%m/%Y",
+        ):
             try:
                 parsed = datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
                 break
@@ -329,28 +321,45 @@ class JobAnalyzerAgent:
 
             if not lock_claimed:
                 import asyncio as _asyncio
-                logger.info("Compute lock busy for job analysis, waiting for cache population")
+
+                logger.info(
+                    "Compute lock busy for job analysis, waiting for cache population"
+                )
                 for _ in range(6):  # up to ~3 seconds
                     await _asyncio.sleep(0.5)
-                    cached_analysis = await get_cached_job_analysis(job_url=job_url, job_content=job_content)
+                    cached_analysis = await get_cached_job_analysis(
+                        job_url=job_url, job_content=job_content
+                    )
                     if cached_analysis:
                         logger.info("Using cached job analysis result (lock wait)")
                         state["job_analysis"] = cached_analysis
                         state["job_analysis"]["from_cache"] = True
                         return state
-                logger.warning("Compute lock wait timed out for job analysis, computing independently")
+                logger.warning(
+                    "Compute lock wait timed out for job analysis, computing independently"
+                )
 
             try:
                 # Process input based on input method
-                if input_method in (InputMethod.FILE, InputMethod.MANUAL, InputMethod.EXTENSION):
+                if input_method in (
+                    InputMethod.FILE,
+                    InputMethod.MANUAL,
+                    InputMethod.EXTENSION,
+                ):
                     # For file, manual text, and extension-extracted content
                     if not job_content:
                         raise ValueError(
                             "Job content is required for file/manual/extension input method"
                         )
                     # For extension, use "extension" as source type
-                    source_type = "extension" if input_method == InputMethod.EXTENSION else "manual"
-                    analysis_result = await self._process_manual_input(job_content, source_type)
+                    source_type = (
+                        "extension"
+                        if input_method == InputMethod.EXTENSION
+                        else "manual"
+                    )
+                    analysis_result = await self._process_manual_input(
+                        job_content, source_type
+                    )
                 else:
                     raise ValueError(f"Unknown job input method: {input_method}")
 
@@ -449,6 +458,7 @@ class JobAnalyzerAgent:
                 temperature=AI_TEMPERATURE,
                 max_tokens=AI_MAX_TOKENS,
                 user_api_key=self._current_user_api_key,
+                structured_output=True,
             )
 
             # Use our shared utility function to parse JSON from LLM response
@@ -486,7 +496,9 @@ class JobAnalyzerAgent:
                 is_student_position=parsed_data.get("is_student_position"),
                 company_size=parsed_data.get("company_size"),
                 # Skills and qualifications
-                required_skills=get_list("required_skills"),
+                required_skills=_normalize_string_list(
+                    parsed_data.get("required_skills")
+                ),
                 soft_skills=_normalize_string_list(parsed_data.get("soft_skills")),
                 required_qualifications=_normalize_string_list(
                     parsed_data.get("required_qualifications")
@@ -496,12 +508,14 @@ class JobAnalyzerAgent:
                 ),
                 education_requirements=parsed_data.get("education_requirements") or {},
                 years_experience_required=parsed_data.get("years_experience_required"),
-                language_requirements=get_list("language_requirements"),
+                language_requirements=_normalize_string_list(
+                    parsed_data.get("language_requirements")
+                ),
                 # Classification and keywords
                 industry=parsed_data.get("industry"),
                 role_classification=parsed_data.get("role_classification"),
-                keywords=get_list("keywords"),
-                ats_keywords=get_list("ats_keywords"),
+                keywords=_normalize_string_list(parsed_data.get("keywords")),
+                ats_keywords=_normalize_string_list(parsed_data.get("ats_keywords")),
                 # Additional details
                 visa_sponsorship=parsed_data.get("visa_sponsorship"),
                 security_clearance=parsed_data.get("security_clearance"),

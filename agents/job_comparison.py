@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, List
 
 from utils.llm_client import get_gemini_client
 from utils.llm_parsing import parse_json_from_llm_response
+from utils.llm_prompting import build_llm_system_prompt
 from utils.logging_config import get_structured_logger
 
 # =============================================================================
@@ -20,18 +21,21 @@ structured_logger = get_structured_logger(__name__)
 
 # LLM Configuration
 LLM_TEMPERATURE = 0.5
-LLM_MAX_TOKENS = 16000  # Unified agent output cap
+LLM_MAX_TOKENS = 3000
 
 # =============================================================================
 # PROMPT TEMPLATES
 # =============================================================================
 
-SYSTEM_CONTEXT = """You are an expert career advisor specializing in helping job seekers 
-make informed decisions about job opportunities. You analyze multiple job opportunities 
-objectively and provide clear, actionable comparisons based on various factors including 
-compensation, growth potential, work-life balance, and career trajectory.
-
-YEARS OF EXPERIENCE RULE: The "Years of Experience" field is the candidate's TOTAL career years — NEVER use it as domain-specific experience. When referencing experience in a specific skill or domain, only do so if it can be derived from their actual work history. If uncertain, say "experience with [skill]" without claiming a specific year count."""
+SYSTEM_CONTEXT = build_llm_system_prompt(
+    "Profession-neutral career decision analyst",
+    "Compare the supplied jobs against the candidate's stated goals and priorities.",
+    extra_rules=(
+        "Compare only supported dimensions; mark missing compensation, culture, growth, or balance data as unknown.",
+        "Treat total career years as domain-specific experience only when work history supports that claim.",
+        "Refer to roles by their supplied title and company, never by invented identifiers.",
+    ),
+)
 
 COMPARISON_PROMPT = """Compare the following job opportunities and help the user decide which to pursue.
 
@@ -125,7 +129,7 @@ Description/Requirements:
 class JobComparisonAgent:
     """
     Agent for comparing multiple job opportunities side-by-side.
-    
+
     Analyzes jobs across multiple dimensions and provides objective
     comparison with recommendations based on user priorities.
     """
@@ -143,29 +147,29 @@ class JobComparisonAgent:
     ) -> Dict[str, Any]:
         """
         Compare multiple job opportunities.
-        
+
         Args:
-            jobs: List of job dictionaries with title, company, location, 
+            jobs: List of job dictionaries with title, company, location,
                   salary, job_type, remote_policy, description
-            user_context: Optional dict with career_goals, priorities, 
+            user_context: Optional dict with career_goals, priorities,
                          experience_years, work_style, location_preference,
                          salary_expectations
             user_api_key: Optional user API key for BYOK mode
-            
+
         Returns:
             Dict containing comparison analysis and recommendation
         """
         self._current_user_api_key = user_api_key
-        
+
         if len(jobs) < 2:
             raise ValueError("At least 2 jobs required for comparison")
         if len(jobs) > 3:
             raise ValueError("Maximum 3 jobs can be compared at once")
-        
+
         try:
             # Initialize Gemini client
             self.gemini_client = await get_gemini_client()
-            
+
             # Build jobs section
             jobs_section = ""
             for i, job in enumerate(jobs, 1):
@@ -177,9 +181,11 @@ class JobComparisonAgent:
                     salary=job.get("salary", "Not specified"),
                     job_type=job.get("job_type", "Full-time"),
                     remote_policy=job.get("remote_policy", "Not specified"),
-                    description=job.get("description", "No description provided")[:5000],
+                    description=job.get("description", "No description provided")[
+                        :5000
+                    ],
                 )
-            
+
             # Extract user context
             ctx = user_context or {}
             career_goals = ctx.get("career_goals", "Not specified")
@@ -188,7 +194,7 @@ class JobComparisonAgent:
             work_style = ctx.get("work_style", "Not specified")
             location_preference = ctx.get("location_preference", "Flexible")
             salary_expectations = ctx.get("salary_expectations", "Not specified")
-            
+
             # Build prompt
             prompt = COMPARISON_PROMPT.format(
                 jobs_section=jobs_section,
@@ -199,10 +205,10 @@ class JobComparisonAgent:
                 location_preference=location_preference,
                 salary_expectations=salary_expectations,
             )
-            
+
             structured_logger.log_agent_start("job_comparison", None)
             start_time = datetime.now(timezone.utc)
-            
+
             # Generate response
             response = await self.gemini_client.generate(
                 prompt=prompt,
@@ -210,34 +216,43 @@ class JobComparisonAgent:
                 temperature=LLM_TEMPERATURE,
                 max_tokens=LLM_MAX_TOKENS,
                 user_api_key=self._current_user_api_key,
+                structured_output=True,
             )
-            
-            duration_ms = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
-            
+
+            duration_ms = (
+                datetime.now(timezone.utc) - start_time
+            ).total_seconds() * 1000
+
             # Check for filtered content
             if response.get("filtered"):
-                structured_logger.log_agent_complete("job_comparison", None, duration_ms)
+                structured_logger.log_agent_complete(
+                    "job_comparison", None, duration_ms
+                )
                 return self._create_filtered_result(response.get("response", ""))
-            
+
             response_text = response.get("response", "")
-            
+
             # Parse JSON response
             parsed = parse_json_from_llm_response(response_text)
-            
+
             if not parsed:
-                logger.error(f"Failed to parse job comparison response: {response_text[:200]}")
+                logger.error(
+                    "Failed to parse job comparison response (%d characters)",
+                    len(response_text),
+                )
                 structured_logger.log_agent_error(
-                    "job_comparison", None, 
-                    Exception("JSON parse failed"), duration_ms
+                    "job_comparison", None, Exception("JSON parse failed"), duration_ms
                 )
                 return self._create_parse_error_result(response_text, jobs)
-            
+
             structured_logger.log_agent_complete("job_comparison", None, duration_ms)
-            
+
             return {
                 "executive_summary": parsed.get("executive_summary", ""),
                 "recommended_job": parsed.get("recommended_job", "No clear winner"),
-                "recommendation_confidence": parsed.get("recommendation_confidence", "medium"),
+                "recommendation_confidence": parsed.get(
+                    "recommendation_confidence", "medium"
+                ),
                 "recommendation_reasoning": parsed.get("recommendation_reasoning", ""),
                 "jobs_analysis": parsed.get("jobs_analysis", []),
                 "comparison_matrix": parsed.get("comparison_matrix", {}),
@@ -248,7 +263,7 @@ class JobComparisonAgent:
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "version": "1.0",
             }
-            
+
         except Exception as e:
             logger.error(f"Job comparison failed: {e}", exc_info=True)
             raise
@@ -276,15 +291,15 @@ class JobComparisonAgent:
     ) -> Dict[str, Any]:
         """Create a result when JSON parsing failed."""
         return {
-            "executive_summary": "Analysis completed but formatting error occurred.",
-            "recommended_job": "See raw analysis",
+            "executive_summary": "The generated comparison could not be validated. Please try again.",
+            "recommended_job": "Unable to determine",
             "recommendation_confidence": "low",
-            "recommendation_reasoning": raw_response[:2000] if len(raw_response) > 2000 else raw_response,
+            "recommendation_reasoning": "No recommendation is available from an invalid response.",
             "jobs_analysis": [],
             "comparison_matrix": {},
             "decision_factors": [],
             "questions_to_ask": [],
-            "final_advice": "Review the raw analysis above for insights.",
+            "final_advice": "Regenerate the comparison before making a decision.",
             "jobs_compared": len(jobs),
             "parse_error": True,
             "generated_at": datetime.now(timezone.utc).isoformat(),

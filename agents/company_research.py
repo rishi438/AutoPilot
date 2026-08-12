@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 from workflows.state_schema import WorkflowState, CompanyResearchResult
 from utils.llm_parsing import parse_json_from_llm_response
+from utils.llm_prompting import build_llm_system_prompt
 from utils.cache import (
     get_cached_company_research,
     cache_company_research,
@@ -23,47 +24,28 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 # LLM settings
 LLM_TEMPERATURE: float = 0.3  # Factual but not too rigid
-LLM_MAX_TOKENS: int = 16000  # Aligned with unified agent output cap
+LLM_MAX_TOKENS: int = 3000
 
 # =============================================================================
 # PROMPTS
 # =============================================================================
 
-SYSTEM_CONTEXT: str = """You are an elite company research analyst specializing in helping job seekers prepare for applications and interviews.
-
-## YOUR EXPERTISE:
-
-**Company Intelligence:**
-- You have deep knowledge of major companies across all industries
-- You understand corporate structures, cultures, and hiring practices
-- You know what information matters most for job applicants
-- You can identify company values and culture from public information
-
-**Interview Preparation:**
-- You know typical interview processes for different company types
-- You understand what hiring managers look for at different companies
-- You can predict common interview questions based on company culture
-- You know insider tips that help candidates stand out
-
-**Strategic Analysis:**
-- You understand competitive landscapes and market positioning
-- You can identify company strengths and challenges
-- You know how to frame company knowledge in interviews
-- You understand what cultural fit means at different organizations
-
-## YOUR PRINCIPLES:
-- Provide ACCURATE information based on your knowledge
-- Be SPECIFIC with details - avoid vague generalizations
-- Focus on what's USEFUL for job applicants
-- If you're uncertain about something, say so clearly
-- Provide ACTIONABLE insights, not just facts
-- Think about what would help someone ACE their interview"""
+SYSTEM_CONTEXT: str = build_llm_system_prompt(
+    "Grounded company-information analyst",
+    "Organize supplied company and job facts into applicant-focused research fields.",
+    extra_rules=(
+        "Do not use model memory as evidence for company facts, policies, leadership, ratings, or recent events.",
+        "The company name alone does not support factual claims; mark unsupplied fields unknown.",
+        "Treat current or recent claims as unknown unless the input supplies dated evidence.",
+        "General preparation advice must be labeled as advice rather than company-specific fact.",
+    ),
+)
 
 COMPANY_RESEARCH_PROMPT: str = """Research this company comprehensively for a job applicant.
 
-COMPANY NAME: {company_name}
+COMPANY NAME (identifier only, not factual evidence): {company_name}
 
-Provide detailed, accurate information about this company. If you're not certain about specific details, indicate that clearly. Focus on information that would help a job applicant prepare for their application and interview.
+Use only company or job facts supplied in this request. Do not rely on model memory. For unsupported factual fields, return "Unknown", null, or an empty list as allowed by the schema. You may provide general applicant questions only where the schema permits advice.
 
 Respond with ONLY valid JSON in this exact structure:
 
@@ -89,7 +71,7 @@ Respond with ONLY valid JSON in this exact structure:
         "work_environment": "<description of what it's like to work there>",
         "employee_benefits": ["<notable benefit 1>", "<benefit 2>", "<benefit 3>"],
         "diversity_inclusion": "<their approach to D&I>",
-        "remote_work_policy": "<current remote/hybrid/office policy>",
+        "remote_work_policy": "<supplied current policy or 'Unknown'>",
         "employee_satisfaction": "<If an employee review site rating is known, start with it (e.g. '4.2/5'). Otherwise write: 'Insufficient public data — in your interview, ask about work-life balance, team autonomy, and growth opportunities.' Be direct and actionable, never just hedge.>",
         "culture_keywords": ["<keyword that describes culture>", "<keyword 2>"]
     }},
@@ -127,7 +109,7 @@ Respond with ONLY valid JSON in this exact structure:
         "competitive_advantages": ["<advantage 1>", "<advantage 2>"],
         "market_challenges": ["<challenge they face>", "<another challenge>"],
         "growth_opportunities": ["<growth area 1 — must be distinct from key_products_services items>", "<growth area 2>"],
-        "recent_developments": "<Key recent news — funding rounds, product launches, leadership changes, partnerships, controversies. If uncertain about recency say so. This helps candidates impress interviewers with current knowledge.>"
+        "recent_developments": "<dated development supplied in the input or 'Unknown'>"
     }},
 
     "application_insights": {{
@@ -162,7 +144,7 @@ Respond with ONLY valid JSON in this exact structure:
     }}
 }}
 
-Be thorough, specific, and focus on information that will help someone succeed in their job application. If the company is not well-known, provide what you can and clearly indicate uncertainty."""
+Be concise and useful. Never fill an unsupported factual field from general knowledge."""
 
 
 def _has_usable_company_name(name: Optional[str]) -> bool:
@@ -280,7 +262,9 @@ class CompanyResearchAgent:
             company_name = str(raw_company).strip()
 
             # Check cache first
-            cached_result: Optional[Dict[str, Any]] = await get_cached_company_research(company_name)
+            cached_result: Optional[Dict[str, Any]] = await get_cached_company_research(
+                company_name
+            )
             if cached_result:
                 logger.info(f"Using cached research for {company_name}")
                 state["company_research"] = cached_result
@@ -293,7 +277,10 @@ class CompanyResearchAgent:
                 if not lock_claimed:
                     # Another task is already computing — wait briefly and retry cache
                     import asyncio as _asyncio
-                    logger.info(f"Compute lock busy for {company_name}, waiting for cache population")
+
+                    logger.info(
+                        f"Compute lock busy for {company_name}, waiting for cache population"
+                    )
                     for _ in range(6):  # up to ~3 seconds
                         await _asyncio.sleep(0.5)
                         cached_result = await get_cached_company_research(company_name)
@@ -301,7 +288,9 @@ class CompanyResearchAgent:
                             state["company_research"] = cached_result
                             return state
                     # Timeout waiting — fall through and compute anyway
-                    logger.warning(f"Compute lock wait timed out for {company_name}, computing independently")
+                    logger.warning(
+                        f"Compute lock wait timed out for {company_name}, computing independently"
+                    )
 
                 try:
                     # Perform fresh research with Gemini
@@ -354,12 +343,14 @@ class CompanyResearchAgent:
                     "The listing does not state a company name (common for founding teams, confidential searches, "
                     "or short descriptions).\n"
                     "Do NOT invent a company name, website, or leadership that is not implied by the text.\n"
-                    "Fill the JSON with: (1) clear \"employer not disclosed\" language in company_overview; "
+                    'Fill the JSON with: (1) clear "employer not disclosed" language in company_overview; '
                     "(2) interview and application guidance tailored to THIS role, industry, and stage "
                     "using the job context only.\n\n"
                     f"### JOB CONTEXT\n{ctx}\n\n---\n\n"
                 )
-                prompt = prefix + COMPANY_RESEARCH_PROMPT.format(company_name=company_name)
+                prompt = prefix + COMPANY_RESEARCH_PROMPT.format(
+                    company_name=company_name
+                )
             else:
                 # Build the prompt
                 prompt = COMPANY_RESEARCH_PROMPT.format(company_name=company_name)
@@ -371,6 +362,7 @@ class CompanyResearchAgent:
                 temperature=LLM_TEMPERATURE,
                 max_tokens=LLM_MAX_TOKENS,
                 user_api_key=self._current_user_api_key,
+                structured_output=True,
             )
 
             # Handle filtered response
@@ -399,7 +391,9 @@ class CompanyResearchAgent:
             return result
 
         except Exception as e:
-            logger.error(f"Error researching company {company_name}: {e}", exc_info=True)
+            logger.error(
+                f"Error researching company {company_name}: {e}", exc_info=True
+            )
             return self._create_fallback_result(company_name, start_time)
 
     def _map_to_result(self, data: Dict[str, Any]) -> CompanyResearchResult:
@@ -481,6 +475,7 @@ class CompanyResearchAgent:
         result.processing_time = (
             datetime.now(timezone.utc) - start_time
         ).total_seconds()
-        result.mission_vision = f"Unable to complete research for {company_name}. Please research manually."
+        result.mission_vision = (
+            f"Unable to complete research for {company_name}. Please research manually."
+        )
         return result
-

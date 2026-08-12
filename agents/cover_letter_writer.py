@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, Optional, Any
 from workflows.state_schema import WorkflowState, CoverLetterResult
+from utils.llm_prompting import build_llm_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -16,59 +17,25 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 LLM_TEMPERATURE: float = 0.5  # Balanced: professional yet engaging
-LLM_MAX_TOKENS: int = 16000  # Aligned with unified agent output cap
+LLM_MAX_TOKENS: int = 1024
 LLM_TIMEOUT: int = 60  # seconds
 
 # =============================================================================
 # PROMPTS
 # =============================================================================
 
-SYSTEM_CONTEXT: str = """You are an elite cover letter writer who has helped thousands of candidates land interviews at top companies including FAANG, Fortune 500, and high-growth startups.
-
-## YOUR EXPERTISE:
-
-**What Makes Cover Letters Work:**
-- You know the difference between cover letters that get read and those that get skipped
-- You understand that hiring managers spend only 30 seconds on most cover letters
-- You know how to hook them in the first sentence and keep them reading
-- You craft letters that feel personal, not templated
-- You demonstrate DOMAIN KNOWLEDGE - if the job is in life sciences, you show curiosity about biology; if in fintech, you understand financial systems
-
-**Strategic Storytelling:**
-- You connect the candidate's experience to the company's SPECIFIC NEEDS from the job posting
-- You address the TOP 3 requirements in the job description directly
-- You turn achievements into compelling narratives that solve the company's problems
-- You address concerns proactively without being defensive
-- You show genuine interest by referencing specific company initiatives, products, or recent news
-
-**Industry Awareness:**
-- You know cover letter conventions vary by industry and company culture
-- You adjust tone from formal (finance, law) to casual (startups, tech)
-- You understand what different hiring managers care about
-- You research and demonstrate knowledge of the SPECIFIC DOMAIN (healthcare, AI, manufacturing, etc.)
-
-**What You MUST Avoid:**
-- Generic opening lines ("I am writing to apply for...", "Forget incremental improvements...")
-- Placeholder text like "[Today's Date]", "[Hiring Manager Name]", "[Company Address]"
-- Repeating the resume verbatim
-- Empty claims without evidence
-- Desperation or over-qualification humility
-- Walls of text - you use white space strategically
-- Outdated references (check the date context provided)
-- Generic statements that could apply to any job
-
-## YOUR PRINCIPLES:
-- First sentence must HOOK them with something SPECIFIC about the role or company
-- Address the #1 job requirement in the first paragraph
-- Every claim must have supporting evidence from their experience
-- Show you know the company - reference their mission, recent news, or specific products
-- Demonstrate genuine curiosity about the DOMAIN the job is in
-- If there's a gap (like missing domain experience), acknowledge it briefly and pivot to transferable skills
-- Be confident but not arrogant
-- End with a specific, confident call to action
-- Keep it to ONE PAGE (300-400 words max)
-- NEVER include placeholder brackets - the letter must be ready to send
-- YEARS OF EXPERIENCE RULE: The "Years of Experience" field is TOTAL career years — NEVER use it as domain-specific experience. When claiming "X years of [skill/domain]" in the letter, derive that number only from the relevant work history entries. If you cannot calculate it, say "experience with [skill]" without a specific year count."""
+SYSTEM_CONTEXT: str = build_llm_system_prompt(
+    "Profession-neutral cover-letter editor",
+    "Write a concise cover letter that connects supplied candidate evidence to the target role.",
+    structured=False,
+    extra_rules=(
+        "Use only supplied candidate, job, and verified company facts; never invent products, news, initiatives, metrics, or achievements.",
+        "When company context is absent, personalize around the role's stated responsibilities instead.",
+        "Treat total career years as domain-specific experience only when dated work history supports that claim.",
+        "Write complete ready-to-send prose without placeholders, markdown, or drafting notes.",
+        "Keep the letter between 300 and 400 words.",
+    ),
+)
 
 COVER_LETTER_PROMPT: str = """Write a compelling, personalized cover letter for this candidate applying to this specific job.
 
@@ -94,9 +61,9 @@ Write a cover letter that will make the hiring manager want to interview this ca
 ## CRITICAL REQUIREMENTS:
 
 ### 1. Opening Hook (MUST be unique and specific)
-- First sentence must reference something SPECIFIC: a company product, recent news, or the exact problem this role solves
+- First sentence must reference a verified company fact or an exact responsibility stated for this role
 - NO generic openings like "I am excited to apply..." or "I am writing to express..."
-- Example good opening: "When I saw that [Company] is building [specific thing from job posting], I knew my experience [specific match] could accelerate that work."
+- Connect that verified role need to one supported candidate experience.
 - The opening should make it clear you understand WHAT this job actually does
 
 ### 2. Address the Core Job Requirements
@@ -110,9 +77,9 @@ Write a cover letter that will make the hiring manager want to interview this ca
 - Use appropriate terminology from the job posting
 
 ### 4. Company-Specific Connection
-- Reference the company's mission, values, or recent initiatives
-- Show WHY this company specifically (not just any company)
-- Connect your values to theirs
+- Reference mission, values, products, or initiatives only when they appear in COMPANY CONTEXT
+- If company facts are unavailable, explain interest using the supplied role and responsibilities
+- Never invent company-specific details to make the letter sound personalized
 
 ### 5. Confident Close
 - End with a specific action you want to take (discussion, call, meeting)
@@ -123,7 +90,8 @@ Write a cover letter that will make the hiring manager want to interview this ca
 - NO date header, NO address block, NO "[placeholder]" text of any kind
 - The letter must be READY TO COPY AND PASTE - no fields to fill in
 - 300-400 words maximum
-- Sign off with the candidate's exact full name: {candidate_name} — nothing else on the closing line
+- If a candidate name is supplied, sign off with that exact name: {candidate_name}
+- If the candidate name is absent, end after the professional closing without adding a name
 - Professional but engaging tone
 
 ## TONE GUIDANCE:
@@ -217,7 +185,7 @@ class CoverLetterWriterAgent:
             prefs: Dict[str, Any] = state.get("workflow_preferences") or {}
             user_tone: str = prefs.get("cover_letter_tone", "professional")
             # Only use preferred_model in BYOK mode (user has their own key)
-            user_model: Optional[str] = prefs.get("preferred_model") 
+            user_model: Optional[str] = prefs.get("preferred_model")
             # Validate
             if not user_profile:
                 raise ValueError("User profile is required for cover letter writing")
@@ -226,7 +194,10 @@ class CoverLetterWriterAgent:
 
             # Generate cover letter
             cover_letter_content = await self._generate_cover_letter(
-                user_profile, job_analysis, profile_matching, company_research,
+                user_profile,
+                job_analysis,
+                profile_matching,
+                company_research,
                 user_tone=user_tone,
                 user_model=user_model,
             )
@@ -288,14 +259,26 @@ class CoverLetterWriterAgent:
         industry = job_analysis.get("industry", "").lower()
         company_name = job_analysis.get("company_name", "").lower()
         job_title = job_analysis.get("job_title", "").lower()
-        
+
         # Combine all context for better tone matching
         context = f"{industry} {company_name} {job_title}"
-        
+
         tone = TONE_GUIDANCE.get("default")
         # Priority order for matching (more specific first)
-        priority_keys = ["life sciences", "biotech", "ai", "artificial intelligence", "machine learning",
-                        "fintech", "healthcare", "research", "finance", "consulting", "startup", "tech"]
+        priority_keys = [
+            "life sciences",
+            "biotech",
+            "ai",
+            "artificial intelligence",
+            "machine learning",
+            "fintech",
+            "healthcare",
+            "research",
+            "finance",
+            "consulting",
+            "startup",
+            "tech",
+        ]
 
         for key in priority_keys:
             if key in context:
@@ -311,7 +294,7 @@ class CoverLetterWriterAgent:
 
         # Build prompt with today's date
         today = datetime.now().strftime("%B %d, %Y")
-        
+
         candidate_name = user_profile.get("full_name") or ""
         prompt = COVER_LETTER_PROMPT.format(
             user_profile=formatted_profile,
@@ -320,7 +303,7 @@ class CoverLetterWriterAgent:
             company_context=formatted_company,
             tone_guidance=tone,
             today_date=today,
-            candidate_name=candidate_name if candidate_name else "the candidate",
+            candidate_name=candidate_name,
         )
 
         # Call LLM
@@ -333,6 +316,7 @@ class CoverLetterWriterAgent:
                     max_tokens=LLM_MAX_TOKENS,
                     user_api_key=self._current_user_api_key,
                     model=user_model,
+                    structured_output=False,
                 ),
                 timeout=LLM_TIMEOUT,
             )
@@ -343,7 +327,7 @@ class CoverLetterWriterAgent:
 
             content = response.get("response", "").strip()
             if not content:
-                    raise Exception("Empty response from LLM")
+                raise Exception("Empty response from LLM")
 
             return content
 
@@ -431,7 +415,9 @@ class CoverLetterWriterAgent:
         # Key requirements - these are CRITICAL for the cover letter
         required_skills = job.get("required_skills", [])
         if required_skills:
-            sections.append(f"\n*** KEY TECHNICAL SKILLS REQUIRED (address these!): ***")
+            sections.append(
+                f"\n*** KEY TECHNICAL SKILLS REQUIRED (address these!): ***"
+            )
             sections.append(f"{', '.join(required_skills[:12])}")
 
         soft_skills = job.get("soft_skills", [])
@@ -441,9 +427,11 @@ class CoverLetterWriterAgent:
         # Qualifications - most important for cover letter targeting
         required_quals = job.get("required_qualifications", [])
         if required_quals:
-            sections.append("\n*** TOP REQUIREMENTS FROM JOB POSTING (address top 3!): ***")
+            sections.append(
+                "\n*** TOP REQUIREMENTS FROM JOB POSTING (address top 3!): ***"
+            )
             for i, q in enumerate(required_quals[:7], 1):
-                qual_text = q if isinstance(q, str) else q.get('qualification', str(q))
+                qual_text = q if isinstance(q, str) else q.get("qualification", str(q))
                 sections.append(f"  {i}. {qual_text}")
 
         # Responsibilities - what the job actually does
@@ -458,7 +446,7 @@ class CoverLetterWriterAgent:
         if preferred:
             sections.append("\nNice-to-Have (mention if candidate has):")
             for p in preferred[:4]:
-                pref_text = p if isinstance(p, str) else p.get('qualification', str(p))
+                pref_text = p if isinstance(p, str) else p.get("qualification", str(p))
                 sections.append(f"  • {pref_text}")
 
         # Years of experience required
@@ -476,7 +464,9 @@ class CoverLetterWriterAgent:
     def _format_matching(self, matching: Optional[Dict[str, Any]]) -> str:
         """Format matching insights for cover letter strategy."""
         if not matching:
-            return "No matching analysis available - write a general strong cover letter"
+            return (
+                "No matching analysis available - write a general strong cover letter"
+            )
 
         sections = []
 
@@ -493,7 +483,10 @@ class CoverLetterWriterAgent:
                 sections.append(f"Detailed Fit: {fit_assessment}")
 
         # Overall scores
-        qual_score = matching.get('qualification_score', matching.get('final_scores', {}).get('qualification_score', 0))
+        qual_score = matching.get(
+            "qualification_score",
+            matching.get("final_scores", {}).get("qualification_score", 0),
+        )
         sections.append(f"\nQualification Score: {qual_score:.2f}/1.0")
 
         # Key strengths to emphasize (from new format)
@@ -525,7 +518,9 @@ class CoverLetterWriterAgent:
                         can_learn = gap.get("can_learn_quickly", False)
                         sections.append(f"  • {skill_name} ({importance})")
                         if can_learn:
-                            sections.append(f"    → Note: Can be learned quickly - mention willingness to learn")
+                            sections.append(
+                                f"    → Note: Can be learned quickly - mention willingness to learn"
+                            )
                     else:
                         sections.append(f"  • {gap}")
 
@@ -535,7 +530,9 @@ class CoverLetterWriterAgent:
                 sections.append("\nHidden Skills to Mention:")
                 for h in hidden[:3]:
                     if isinstance(h, dict):
-                        sections.append(f"  • {h.get('skill', '')} - {h.get('reasoning', '')[:80]}")
+                        sections.append(
+                            f"  • {h.get('skill', '')} - {h.get('reasoning', '')[:80]}"
+                        )
                     else:
                         sections.append(f"  • {h}")
 
@@ -550,7 +547,9 @@ class CoverLetterWriterAgent:
 
             concerns = app_strategy.get("address_these_concerns", [])
             if concerns:
-                sections.append("\n*** CONCERNS TO ADDRESS (briefly acknowledge, then pivot): ***")
+                sections.append(
+                    "\n*** CONCERNS TO ADDRESS (briefly acknowledge, then pivot): ***"
+                )
                 for concern in concerns[:3]:
                     if isinstance(concern, dict):
                         issue = concern.get("concern", "")
@@ -563,15 +562,19 @@ class CoverLetterWriterAgent:
 
             cover_angle = app_strategy.get("cover_letter_angle", "")
             if cover_angle:
-                sections.append(f"\n*** RECOMMENDED NARRATIVE ANGLE: ***\n{cover_angle}")
+                sections.append(
+                    f"\n*** RECOMMENDED NARRATIVE ANGLE: ***\n{cover_angle}"
+                )
 
         # Competitive positioning
         competitive = matching.get("competitive_positioning", {})
         if competitive:
             unique_value = competitive.get("unique_value_proposition", "")
             if unique_value:
-                sections.append(f"\n*** YOUR UNIQUE VALUE PROPOSITION (emphasize!): ***\n{unique_value}")
-            
+                sections.append(
+                    f"\n*** YOUR UNIQUE VALUE PROPOSITION (emphasize!): ***\n{unique_value}"
+                )
+
             strengths_vs_typical = competitive.get("strengths_vs_typical_applicant", [])
             if strengths_vs_typical:
                 sections.append("\nHow You Stand Out vs. Other Applicants:")
@@ -592,7 +595,7 @@ class CoverLetterWriterAgent:
     def _format_company(self, company: Optional[Dict[str, Any]]) -> str:
         """Format company information for personalization."""
         if not company:
-            return "Limited company information - focus on role and general industry knowledge"
+            return "No verified company facts available; use only the supplied role details"
 
         sections = []
 
@@ -612,11 +615,15 @@ class CoverLetterWriterAgent:
         # Core values for cultural fit messaging
         if company.get("core_values"):
             values = company["core_values"][:6]
-            sections.append(f"\n*** COMPANY VALUES (align with these!): ***\n{', '.join(values)}")
+            sections.append(
+                f"\n*** COMPANY VALUES (align with these!): ***\n{', '.join(values)}"
+            )
 
         # What they look for in candidates
         app_insights = company.get("application_insights", {})
-        what_to_emphasize = app_insights.get("what_to_emphasize", company.get("what_to_emphasize", []))
+        what_to_emphasize = app_insights.get(
+            "what_to_emphasize", company.get("what_to_emphasize", [])
+        )
         if what_to_emphasize:
             sections.append("\n*** WHAT THEY LOOK FOR IN CANDIDATES: ***")
             for item in what_to_emphasize[:4]:
@@ -653,11 +660,15 @@ class CoverLetterWriterAgent:
 
         # Competitive advantages
         landscape = company.get("competitive_landscape", {})
-        advantages = landscape.get("competitive_advantages", company.get("competitive_advantages", []))
+        advantages = landscape.get(
+            "competitive_advantages", company.get("competitive_advantages", [])
+        )
         if advantages:
             sections.append(f"\nTheir Strengths: {', '.join(advantages[:3])}")
 
-        return "\n".join(sections) if sections else "Limited company information available"
+        return (
+            "\n".join(sections) if sections else "Limited company information available"
+        )
 
     def _create_fallback_letter(
         self, profile: Dict[str, Any], job: Dict[str, Any]

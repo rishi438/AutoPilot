@@ -81,7 +81,9 @@ from utils.error_responses import (
     validation_error,
 )
 from utils.security import sanitize_llm_output
-from utils.application_dedupe import normalize_title_company_key as _normalize_title_company_key
+from utils.application_dedupe import (
+    normalize_title_company_key as _normalize_title_company_key,
+)
 from utils.resume_parser import extract_text_from_docx, extract_text_from_pdf
 
 # =============================================================================
@@ -149,7 +151,9 @@ def _job_text_from_uploaded_file(file_content: bytes, matched_ext: str) -> str:
         try:
             text = extract_text_from_pdf(file_content)
         except ValueError as e:
-            logger.debug("PDF text extraction failed for job upload: %s", e, exc_info=True)
+            logger.debug(
+                "PDF text extraction failed for job upload: %s", e, exc_info=True
+            )
             raise validation_error(
                 "Could not read text from this PDF. If it is a scanned document, "
                 "try pasting the job description as text instead."
@@ -170,7 +174,9 @@ def _job_text_from_uploaded_file(file_content: bytes, matched_ext: str) -> str:
         try:
             text = extract_text_from_docx(file_content)
         except ValueError as e:
-            logger.debug("DOCX text extraction failed for job upload: %s", e, exc_info=True)
+            logger.debug(
+                "DOCX text extraction failed for job upload: %s", e, exc_info=True
+            )
             raise validation_error(
                 "Could not read text from this Word file. Try pasting the job description as text "
                 "or exporting as PDF."
@@ -475,9 +481,7 @@ class WorkflowStatusResponse(BaseModel):
         ...,
         description="Current workflow status (initialized, running, completed, failed, awaiting_confirmation)",
     )
-    status_display: str = Field(
-        ..., description="Human-readable status for display"
-    )
+    status_display: str = Field(..., description="Human-readable status for display")
     current_phase: str = Field(..., description="Current workflow phase")
     current_agent: Optional[str] = Field(None, description="Currently executing agent")
     agent_status: Dict[str, str] = Field(
@@ -580,7 +584,7 @@ async def start_workflow(
     """Start a new job application workflow with rate limiting."""
     try:
         user_id = get_user_uuid(current_user)
-        
+
         # Rate limiting: 30 workflows per hour per user (with headers).
         # Identifier includes policy version so Redis counters reset when the limit changes.
         rate_result = await check_rate_limit_with_headers(
@@ -588,29 +592,37 @@ async def start_workflow(
             limit=30,
             window_seconds=3600,  # 1 hour
         )
-        
+
         # Add rate limit headers to response
         for header, value in rate_result.get_headers().items():
             response.headers[header] = value
-        
+
         if not rate_result.allowed:
-            raise rate_limit_error(f"Rate limit exceeded. Maximum 30 workflows per hour. Resets in {rate_result.reset_seconds} seconds.")
+            raise rate_limit_error(
+                f"Rate limit exceeded. Maximum 30 workflows per hour. Resets in {rate_result.reset_seconds} seconds."
+            )
 
         # Concurrency guard: prevent two simultaneous start_workflow calls for the
         # same user (would create duplicate sessions and consume double LLM credits).
         try:
             from utils.redis_client import get_redis_client as _get_wf_rc
             from utils.error_responses import APIError as _APIError
+
             _wf_rc = await _get_wf_rc()
             if _wf_rc:
                 _lock_key = f"workflow_creating:{user_id}"
                 _acquired = await _wf_rc.set(_lock_key, "1", nx=True, ex=10)
                 if not _acquired:
-                    raise rate_limit_error("A workflow is already being created. Please wait a moment.", retry_after=10)
+                    raise rate_limit_error(
+                        "A workflow is already being created. Please wait a moment.",
+                        retry_after=10,
+                    )
         except _APIError:
             raise
         except Exception as _lock_err:
-            logger.warning(f"Could not acquire workflow-creation lock for {user_id}: {_lock_err}")
+            logger.warning(
+                f"Could not acquire workflow-creation lock for {user_id}: {_lock_err}"
+            )
             # Fail open (best-effort) — proceed without the lock if Redis is unavailable
 
         # Resolve input from multiple sources
@@ -623,20 +635,32 @@ async def start_workflow(
         # Process uploaded file
         if job_file and job_file.filename:
             matched_ext = next(
-                (ext for ext in ALLOWED_FILE_EXTENSIONS if job_file.filename.lower().endswith(ext)),
+                (
+                    ext
+                    for ext in ALLOWED_FILE_EXTENSIONS
+                    if job_file.filename.lower().endswith(ext)
+                ),
                 None,
             )
             if not matched_ext:
-                raise validation_error(f"File type not allowed. Allowed: {ALLOWED_FILE_EXTENSIONS}")
+                raise validation_error(
+                    f"File type not allowed. Allowed: {ALLOWED_FILE_EXTENSIONS}"
+                )
 
             file_content = await job_file.read()
             if len(file_content) > MAX_FILE_SIZE:
-                raise validation_error(f"File too large. Maximum size: {MAX_FILE_SIZE // (1024 * 1024)} MB")
+                raise validation_error(
+                    f"File too large. Maximum size: {MAX_FILE_SIZE // (1024 * 1024)} MB"
+                )
 
             # Validate file content matches the declared extension (prevents extension spoofing)
             expected_magic = _JOB_FILE_MAGIC.get(matched_ext)
-            if expected_magic is not None and not file_content.startswith(expected_magic):
-                raise validation_error("File content does not match the declared file type.")
+            if expected_magic is not None and not file_content.startswith(
+                expected_magic
+            ):
+                raise validation_error(
+                    "File content does not match the declared file type."
+                )
             if matched_ext == ".txt":
                 try:
                     file_content.decode("utf-8")
@@ -647,7 +671,9 @@ async def start_workflow(
 
         # Validate at least one input method
         if not resolved_url and not resolved_text and not file_content:
-            raise validation_error("At least one input method is required: job_url, job_text, or job_file")
+            raise validation_error(
+                "At least one input method is required: job_url, job_text, or job_file"
+            )
 
         # Get user profile data
         profile_result = await db.execute(
@@ -656,14 +682,14 @@ async def start_workflow(
         user_profile = profile_result.scalar_one_or_none()
 
         if not user_profile:
-            raise validation_error("User profile not found. Please complete your profile setup.")
+            raise validation_error(
+                "User profile not found. Please complete your profile setup."
+            )
 
         # Get user's API key if available (BYOK mode)
-        user_result = await db.execute(
-            select(User).where(User.id == user_id)
-        )
+        user_result = await db.execute(select(User).where(User.id == user_id))
         user = user_result.scalar_one_or_none()
-        
+
         user_api_key = None
         if user and user.gemini_api_key_encrypted:
             try:
@@ -674,9 +700,10 @@ async def start_workflow(
 
         # Check if we have an API key available (either user's or server's)
         from config.settings import get_settings
+
         settings = get_settings()
-        server_has_key = getattr(settings, 'gemini_api_key', None) is not None
-        
+        server_has_key = getattr(settings, "gemini_api_key", None) is not None
+
         if not user_api_key and not server_has_key:
             raise no_api_key_error()
 
@@ -684,10 +711,12 @@ async def start_workflow(
         user_data = user_profile.to_dict()
 
         # Add user info
-        user_data.update({
-            "full_name": current_user.get("full_name", ""),
-            "email": current_user.get("email", ""),
-        })
+        user_data.update(
+            {
+                "full_name": current_user.get("full_name", ""),
+                "email": current_user.get("email", ""),
+            }
+        )
 
         # Load workflow preferences and inject under the key the workflow reads
         prefs_result = await db.execute(
@@ -696,16 +725,18 @@ async def start_workflow(
             )
         )
         prefs_row = prefs_result.scalar_one_or_none()
-        user_data["application_preferences"] = (
-            prefs_row.to_dict() if prefs_row else {}
-        )
+        user_data["application_preferences"] = prefs_row.to_dict() if prefs_row else {}
 
         # Get extension-specific metadata (JSON body takes priority; Form fields are the
         # extension path where request is None)
         source = request.source if request else None
         source_url = request.source_url if request else None
-        detected_title = (request.detected_title if request else None) or detected_title_form
-        detected_company = (request.detected_company if request else None) or detected_company_form
+        detected_title = (
+            request.detected_title if request else None
+        ) or detected_title_form
+        detected_company = (
+            request.detected_company if request else None
+        ) or detected_company_form
 
         effective_job_url = resolved_url if resolved_url else source_url
 
@@ -758,6 +789,7 @@ async def start_workflow(
             # without running the lock-release path; release workflow_creating here.
             try:
                 from utils.redis_client import get_redis_client as _dup_wf_rc
+
                 _dwrc = await _dup_wf_rc()
                 if _dwrc:
                     await _dwrc.delete(f"workflow_creating:{user_id}")
@@ -858,17 +890,23 @@ async def start_workflow(
                 user_api_key=user_api_key,
             )
 
-        logger.info(f"Started workflow {session_id} for user {_mask_email(current_user['email'])}")
+        logger.info(
+            f"Started workflow {session_id} for user {_mask_email(current_user['email'])}"
+        )
 
         # Release the concurrency lock — session is committed, background task is
         # queued.  The next request for this user is now safe to proceed.
         try:
             from utils.redis_client import get_redis_client as _get_wf_rc2
+
             _wf_rc2 = await _get_wf_rc2()
             if _wf_rc2:
                 await _wf_rc2.delete(f"workflow_creating:{user_id}")
         except Exception:
-            logger.debug("Failed to release workflow creation lock (will auto-expire in 10s)", exc_info=True)
+            logger.debug(
+                "Failed to release workflow creation lock (will auto-expire in 10s)",
+                exc_info=True,
+            )
 
         return WorkflowStartResponse(
             session_id=session_id,
@@ -882,11 +920,15 @@ async def start_workflow(
         # Ensure lock is released on any failure path
         try:
             from utils.redis_client import get_redis_client as _get_wf_rc3
+
             _wf_rc3 = await _get_wf_rc3()
             if _wf_rc3:
                 await _wf_rc3.delete(f"workflow_creating:{user_id}")
         except Exception:
-            logger.debug("Failed to release workflow creation lock during error cleanup", exc_info=True)
+            logger.debug(
+                "Failed to release workflow creation lock during error cleanup",
+                exc_info=True,
+            )
         logger.error(f"Failed to start workflow: {e}", exc_info=True)
         raise internal_error("Failed to start workflow")
 
@@ -913,7 +955,7 @@ async def get_workflow_status(
             select(WorkflowSession).where(
                 and_(
                     WorkflowSession.session_id == session_id,
-                    WorkflowSession.user_id == user_id
+                    WorkflowSession.user_id == user_id,
                 )
             )
         )
@@ -960,7 +1002,10 @@ async def get_workflow_status(
         }
 
         # Cache if workflow is still in progress (frequently polled)
-        if workflow_status in [WorkflowStatus.INITIALIZED.value, WorkflowStatus.IN_PROGRESS.value]:
+        if workflow_status in [
+            WorkflowStatus.INITIALIZED.value,
+            WorkflowStatus.IN_PROGRESS.value,
+        ]:
             await cache_workflow_state(session_id, response_data)
 
         return WorkflowStatusResponse(**response_data)
@@ -987,7 +1032,7 @@ async def get_workflow_results(
             select(WorkflowSession).where(
                 and_(
                     WorkflowSession.session_id == session_id,
-                    WorkflowSession.user_id == user_id
+                    WorkflowSession.user_id == user_id,
                 )
             )
         )
@@ -1005,14 +1050,16 @@ async def get_workflow_results(
             WorkflowStatus.AWAITING_CONFIRMATION.value,
             "analysis_complete",
         ]:
-            raise validation_error(f"Workflow is still {workflow_status}. Results are not yet available.")
+            raise validation_error(
+                f"Workflow is still {workflow_status}. Results are not yet available."
+            )
 
         # Look up the associated application for job_url and notes
         app_result = await db.execute(
             select(JobApplication).where(
                 and_(
                     JobApplication.session_id == session_id,
-                    JobApplication.user_id == user_id
+                    JobApplication.user_id == user_id,
                 )
             )
         )
@@ -1024,11 +1071,31 @@ async def get_workflow_results(
             job_url=application.job_url if application else None,
             application_id=str(application.id) if application else None,
             notes=application.notes if application else None,
-            job_analysis=sanitize_llm_output(workflow_session.job_analysis) if workflow_session.job_analysis else None,
-            company_research=sanitize_llm_output(workflow_session.company_research) if workflow_session.company_research else None,
-            profile_matching=sanitize_llm_output(workflow_session.profile_matching) if workflow_session.profile_matching else None,
-            resume_recommendations=sanitize_llm_output(workflow_session.resume_recommendations) if workflow_session.resume_recommendations else None,
-            cover_letter=sanitize_llm_output(workflow_session.cover_letter) if workflow_session.cover_letter else None,
+            job_analysis=(
+                sanitize_llm_output(workflow_session.job_analysis)
+                if workflow_session.job_analysis
+                else None
+            ),
+            company_research=(
+                sanitize_llm_output(workflow_session.company_research)
+                if workflow_session.company_research
+                else None
+            ),
+            profile_matching=(
+                sanitize_llm_output(workflow_session.profile_matching)
+                if workflow_session.profile_matching
+                else None
+            ),
+            resume_recommendations=(
+                sanitize_llm_output(workflow_session.resume_recommendations)
+                if workflow_session.resume_recommendations
+                else None
+            ),
+            cover_letter=(
+                sanitize_llm_output(workflow_session.cover_letter)
+                if workflow_session.cover_letter
+                else None
+            ),
             error_messages=workflow_session.error_messages or [],
         )
 
@@ -1039,7 +1106,10 @@ async def get_workflow_results(
         raise internal_error("Failed to get workflow results")
 
 
-@router.post("/regenerate-cover-letter/{session_id}", response_model=RegenerateCoverLetterResponse)
+@router.post(
+    "/regenerate-cover-letter/{session_id}",
+    response_model=RegenerateCoverLetterResponse,
+)
 async def regenerate_cover_letter(
     session_id: str,
     response: Response,
@@ -1053,7 +1123,9 @@ async def regenerate_cover_letter(
     """
     try:
         user_id_raw = current_user.get("id") or current_user.get("_id")
-        user_id = uuid.UUID(user_id_raw) if isinstance(user_id_raw, str) else user_id_raw
+        user_id = (
+            uuid.UUID(user_id_raw) if isinstance(user_id_raw, str) else user_id_raw
+        )
 
         # Rate limit: 5 regenerations per hour
         rate_result = await check_rate_limit_with_headers(
@@ -1065,14 +1137,16 @@ async def regenerate_cover_letter(
         response.headers["X-RateLimit-Remaining"] = str(rate_result.remaining)
         response.headers["X-RateLimit-Reset"] = str(rate_result.reset_seconds)
         if not rate_result.allowed:
-            raise rate_limit_error("Rate limit exceeded. Maximum 5 regenerations per hour.")
+            raise rate_limit_error(
+                "Rate limit exceeded. Maximum 5 regenerations per hour."
+            )
 
         # Load workflow session
         result = await db.execute(
             select(WorkflowSession).where(
                 and_(
                     WorkflowSession.session_id == session_id,
-                    WorkflowSession.user_id == user_id
+                    WorkflowSession.user_id == user_id,
                 )
             )
         )
@@ -1086,7 +1160,9 @@ async def regenerate_cover_letter(
             WorkflowStatus.AWAITING_CONFIRMATION.value,
             WorkflowStatus.ANALYSIS_COMPLETE.value,
         ]:
-            raise validation_error("Can only regenerate cover letter for completed workflows")
+            raise validation_error(
+                "Can only regenerate cover letter for completed workflows"
+            )
 
         # Load user profile for the agent
         profile_result = await db.execute(
@@ -1097,18 +1173,19 @@ async def regenerate_cover_letter(
             raise validation_error("User profile not found")
 
         # Get user's API key if they have one (BYOK)
-        user_result = await db.execute(
-            select(User).where(User.id == user_id)
-        )
+        user_result = await db.execute(select(User).where(User.id == user_id))
         user_record = user_result.scalar_one_or_none()
         user_api_key = None
         if user_record and user_record.gemini_api_key_encrypted:
             from utils.encryption import decrypt_api_key
+
             user_api_key = decrypt_api_key(user_record.gemini_api_key_encrypted)
 
         # Load workflow preferences so preferred_model and resume/cover settings are preserved.
         prefs_result = await db.execute(
-            select(UserWorkflowPreferences).where(UserWorkflowPreferences.user_id == user_id)
+            select(UserWorkflowPreferences).where(
+                UserWorkflowPreferences.user_id == user_id
+            )
         )
         prefs_row = prefs_result.scalar_one_or_none()
         workflow_preferences = prefs_row.to_dict() if prefs_row else {}
@@ -1121,7 +1198,9 @@ async def regenerate_cover_letter(
         agent = CoverLetterWriterAgent(gemini_client)
 
         state = {
-            "user_profile": user_profile.to_dict() if hasattr(user_profile, 'to_dict') else {},
+            "user_profile": (
+                user_profile.to_dict() if hasattr(user_profile, "to_dict") else {}
+            ),
             "job_analysis": workflow_session.job_analysis or {},
             "profile_matching": workflow_session.profile_matching,
             "company_research": workflow_session.company_research,
@@ -1141,6 +1220,7 @@ async def regenerate_cover_letter(
         new_cover_letter = sanitize_llm_output(new_cover_letter)
 
         from sqlalchemy.orm.attributes import flag_modified
+
         workflow_session.cover_letter = new_cover_letter
         flag_modified(workflow_session, "cover_letter")
         await db.commit()
@@ -1174,7 +1254,9 @@ async def regenerate_resume(
     """
     try:
         user_id_raw = current_user.get("id") or current_user.get("_id")
-        user_id = uuid.UUID(user_id_raw) if isinstance(user_id_raw, str) else user_id_raw
+        user_id = (
+            uuid.UUID(user_id_raw) if isinstance(user_id_raw, str) else user_id_raw
+        )
 
         rate_result = await check_rate_limit_with_headers(
             identifier=f"{user_id}:regen_resume",
@@ -1185,13 +1267,15 @@ async def regenerate_resume(
         response.headers["X-RateLimit-Remaining"] = str(rate_result.remaining)
         response.headers["X-RateLimit-Reset"] = str(rate_result.reset_seconds)
         if not rate_result.allowed:
-            raise rate_limit_error("Rate limit exceeded. Maximum 5 regenerations per hour.")
+            raise rate_limit_error(
+                "Rate limit exceeded. Maximum 5 regenerations per hour."
+            )
 
         result = await db.execute(
             select(WorkflowSession).where(
                 and_(
                     WorkflowSession.session_id == session_id,
-                    WorkflowSession.user_id == user_id
+                    WorkflowSession.user_id == user_id,
                 )
             )
         )
@@ -1207,7 +1291,9 @@ async def regenerate_resume(
         ]:
             raise validation_error("Can only regenerate for completed workflows")
 
-        profile_result = await db.execute(select(UserProfile).where(UserProfile.user_id == user_id))
+        profile_result = await db.execute(
+            select(UserProfile).where(UserProfile.user_id == user_id)
+        )
         user_profile = profile_result.scalar_one_or_none()
         if not user_profile:
             raise validation_error("User profile not found")
@@ -1217,15 +1303,16 @@ async def regenerate_resume(
         user_api_key = None
         if user_record and user_record.gemini_api_key_encrypted:
             from utils.encryption import decrypt_api_key
+
             user_api_key = decrypt_api_key(user_record.gemini_api_key_encrypted)
 
         prefs_result = await db.execute(
-            select(UserWorkflowPreferences).where(UserWorkflowPreferences.user_id == user_id)
+            select(UserWorkflowPreferences).where(
+                UserWorkflowPreferences.user_id == user_id
+            )
         )
         prefs_row = prefs_result.scalar_one_or_none()
         workflow_preferences = prefs_row.to_dict() if prefs_row else {}
-        # Force Deepseek model for resume regeneration
-        workflow_preferences["preferred_model"] = "deepseek-r1:14b"
 
         from agents.resume_advisor import ResumeAdvisorAgent
         from utils.llm_client import get_gemini_client
@@ -1234,7 +1321,9 @@ async def regenerate_resume(
         agent = ResumeAdvisorAgent(gemini_client)
 
         state = {
-            "user_profile": user_profile.to_dict() if hasattr(user_profile, 'to_dict') else {},
+            "user_profile": (
+                user_profile.to_dict() if hasattr(user_profile, "to_dict") else {}
+            ),
             "job_analysis": workflow_session.job_analysis or {},
             "profile_matching": workflow_session.profile_matching,
             "company_research": workflow_session.company_research,
@@ -1253,6 +1342,7 @@ async def regenerate_resume(
         new_resume = sanitize_llm_output(new_resume)
 
         from sqlalchemy.orm.attributes import flag_modified
+
         workflow_session.resume_recommendations = new_resume
         flag_modified(workflow_session, "resume_recommendations")
         await db.commit()
@@ -1272,7 +1362,9 @@ async def regenerate_resume(
         raise internal_error("Failed to regenerate resume recommendations")
 
 
-@router.post("/generate-interview-prep/{session_id}", response_model=RegenerateAgentResponse)
+@router.post(
+    "/generate-interview-prep/{session_id}", response_model=RegenerateAgentResponse
+)
 async def generate_interview_prep(
     session_id: str,
     response: Response,
@@ -1287,7 +1379,9 @@ async def generate_interview_prep(
     """
     try:
         user_id_raw = current_user.get("id") or current_user.get("_id")
-        user_id = uuid.UUID(user_id_raw) if isinstance(user_id_raw, str) else user_id_raw
+        user_id = (
+            uuid.UUID(user_id_raw) if isinstance(user_id_raw, str) else user_id_raw
+        )
 
         rate_result = await check_rate_limit_with_headers(
             identifier=f"{user_id}:gen_interview_prep",
@@ -1298,13 +1392,15 @@ async def generate_interview_prep(
         response.headers["X-RateLimit-Remaining"] = str(rate_result.remaining)
         response.headers["X-RateLimit-Reset"] = str(rate_result.reset_seconds)
         if not rate_result.allowed:
-            raise rate_limit_error("Rate limit exceeded. Maximum 5 generations per hour.")
+            raise rate_limit_error(
+                "Rate limit exceeded. Maximum 5 generations per hour."
+            )
 
         result = await db.execute(
             select(WorkflowSession).where(
                 and_(
                     WorkflowSession.session_id == session_id,
-                    WorkflowSession.user_id == user_id
+                    WorkflowSession.user_id == user_id,
                 )
             )
         )
@@ -1321,7 +1417,9 @@ async def generate_interview_prep(
             raise validation_error("Can only generate for completed workflows")
 
         # Get user profile for personalization
-        profile_result = await db.execute(select(UserProfile).where(UserProfile.user_id == user_id))
+        profile_result = await db.execute(
+            select(UserProfile).where(UserProfile.user_id == user_id)
+        )
         user_profile = profile_result.scalar_one_or_none()
 
         # Get user's API key if available
@@ -1330,6 +1428,7 @@ async def generate_interview_prep(
         user_api_key = None
         if user_record and user_record.gemini_api_key_encrypted:
             from utils.encryption import decrypt_api_key
+
             user_api_key = decrypt_api_key(user_record.gemini_api_key_encrypted)
 
         from utils.llm_client import get_gemini_client
@@ -1340,7 +1439,11 @@ async def generate_interview_prep(
         job = workflow_session.job_analysis or {}
         company = workflow_session.company_research or {}
         matching = workflow_session.profile_matching or {}
-        profile_dict = user_profile.to_dict() if user_profile and hasattr(user_profile, 'to_dict') else {}
+        profile_dict = (
+            user_profile.to_dict()
+            if user_profile and hasattr(user_profile, "to_dict")
+            else {}
+        )
 
         prompt = f"""You are an expert career coach. Generate comprehensive, personalized interview preparation materials for this candidate.
 
@@ -1420,15 +1523,20 @@ Generate 4-6 interview stages, 8-10 likely questions with personalized suggested
         )
 
         from utils.llm_parsing import parse_json_from_llm_response
+
         interview_prep = parse_json_from_llm_response(response.get("response", ""))
 
         if not interview_prep:
-            interview_prep = {"raw_response": response.get("response", ""), "parse_error": True}
+            interview_prep = {
+                "raw_response": response.get("response", ""),
+                "parse_error": True,
+            }
 
         # Sanitize before persisting and returning to prevent XSS from LLM output
         interview_prep = sanitize_llm_output(interview_prep)
 
         from sqlalchemy.orm.attributes import flag_modified
+
         if workflow_session.company_research is None:
             workflow_session.company_research = {}
         workflow_session.company_research["interview_preparation"] = interview_prep
@@ -1473,14 +1581,17 @@ async def continue_workflow_after_gate(
             window_seconds=3600,
         )
         if not is_allowed:
-            raise rate_limit_error("Too many workflow continuation attempts. Please try again later.", retry_after=3600)
+            raise rate_limit_error(
+                "Too many workflow continuation attempts. Please try again later.",
+                retry_after=3600,
+            )
 
         # Query for workflow session
         result = await db.execute(
             select(WorkflowSession).where(
                 and_(
                     WorkflowSession.session_id == session_id,
-                    WorkflowSession.user_id == user_id
+                    WorkflowSession.user_id == user_id,
                 )
             )
         )
@@ -1490,12 +1601,18 @@ async def continue_workflow_after_gate(
             raise not_found_error("Workflow session not found")
 
         # Verify workflow is in awaiting_confirmation state
-        if workflow_session.workflow_status != WorkflowStatus.AWAITING_CONFIRMATION.value:
-            raise validation_error(f"Workflow is not awaiting confirmation. Current status: {workflow_session.workflow_status}")
+        if (
+            workflow_session.workflow_status
+            != WorkflowStatus.AWAITING_CONFIRMATION.value
+        ):
+            raise validation_error(
+                f"Workflow is not awaiting confirmation. Current status: {workflow_session.workflow_status}"
+            )
 
         # Update ONLY the status using direct SQL to avoid overwriting other fields
         # This prevents race conditions where the ORM object might have stale data
         from sqlalchemy import update
+
         await db.execute(
             update(WorkflowSession)
             .where(WorkflowSession.session_id == session_id)
@@ -1542,7 +1659,9 @@ async def continue_workflow_after_gate(
         raise internal_error("Failed to continue workflow")
 
 
-@router.post("/generate-documents/{session_id}", response_model=WorkflowContinueResponse)
+@router.post(
+    "/generate-documents/{session_id}", response_model=WorkflowContinueResponse
+)
 async def generate_documents(
     session_id: str,
     background_tasks: BackgroundTasks,
@@ -1570,7 +1689,9 @@ async def generate_documents(
         response.headers["X-RateLimit-Remaining"] = str(rate_result.remaining)
         response.headers["X-RateLimit-Reset"] = str(rate_result.reset_seconds)
         if not rate_result.allowed:
-            raise rate_limit_error("Rate limit exceeded. Maximum 5 document generations per hour.")
+            raise rate_limit_error(
+                "Rate limit exceeded. Maximum 5 document generations per hour."
+            )
 
         result = await db.execute(
             select(WorkflowSession).where(
@@ -1681,28 +1802,43 @@ async def _execute_workflow_background(
 
                 # Update workflow session with results
                 try:
-                    await _update_workflow_session_with_state(db, session_id, final_state)
+                    await _update_workflow_session_with_state(
+                        db, session_id, final_state
+                    )
                 except Exception as session_err:
-                    logger.error(f"Workflow {session_id}: Failed to update workflow session: {session_err}")
+                    logger.error(
+                        f"Workflow {session_id}: Failed to update workflow session: {session_err}"
+                    )
                     # Continue to update job application even if session update fails
                     # (workflow's _save_workflow_state already saved the data)
                     try:
                         await db.rollback()
                     except Exception as rb_err:
-                        logger.debug("Rollback failed (connection already closed or rolled back): %s", rb_err)
+                        logger.debug(
+                            "Rollback failed (connection already closed or rolled back): %s",
+                            rb_err,
+                        )
 
                 # Update job application (independent of workflow session update)
                 duplicate_constraint_reverted = False
                 try:
-                    duplicate_constraint_reverted = await _update_job_application_with_final_state(
-                        db, session_id, final_state
+                    duplicate_constraint_reverted = (
+                        await _update_job_application_with_final_state(
+                            db, session_id, final_state
+                        )
                     )
                 except Exception as app_err:
-                    logger.error(f"Workflow {session_id}: Failed to update job application: {app_err}", exc_info=True)
+                    logger.error(
+                        f"Workflow {session_id}: Failed to update job application: {app_err}",
+                        exc_info=True,
+                    )
                     try:
                         await db.rollback()
                     except Exception as rb_err:
-                        logger.debug("Rollback failed (connection already closed or rolled back): %s", rb_err)
+                        logger.debug(
+                            "Rollback failed (connection already closed or rolled back): %s",
+                            rb_err,
+                        )
 
                 if duplicate_constraint_reverted:
                     logger.warning(
@@ -1719,24 +1855,34 @@ async def _execute_workflow_background(
                 try:
                     await db.rollback()
                 except Exception as rb_err:
-                    logger.debug("Rollback failed (connection already closed or rolled back): %s", rb_err)
+                    logger.debug(
+                        "Rollback failed (connection already closed or rolled back): %s",
+                        rb_err,
+                    )
 
                 try:
                     from sqlalchemy.orm.attributes import flag_modified
+
                     workflow_session.workflow_status = WorkflowStatus.FAILED.value
-                    workflow_session.error_messages = (workflow_session.error_messages or []) + [_safe_error_msg(e, settings.debug)]
+                    workflow_session.error_messages = (
+                        workflow_session.error_messages or []
+                    ) + [_safe_error_msg(e, settings.debug)]
                     workflow_session.processing_end_time = datetime.now(timezone.utc)
                     flag_modified(workflow_session, "error_messages")
                     _strip_agent_outputs_on_session_model(workflow_session)
                     await db.commit()
                 except Exception as rollback_err:
-                    logger.error(f"Workflow {session_id}: Failed to save error state: {rollback_err}")
+                    logger.error(
+                        f"Workflow {session_id}: Failed to save error state: {rollback_err}"
+                    )
                 # Clear stale cache on failure too
                 await invalidate_workflow_state(session_id)
 
                 # Hide failed analysis from the applications list (soft-delete)
                 try:
-                    await _soft_delete_job_application_for_failed_workflow(db, session_id)
+                    await _soft_delete_job_application_for_failed_workflow(
+                        db, session_id
+                    )
                     await db.commit()
                 except Exception as app_err:
                     logger.error(
@@ -1754,7 +1900,8 @@ async def _execute_workflow_background(
                     update(WorkflowSession)
                     .where(
                         WorkflowSession.session_id == session_id,
-                        WorkflowSession.workflow_status == WorkflowStatus.IN_PROGRESS.value,
+                        WorkflowSession.workflow_status
+                        == WorkflowStatus.IN_PROGRESS.value,
                     )
                     .values(
                         workflow_status=WorkflowStatus.FAILED.value,
@@ -1775,7 +1922,9 @@ async def _execute_workflow_background(
             )
 
 
-async def _continue_workflow_background(session_id: str, user_id: Optional[str] = None) -> None:
+async def _continue_workflow_background(
+    session_id: str, user_id: Optional[str] = None
+) -> None:
     """Continue workflow execution after user confirmation."""
     try:
         async with get_session() as db:
@@ -1786,7 +1935,9 @@ async def _continue_workflow_background(session_id: str, user_id: Optional[str] 
             workflow_session = result.scalar_one_or_none()
 
             if not workflow_session:
-                logger.error(f"Workflow session {session_id} not found for continuation")
+                logger.error(
+                    f"Workflow session {session_id} not found for continuation"
+                )
                 return
 
             # Idempotency guard: only continue from AWAITING_CONFIRMATION or IN_PROGRESS.
@@ -1815,12 +1966,14 @@ async def _continue_workflow_background(session_id: str, user_id: Optional[str] 
                     select(User).where(User.id == uuid.UUID(user_id))
                 )
                 user = user_result.scalar_one_or_none()
-                
+
                 if user and user.gemini_api_key_encrypted:
                     try:
                         user_api_key = decrypt_api_key(user.gemini_api_key_encrypted)
                     except Exception as e:
-                        logger.warning(f"Failed to decrypt user API key for continuation: {e}")
+                        logger.warning(
+                            f"Failed to decrypt user API key for continuation: {e}"
+                        )
 
             # Initialize workflow
             workflow = JobApplicationWorkflow(db)
@@ -1834,26 +1987,40 @@ async def _continue_workflow_background(session_id: str, user_id: Optional[str] 
 
                 # Update workflow session with results
                 try:
-                    await _update_workflow_session_with_state(db, session_id, final_state)
+                    await _update_workflow_session_with_state(
+                        db, session_id, final_state
+                    )
                 except Exception as session_err:
-                    logger.error(f"Workflow {session_id} continuation: Failed to update session: {session_err}")
+                    logger.error(
+                        f"Workflow {session_id} continuation: Failed to update session: {session_err}"
+                    )
                     try:
                         await db.rollback()
                     except Exception as rb_err:
-                        logger.debug("Rollback failed (connection already closed or rolled back): %s", rb_err)
+                        logger.debug(
+                            "Rollback failed (connection already closed or rolled back): %s",
+                            rb_err,
+                        )
 
                 # Update job application (independent of workflow session update)
                 duplicate_constraint_reverted = False
                 try:
-                    duplicate_constraint_reverted = await _update_job_application_with_final_state(
-                        db, session_id, final_state
+                    duplicate_constraint_reverted = (
+                        await _update_job_application_with_final_state(
+                            db, session_id, final_state
+                        )
                     )
                 except Exception as app_err:
-                    logger.error(f"Workflow {session_id} continuation: Failed to update application: {app_err}")
+                    logger.error(
+                        f"Workflow {session_id} continuation: Failed to update application: {app_err}"
+                    )
                     try:
                         await db.rollback()
                     except Exception as rb_err:
-                        logger.debug("Rollback failed (connection already closed or rolled back): %s", rb_err)
+                        logger.debug(
+                            "Rollback failed (connection already closed or rolled back): %s",
+                            rb_err,
+                        )
 
                 if duplicate_constraint_reverted:
                     logger.warning(
@@ -1861,26 +2028,40 @@ async def _continue_workflow_background(session_id: str, user_id: Optional[str] 
                         "session reverted and application hidden"
                     )
                 else:
-                    logger.info(f"Workflow {session_id} continuation completed successfully")
+                    logger.info(
+                        f"Workflow {session_id} continuation completed successfully"
+                    )
                 await invalidate_workflow_state(session_id)
 
             except Exception as e:
-                logger.error(f"Workflow {session_id} continuation failed: {e}", exc_info=True)
+                logger.error(
+                    f"Workflow {session_id} continuation failed: {e}", exc_info=True
+                )
                 try:
                     await db.rollback()
                 except Exception as rb_err:
-                    logger.debug("Rollback failed (connection already closed or rolled back): %s", rb_err)
+                    logger.debug(
+                        "Rollback failed (connection already closed or rolled back): %s",
+                        rb_err,
+                    )
                 try:
                     from sqlalchemy.orm.attributes import flag_modified
+
                     workflow_session.workflow_status = WorkflowStatus.FAILED.value
-                    workflow_session.error_messages = (workflow_session.error_messages or []) + [_safe_error_msg(e, settings.debug)]
+                    workflow_session.error_messages = (
+                        workflow_session.error_messages or []
+                    ) + [_safe_error_msg(e, settings.debug)]
                     workflow_session.processing_end_time = datetime.now(timezone.utc)
                     flag_modified(workflow_session, "error_messages")
                     _strip_agent_outputs_on_session_model(workflow_session)
-                    await _soft_delete_job_application_for_failed_workflow(db, session_id)
+                    await _soft_delete_job_application_for_failed_workflow(
+                        db, session_id
+                    )
                     await db.commit()
                 except Exception as rollback_err:
-                    logger.error(f"Workflow {session_id}: Failed to save continuation error state: {rollback_err}")
+                    logger.error(
+                        f"Workflow {session_id}: Failed to save continuation error state: {rollback_err}"
+                    )
                 await invalidate_workflow_state(session_id)
 
     except Exception as e:
@@ -1892,7 +2073,8 @@ async def _continue_workflow_background(session_id: str, user_id: Optional[str] 
                     update(WorkflowSession)
                     .where(
                         WorkflowSession.session_id == session_id,
-                        WorkflowSession.workflow_status == WorkflowStatus.IN_PROGRESS.value,
+                        WorkflowSession.workflow_status
+                        == WorkflowStatus.IN_PROGRESS.value,
                     )
                     .values(
                         workflow_status=WorkflowStatus.FAILED.value,
@@ -1956,7 +2138,9 @@ async def _generate_documents_background(
                     try:
                         user_api_key = decrypt_api_key(user.gemini_api_key_encrypted)
                     except Exception as e:
-                        logger.warning(f"Failed to decrypt API key for document generation: {e}")
+                        logger.warning(
+                            f"Failed to decrypt API key for document generation: {e}"
+                        )
 
             workflow = JobApplicationWorkflow(db)
 
@@ -1967,25 +2151,39 @@ async def _generate_documents_background(
                 )
 
                 try:
-                    await _update_workflow_session_with_state(db, session_id, final_state)
+                    await _update_workflow_session_with_state(
+                        db, session_id, final_state
+                    )
                 except Exception as session_err:
-                    logger.error(f"Session {session_id}: failed to persist document results: {session_err}")
+                    logger.error(
+                        f"Session {session_id}: failed to persist document results: {session_err}"
+                    )
                     try:
                         await db.rollback()
                     except Exception as rb_err:
-                        logger.debug("Rollback failed (connection already closed or rolled back): %s", rb_err)
+                        logger.debug(
+                            "Rollback failed (connection already closed or rolled back): %s",
+                            rb_err,
+                        )
 
                 duplicate_constraint_reverted = False
                 try:
-                    duplicate_constraint_reverted = await _update_job_application_with_final_state(
-                        db, session_id, final_state
+                    duplicate_constraint_reverted = (
+                        await _update_job_application_with_final_state(
+                            db, session_id, final_state
+                        )
                     )
                 except Exception as app_err:
-                    logger.error(f"Session {session_id}: failed to update application after documents: {app_err}")
+                    logger.error(
+                        f"Session {session_id}: failed to update application after documents: {app_err}"
+                    )
                     try:
                         await db.rollback()
                     except Exception as rb_err:
-                        logger.debug("Rollback failed (connection already closed or rolled back): %s", rb_err)
+                        logger.debug(
+                            "Rollback failed (connection already closed or rolled back): %s",
+                            rb_err,
+                        )
 
                 if duplicate_constraint_reverted:
                     logger.warning(
@@ -1993,25 +2191,40 @@ async def _generate_documents_background(
                         "session reverted and application hidden"
                     )
                 else:
-                    logger.info(f"Document generation completed for session {session_id}")
+                    logger.info(
+                        f"Document generation completed for session {session_id}"
+                    )
 
             except Exception as e:
-                logger.error(f"Document generation failed for session {session_id}: {e}", exc_info=True)
+                logger.error(
+                    f"Document generation failed for session {session_id}: {e}",
+                    exc_info=True,
+                )
                 try:
                     await db.rollback()
                 except Exception as rb_err:
-                    logger.debug("Rollback failed (connection already closed or rolled back): %s", rb_err)
+                    logger.debug(
+                        "Rollback failed (connection already closed or rolled back): %s",
+                        rb_err,
+                    )
                 try:
                     from sqlalchemy.orm.attributes import flag_modified
+
                     workflow_session.workflow_status = WorkflowStatus.FAILED.value
-                    workflow_session.error_messages = (workflow_session.error_messages or []) + [_safe_error_msg(e, settings.debug)]
+                    workflow_session.error_messages = (
+                        workflow_session.error_messages or []
+                    ) + [_safe_error_msg(e, settings.debug)]
                     workflow_session.processing_end_time = datetime.now(timezone.utc)
                     flag_modified(workflow_session, "error_messages")
                     _strip_agent_outputs_on_session_model(workflow_session)
-                    await _soft_delete_job_application_for_failed_workflow(db, session_id)
+                    await _soft_delete_job_application_for_failed_workflow(
+                        db, session_id
+                    )
                     await db.commit()
                 except Exception as rollback_err:
-                    logger.error(f"Session {session_id}: failed to persist error state: {rollback_err}")
+                    logger.error(
+                        f"Session {session_id}: failed to persist error state: {rollback_err}"
+                    )
 
     except Exception as e:
         logger.error(f"Background document generation task failed: {e}", exc_info=True)
@@ -2057,8 +2270,12 @@ async def _update_workflow_session_with_state(
     from sqlalchemy.orm.attributes import flag_modified
 
     # Update fields from state
-    workflow_session.workflow_status = final_state.get("workflow_status", WorkflowStatus.COMPLETED.value)
-    workflow_session.current_phase = final_state.get("current_phase", WorkflowPhase.COMPLETED.value)
+    workflow_session.workflow_status = final_state.get(
+        "workflow_status", WorkflowStatus.COMPLETED.value
+    )
+    workflow_session.current_phase = final_state.get(
+        "current_phase", WorkflowPhase.COMPLETED.value
+    )
     workflow_session.current_agent = final_state.get("current_agent")
     workflow_session.agent_status = final_state.get("agent_status", {})
     workflow_session.completed_agents = final_state.get("completed_agents", [])
@@ -2074,7 +2291,10 @@ async def _update_workflow_session_with_state(
     flag_modified(workflow_session, "warning_messages")
 
     # Failed workflows must not retain partial agent outputs in the session row.
-    if _normalize_workflow_status_string(final_state.get("workflow_status")) == WorkflowStatus.FAILED.value:
+    if (
+        _normalize_workflow_status_string(final_state.get("workflow_status"))
+        == WorkflowStatus.FAILED.value
+    ):
         for _col in (
             "job_analysis",
             "company_research",
@@ -2095,7 +2315,9 @@ async def _update_workflow_session_with_state(
             workflow_session.profile_matching = final_state["profile_matching"]
             flag_modified(workflow_session, "profile_matching")
         if final_state.get("resume_recommendations"):
-            workflow_session.resume_recommendations = final_state["resume_recommendations"]
+            workflow_session.resume_recommendations = final_state[
+                "resume_recommendations"
+            ]
             flag_modified(workflow_session, "resume_recommendations")
         if final_state.get("cover_letter"):
             workflow_session.cover_letter = final_state["cover_letter"]
@@ -2294,7 +2516,9 @@ async def list_workflow_history(
     db: AsyncSession = Depends(get_database),
     page: int = Query(default=1, ge=1, le=10000, description="Page number (1-indexed)"),
     per_page: int = Query(default=10, ge=1, le=100, description="Items per page"),
-    status_filter: Optional[str] = Query(default=None, description="Filter by workflow_status"),
+    status_filter: Optional[str] = Query(
+        default=None, description="Filter by workflow_status"
+    ),
     sort: Optional[str] = Query(
         default="created_desc",
         description="Sort order: created_desc | created_asc | updated_desc",
@@ -2327,7 +2551,7 @@ async def list_workflow_history(
         total: int = count_result.scalar() or 0
 
         sort_map = {
-            "created_asc":  WorkflowSession.created_at.asc(),
+            "created_asc": WorkflowSession.created_at.asc(),
             "updated_desc": WorkflowSession.updated_at.desc(),
         }
         order_clause = sort_map.get(sort or "", WorkflowSession.created_at.desc())
@@ -2427,8 +2651,14 @@ async def execute_workflow_task(
             user_id=payload.user_id,
         )
     else:
-        if not payload.input_method or not payload.job_input or payload.user_data is None:
-            raise validation_error("input_method, job_input, and user_data are required for initial execution")
+        if (
+            not payload.input_method
+            or not payload.job_input
+            or payload.user_data is None
+        ):
+            raise validation_error(
+                "input_method, job_input, and user_data are required for initial execution"
+            )
 
         await _execute_workflow_background(
             session_id=payload.session_id,

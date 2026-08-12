@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional
 from workflows.state_schema import WorkflowState
 from utils.llm_client import get_gemini_client
 from utils.llm_parsing import parse_json_from_llm_response
+from utils.llm_prompting import build_llm_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -19,55 +20,23 @@ logger = logging.getLogger(__name__)
 
 # LLM Configuration
 LLM_TEMPERATURE: float = 0.2  # Low temperature for consistent, analytical responses
-LLM_MAX_TOKENS: int = 16000  # Unified agent output cap
+LLM_MAX_TOKENS: int = 5000
 
 # =============================================================================
 # PROMPTS
 # =============================================================================
 
-SYSTEM_CONTEXT: str = """You are an elite executive recruiter and career strategist with 25+ years of experience placing candidates across ALL industries worldwide.
-
-## YOUR EXPERTISE INCLUDES:
-
-**Hiring Manager Psychology:**
-- You know what hiring managers REALLY care about (often different from job descriptions)
-- You understand that "required" qualifications are often wish lists - only 60% are truly required
-- You can predict which gaps will concern employers and which won't matter
-- You know that cultural fit often trumps technical skills for final decisions
-
-**Skill Analysis Mastery:**
-- You recognize skill synonyms across industries (e.g., "SEO" = "Search Engine Optimization", "RN" = "Registered Nurse", "CPA" = "Certified Public Accountant")
-- You understand skill hierarchies (React developer → knows JavaScript, HTML, CSS)
-- You identify HIDDEN skills candidates have but don't list (a manager has leadership skills, a nurse has patient communication skills)
-- You know which skills transfer across industries and which don't
-
-**Experience Evaluation:**
-- You weight RECENT experience more heavily than old experience
-- You recognize quality over quantity (5 impactful years > 10 mediocre years)
-- You understand career trajectories and can spot rising stars
-- You know how to evaluate experience from different industries for transferability
-
-**Industry Knowledge:**
-- You understand norms vary by industry (tech vs healthcare vs finance vs trades)
-- You know salary ranges, career paths, and expectations for each industry
-- You recognize industry-specific certifications and their importance
-- You understand regulatory requirements (licenses, clearances, etc.)
-
-**Decision Making Framework:**
-Think step-by-step:
-1. First, identify DEAL BREAKERS - any absolute disqualifiers
-2. Then, assess QUALIFICATIONS - can they do the job?
-3. Next, evaluate PREFERENCES - do they want the job?
-4. Finally, consider COMPETITIVE POSITION - how do they compare to typical applicants?
-
-## YOUR PRINCIPLES:
-- Be BRUTALLY HONEST but CONSTRUCTIVE - false hope helps no one
-- Be SPECIFIC - use actual details from their profile, not generic advice
-- Be ACTIONABLE - every insight should lead to a clear action
-- Be BALANCED - acknowledge both strengths and weaknesses
-- Be REALISTIC - consider actual job market conditions
-- NEVER GUESS - if information is missing, say so and explain the impact
-- YEARS OF EXPERIENCE RULE: The "Years of Experience" field is TOTAL career years — NEVER use it as domain-specific experience. When claiming "X years of [skill/domain]", derive that number only from the relevant work history entries where that skill was actually used. If you cannot calculate domain-specific years from the work history, say "experience with [skill]" without stating a number."""
+SYSTEM_CONTEXT: str = build_llm_system_prompt(
+    "Profession-neutral candidate-to-job evidence analyst",
+    "Assess candidate fit against the supplied job requirements and preferences.",
+    extra_rules=(
+        "Support every matched qualification with supplied profile evidence.",
+        "Do not infer hidden skills, employer intentions, applicant-pool rankings, or success probabilities as facts.",
+        "Treat total career years as domain-specific experience only when dated work history supports that claim.",
+        "Preserve unknown visa, clearance, location, certification, and preference states as uncertainty.",
+        "Apply stated legal or credential requirements as written; do not discount them using generic hiring assumptions.",
+    ),
+)
 
 PROFILE_MATCHING_PROMPT: str = """You are analyzing a candidate's fit for a job. Think like an elite executive recruiter.
 
@@ -259,8 +228,8 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
 For EACH required skill in the job:
 - Is it in their profile? (exact match = 100% confidence)
 - Is a synonym in their profile? (e.g., "JS" for "JavaScript" = 95% confidence)
-- Is it IMPLIED by other skills? (e.g., "React" implies "JavaScript" = 80% confidence)
-- Is it likely from their experience? (e.g., "5 years as RN" implies "patient care" = 85% confidence)
+- Is an equivalent term explicitly supported by their profile? Cite that evidence.
+- Do not infer an unlisted skill from a title, another skill, or a generic role expectation.
 - Is it completely missing? → Note as gap, estimate learning time
 
 **STEP 3: EXPERIENCE QUALITY ANALYSIS**
@@ -319,8 +288,8 @@ For EACH required skill in the job:
 1. Use ACTUAL DETAILS from their profile - never be generic
 2. If information is MISSING, explicitly state it affects confidence
 3. Consider INDUSTRY NORMS - expectations vary by field
-4. Remember the 60% RULE - only 60% of "required" qualifications are truly required
-5. HIDDEN SKILLS matter - identify what they have but didn't list
+4. Treat required qualifications as written, especially legal, safety, license, and clearance requirements
+5. Do not invent hidden skills; record transferable evidence only when the profile supports it
 6. RECENCY matters - weight recent experience more heavily
 7. GROWTH POTENTIAL counts - consider ability to learn, not just current state
 8. Be HONEST about weaknesses - but always suggest how to address them
@@ -335,14 +304,14 @@ For EACH required skill in the job:
 class ProfileMatchingAgent:
     """
     AI-Powered Profile Matching Agent.
-    
+
     Uses advanced LLM capabilities to perform deep semantic analysis of
     candidate-job fit, going far beyond simple keyword matching to provide
     intelligent, recruiter-level insights and recommendations.
-    
+
     This agent answers:
     - "Am I qualified for this job?" (Qualification Analysis)
-    - "Do I want this job?" (Preference Analysis)  
+    - "Do I want this job?" (Preference Analysis)
     - "Can I actually take this job?" (Deal Breaker Analysis)
     - "How should I apply?" (Application Strategy)
     - "What are the risks?" (Risk Assessment)
@@ -389,8 +358,8 @@ class ProfileMatchingAgent:
 
             # Perform AI-powered matching analysis
             matching_result: Dict[str, Any] = await self._analyze_match(
-            user_profile, job_analysis
-        )
+                user_profile, job_analysis
+            )
 
             # Add metadata
             matching_result["processing_time"] = (
@@ -470,6 +439,7 @@ class ProfileMatchingAgent:
             temperature=LLM_TEMPERATURE,
             max_tokens=LLM_MAX_TOKENS,
             user_api_key=self._current_user_api_key,
+            structured_output=True,
         )
 
         # Handle safety filter
@@ -629,7 +599,12 @@ class ProfileMatchingAgent:
 
         # Salary
         salary_range = job.get("salary_range", {})
-        if salary_range and isinstance(salary_range, dict) and salary_range.get("min") and salary_range.get("max"):
+        if (
+            salary_range
+            and isinstance(salary_range, dict)
+            and salary_range.get("min")
+            and salary_range.get("max")
+        ):
             try:
                 salary_str = f"${salary_range['min']:,} - ${salary_range['max']:,}"
             except (TypeError, ValueError):
@@ -775,22 +750,20 @@ class ProfileMatchingAgent:
 
     def _create_parse_error_result(self, raw_response: str) -> Dict[str, Any]:
         """
-        Create a result when JSON parsing fails but we have a response.
-
-        Attempts to extract useful information from the raw response.
+        Create a safe result when JSON parsing fails.
 
         Args:
             raw_response: The raw LLM response that couldn't be parsed
 
         Returns:
-            Result structure with available information
+            Result structure requesting regeneration
         """
         return {
             "executive_summary": {
-                "fit_assessment": "Analysis completed but response format was unexpected. See raw analysis below.",
-                "recommendation": "REVIEW_MANUALLY",
+                "fit_assessment": "The generated analysis could not be validated. Please try again.",
+                "recommendation": "UNKNOWN",
                 "confidence_level": "LOW",
-                "one_line_verdict": "Manual review recommended",
+                "one_line_verdict": "No validated assessment is available",
             },
             "qualification_score": 0.5,
             "preference_score": 0.5,
@@ -802,7 +775,6 @@ class ProfileMatchingAgent:
                 "deal_breaker_score": 1.0,
                 "overall_match_score": 0.5,
             },
-            "raw_analysis": raw_response[:20000],  # Keep up to ~5K tokens worth for debugging
             "parse_error": True,
             "analysis_method": "PARSE_ERROR_FALLBACK",
         }

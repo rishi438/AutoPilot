@@ -8,21 +8,23 @@ Supports two backends:
 2. Vertex AI (google-genai SDK, vertexai=True) - Higher rate limits, pay-per-use
 """
 
+import asyncio
 import logging
 from time import perf_counter
-from typing import Any, Dict, Optional, List
+from typing import Any
 
 import httpx
 from tenacity import (
+    before_sleep_log,
     retry,
+    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
-    before_sleep_log,
 )
+
 from config.settings import get_settings
+from utils.llm_prompting import extend_system_prompt
 from utils.logging_config import get_structured_logger
-import asyncio
 
 # Both backends use google-genai (imported lazily inside methods)
 
@@ -52,6 +54,7 @@ LOCAL_LLM_MODELS = {
     "qwen2.5:14b",
     "llama3.1:8b",
 }
+LOCAL_LLM_TRUNCATION_REASONS = {"length", "max_length", "max_tokens"}
 
 # Configure module loggers
 logger = logging.getLogger(__name__)
@@ -78,8 +81,8 @@ class GeminiError(Exception):
     def __init__(
         self,
         message: str,
-        status_code: Optional[int] = None,
-        original_error: Optional[Exception] = None,
+        status_code: int | None = None,
+        original_error: Exception | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -149,9 +152,9 @@ def _text_indicates_gemini_service_unavailable(text: str) -> bool:
 
 def _exception_chain_text(exc: BaseException) -> str:
     """Join str() of exc, GeminiError.original_error, and __cause__/__context__."""
-    parts: List[str] = []
+    parts: list[str] = []
     seen: set[int] = set()
-    cur: Optional[BaseException] = exc
+    cur: BaseException | None = exc
     depth = 0
     while cur is not None and id(cur) not in seen and depth < 8:
         seen.add(id(cur))
@@ -211,30 +214,32 @@ class GeminiClient:
         """
         Initialize Gemini client with settings from configuration.
         This constructor should not be called directly - use get_gemini_client() instead.
-        
+
         Backend selection:
         - USE_VERTEX_AI=true + VERTEX_AI_PROJECT → Vertex AI (ADC auth, no rate limits)
         - Otherwise → Google AI Studio (API key auth, has rate limits)
         """
         settings = get_settings()
         self.timeout = DEFAULT_TIMEOUT
-        
+
         # Vertex AI settings
-        self.use_vertex_ai = getattr(settings, 'use_vertex_ai', False)
-        self.vertex_project = getattr(settings, 'vertex_ai_project', None)
-        self.vertex_location = getattr(settings, 'vertex_ai_location', 'us-central1')
-        
+        self.use_vertex_ai = getattr(settings, "use_vertex_ai", False)
+        self.vertex_project = getattr(settings, "vertex_ai_project", None)
+        self.vertex_location = getattr(settings, "vertex_ai_location", "us-central1")
+
         # Google AI Studio API key
-        self.api_key = getattr(settings, 'gemini_api_key', None)
-        
+        self.api_key = getattr(settings, "gemini_api_key", None)
+
         # Local LLM fallback settings
-        self.local_llm_url = getattr(settings, 'local_llm_url', None)
-        self.local_llm_model = getattr(settings, 'local_llm_model', None)
-        self.local_llm_timeout = getattr(settings, 'local_llm_timeout', DEFAULT_TIMEOUT)
+        self.local_llm_url = getattr(settings, "local_llm_url", None)
+        self.local_llm_model = getattr(settings, "local_llm_model", None)
+        self.local_llm_timeout = getattr(settings, "local_llm_timeout", DEFAULT_TIMEOUT)
 
         # Validate Vertex AI config
         if self.use_vertex_ai and not self.vertex_project:
-            logger.warning("USE_VERTEX_AI=true but VERTEX_AI_PROJECT not set. Falling back to Google AI Studio.")
+            logger.warning(
+                "USE_VERTEX_AI=true but VERTEX_AI_PROJECT not set. Falling back to Google AI Studio."
+            )
             self.use_vertex_ai = False
 
         # Log the backend
@@ -251,31 +256,33 @@ class GeminiClient:
 
         # google-genai uses Client(api_key=...) per-call — no global configure needed.
 
-    def _is_local_model(self, model: Optional[str]) -> bool:
+    def _is_local_model(self, model: str | None) -> bool:
         """Return True when the requested model should be routed to a local LLM endpoint."""
-        return bool(model and model in LOCAL_LLM_MODELS)
+        if not model:
+            return False
+        return model == self.local_llm_model or model in LOCAL_LLM_MODELS
 
     def _should_fallback_to_local(self, exc: GeminiError) -> bool:
         """Return True when a Gemini failure should be retried against local LLM."""
         if not self.local_llm_url:
             return False
         combined = _exception_chain_text(exc)
-        return (
-            _text_indicates_gemini_service_unavailable(combined)
-            or _text_indicates_gemini_quota_exhausted(combined)
-        )
+        return _text_indicates_gemini_service_unavailable(
+            combined
+        ) or _text_indicates_gemini_quota_exhausted(combined)
 
     async def generate(
         self,
         prompt: str,
-        model: Optional[str] = None,
-        system: Optional[str] = None,
+        model: str | None = None,
+        system: str | None = None,
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         use_cache: bool = False,
-        user_api_key: Optional[str] = None,
-        user_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        user_api_key: str | None = None,
+        user_id: str | None = None,
+        structured_output: bool = False,
+    ) -> dict[str, Any]:
         """
         Generate a response from the Gemini model with optional caching.
 
@@ -292,6 +299,7 @@ class GeminiClient:
             user_id: User UUID string. When provided, scopes the cache key per user
                      to prevent cross-user hits on prompts that contain personal content
                      (resumes, cover letters, etc.). Omit only for fully public prompts.
+            structured_output: Request exactly one JSON object from the selected backend.
 
         Returns:
             Dict[str, Any]: Response from the model containing generated text
@@ -299,17 +307,22 @@ class GeminiClient:
         Raises:
             GeminiError: If the generation fails or returns an error
         """
+        system = extend_system_prompt(system, structured=structured_output)
+
         # Check cache if enabled
         if use_cache:
             try:
                 from utils.cache import get_cached_llm_response
+
                 cached_response = await get_cached_llm_response(prompt, system, user_id)
                 if cached_response:
                     logger.info("LLM response served from cache")
                     cached_response["from_cache"] = True
                     return cached_response
             except Exception as cache_error:
-                logger.warning(f"Cache lookup failed, proceeding with API call: {cache_error}")
+                logger.warning(
+                    f"Cache lookup failed, proceeding with API call: {cache_error}"
+                )
 
         # Call the internal method with retry logic
         result = await self._generate_with_retry(
@@ -319,12 +332,14 @@ class GeminiClient:
             temperature=temperature,
             max_tokens=max_tokens,
             user_api_key=user_api_key,
+            structured_output=structured_output,
         )
 
         # Cache the response if caching is enabled
         if use_cache and result:
             try:
                 from utils.cache import cache_llm_response
+
                 await cache_llm_response(prompt, result, system, user_id)
             except Exception as cache_error:
                 logger.warning(f"Failed to cache LLM response: {cache_error}")
@@ -341,12 +356,13 @@ class GeminiClient:
     async def _generate_with_retry(
         self,
         prompt: str,
-        model: Optional[str] = None,
-        system: Optional[str] = None,
+        model: str | None = None,
+        system: str | None = None,
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
-        user_api_key: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        user_api_key: str | None = None,
+        structured_output: bool = False,
+    ) -> dict[str, Any]:
         """
         Internal generate method with retry logic.
 
@@ -360,6 +376,7 @@ class GeminiClient:
             temperature: Sampling temperature
             max_tokens: Maximum tokens to generate
             user_api_key: Optional user-provided API key (BYOK mode)
+            structured_output: Whether the backend should constrain output to JSON.
 
         Returns:
             Dict[str, Any]: Response from the model
@@ -375,6 +392,7 @@ class GeminiClient:
                 system=system,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                structured_output=structured_output,
             )
 
         # Route to the configured backend
@@ -385,6 +403,7 @@ class GeminiClient:
                 system=system,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                structured_output=structured_output,
             )
 
         effective_api_key = user_api_key or self.api_key
@@ -397,6 +416,7 @@ class GeminiClient:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     user_api_key=user_api_key,
+                    structured_output=structured_output,
                 )
             except GeminiError as exc:
                 if self._should_fallback_to_local(exc):
@@ -409,6 +429,7 @@ class GeminiClient:
                         system=system,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        structured_output=structured_output,
                     )
                 raise
 
@@ -419,6 +440,7 @@ class GeminiClient:
                 system=system,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                structured_output=structured_output,
             )
 
         raise GeminiError(
@@ -428,12 +450,13 @@ class GeminiClient:
     async def _generate_with_local_llm(
         self,
         prompt: str,
-        model: Optional[str] = None,
-        system: Optional[str] = None,
+        model: str | None = None,
+        system: str | None = None,
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
-    ) -> Dict[str, Any]:
-        """Generate using a local LLM endpoint when no Gemini API key is available."""
+        structured_output: bool = False,
+    ) -> dict[str, Any]:
+        """Generate text through an Ollama-compatible ``/api/generate`` endpoint."""
         if not self.local_llm_url:
             raise GeminiError(
                 "No local LLM endpoint is configured. Set LOCAL_LLM_URL in env."
@@ -445,16 +468,33 @@ class GeminiClient:
                 "Local LLM model is not configured. Set LOCAL_LLM_MODEL in env or provide a supported local model name."
             )
 
-        try:
-            request_body = {
-                "model": model_to_use,
-                "prompt": f"{system}\n\n{prompt}" if system else prompt,
+        request_body: dict[str, Any] = {
+            "model": model_to_use,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
                 "temperature": temperature,
-                "max_tokens": max_tokens,
-                "stream": False,
-            }
-            print(f"Sending request to local LLM at {self.local_llm_url} with body: {request_body}")
+                "num_predict": max_tokens,
+            },
+        }
+        if system:
+            request_body["system"] = system
+        if structured_output:
+            request_body["format"] = "json"
 
+        safe_model = model_to_use.replace("\r", " ").replace("\n", " ")[:128]
+        logger.info(
+            "[LLM] Local request model=%s prompt_chars=%d system_chars=%d "
+            "max_tokens=%d structured=%s",
+            safe_model,
+            len(prompt),
+            len(system or ""),
+            max_tokens,
+            structured_output,
+        )
+        api_start_time = perf_counter()
+
+        try:
             async with httpx.AsyncClient(timeout=self.local_llm_timeout) as client:
                 response = await client.post(
                     self.local_llm_url,
@@ -463,49 +503,130 @@ class GeminiClient:
 
             if response.status_code != 200:
                 raise GeminiError(
-                    f"Local LLM request failed: {response.status_code} {response.text}"
+                    f"Local LLM request failed with HTTP {response.status_code}.",
+                    status_code=response.status_code,
                 )
 
             data = response.json()
-            print(f"Received response from local LLM: {data}")
+            if not isinstance(data, dict):
+                raise GeminiError("Local LLM response must be a JSON object.")
+
             text = data.get("text") or data.get("response") or data.get("result")
             if not isinstance(text, str):
+                raise GeminiError("Local LLM response missing text field.")
+
+            done = data.get("done", True)
+            if not isinstance(done, bool):
+                raise GeminiError("Local LLM response has an invalid done field.")
+
+            raw_done_reason = data.get("done_reason")
+            done_reason = (
+                str(raw_done_reason).strip() if raw_done_reason is not None else None
+            )
+            if not done:
+                raise GeminiError("Local LLM response was incomplete (done=false).")
+            if done_reason and done_reason.casefold() in LOCAL_LLM_TRUNCATION_REASONS:
                 raise GeminiError(
-                    "Local LLM response missing text field."
+                    "Local LLM response was truncated at the output token limit."
                 )
 
-            return {
+            api_duration_ms = (perf_counter() - api_start_time) * 1000
+            logger.info(
+                "[LLM] Local done model=%s duration_ms=%.0f response_chars=%d "
+                "done_reason=%s prompt_tokens=%s output_tokens=%s",
+                safe_model,
+                api_duration_ms,
+                len(text),
+                done_reason or "unspecified",
+                data.get("prompt_eval_count", "unknown"),
+                data.get("eval_count", "unknown"),
+            )
+            structured_logger.log_external_api_call(
+                service="local_llm",
+                operation="generate",
+                duration_ms=api_duration_ms,
+                success=True,
+            )
+
+            result: dict[str, Any] = {
                 "model": model_to_use,
                 "response": text,
-                "done": True,
+                "done": done,
             }
+            if done_reason is not None:
+                result["done_reason"] = done_reason
+            return result
+        except GeminiError as local_error:
+            api_duration_ms = (perf_counter() - api_start_time) * 1000
+            structured_logger.log_external_api_call(
+                service="local_llm",
+                operation="generate",
+                duration_ms=api_duration_ms,
+                success=False,
+                error=local_error.message,
+            )
+            logger.warning(
+                "[LLM] Local request failed model=%s duration_ms=%.0f status=%s",
+                safe_model,
+                api_duration_ms,
+                local_error.status_code or "unavailable",
+            )
+            raise
         except httpx.HTTPError as http_err:
+            api_duration_ms = (perf_counter() - api_start_time) * 1000
+            structured_logger.log_external_api_call(
+                service="local_llm",
+                operation="generate",
+                duration_ms=api_duration_ms,
+                success=False,
+                error=type(http_err).__name__,
+            )
+            logger.warning(
+                "[LLM] Local transport failed model=%s duration_ms=%.0f error=%s",
+                safe_model,
+                api_duration_ms,
+                type(http_err).__name__,
+            )
             raise GeminiError(
-                f"Local LLM request failed: {http_err}",
+                "Local LLM request failed due to a transport error.",
                 original_error=http_err,
-            )
+            ) from http_err
         except ValueError as parse_err:
-            raise GeminiError(
-                f"Invalid JSON from local LLM: {parse_err}",
-                original_error=parse_err,
+            api_duration_ms = (perf_counter() - api_start_time) * 1000
+            structured_logger.log_external_api_call(
+                service="local_llm",
+                operation="generate",
+                duration_ms=api_duration_ms,
+                success=False,
+                error="invalid_json",
             )
+            logger.warning(
+                "[LLM] Local response was not JSON model=%s duration_ms=%.0f",
+                safe_model,
+                api_duration_ms,
+            )
+            raise GeminiError(
+                "Invalid JSON from local LLM.",
+                original_error=parse_err,
+            ) from parse_err
 
     async def _generate_with_vertex_ai(
         self,
         prompt: str,
-        model: Optional[str] = None,
-        system: Optional[str] = None,
+        model: str | None = None,
+        system: str | None = None,
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
-    ) -> Dict[str, Any]:
+        structured_output: bool = False,
+    ) -> dict[str, Any]:
         """Generate using Vertex AI backend with ADC authentication (higher rate limits)."""
         try:
             from google import genai as google_genai
             from google.genai import types
-            
+
             current_settings = get_settings()
             model_to_use = model or current_settings.gemini_model
-            
+
             # Create client with Vertex AI using ADC (Application Default Credentials)
             # Requires: gcloud auth application-default login
             client = google_genai.Client(
@@ -513,24 +634,27 @@ class GeminiClient:
                 project=self.vertex_project,
                 location=self.vertex_location,
             )
-            
+
             # Combine system and user prompts
             if system:
                 combined_prompt = f"{system}\n\n{prompt}"
             else:
                 combined_prompt = prompt
-            
+
             # Create generation config
             # Disable thinking mode — on flash models it consumes the output token
             # budget for internal reasoning, leaving too little for actual output
-            config = types.GenerateContentConfig(
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-                top_p=DEFAULT_TOP_P,
-                top_k=DEFAULT_TOP_K,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            )
-            
+            config_options: dict[str, Any] = {
+                "temperature": temperature,
+                "max_output_tokens": max_tokens,
+                "top_p": DEFAULT_TOP_P,
+                "top_k": DEFAULT_TOP_K,
+                "thinking_config": types.ThinkingConfig(thinking_budget=0),
+            }
+            if structured_output:
+                config_options["response_mime_type"] = "application/json"
+            config = types.GenerateContentConfig(**config_options)
+
             prompt_chars = len(combined_prompt)
             logger.info(
                 f"[LLM] Vertex AI  model={model_to_use}"
@@ -547,7 +671,7 @@ class GeminiClient:
                         model=model_to_use,
                         contents=combined_prompt,
                         config=config,
-                    )
+                    ),
                 ),
                 timeout=self.timeout,
             )
@@ -557,7 +681,10 @@ class GeminiClient:
             try:
                 response_text = response.text
             except Exception as text_error:
-                logger.error(f"[LLM] Failed to extract response text: {text_error}", exc_info=True)
+                logger.error(
+                    f"[LLM] Failed to extract response text: {text_error}",
+                    exc_info=True,
+                )
                 response_text = "Error retrieving response. Please try again."
 
             logger.info(
@@ -574,7 +701,7 @@ class GeminiClient:
             )
 
             return {"model": model_to_use, "response": response_text, "done": True}
-            
+
         except Exception as e:
             structured_logger.log_external_api_call(
                 service="vertex_ai",
@@ -584,17 +711,20 @@ class GeminiClient:
                 error=str(e),
             )
             logger.error(f"Error in Vertex AI generate: {e}", exc_info=True)
-            raise GeminiError(f"Vertex AI generate failed: {str(e)}", original_error=e)
+            raise GeminiError(
+                f"Vertex AI generate failed: {str(e)}", original_error=e
+            ) from e
 
     async def _generate_with_google_ai(
         self,
         prompt: str,
-        model: Optional[str] = None,
-        system: Optional[str] = None,
+        model: str | None = None,
+        system: str | None = None,
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
-        user_api_key: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        user_api_key: str | None = None,
+        structured_output: bool = False,
+    ) -> dict[str, Any]:
         """Generate using Google AI Studio backend (BYOK / free tier)."""
         try:
             from google import genai as google_genai
@@ -616,13 +746,16 @@ class GeminiClient:
             else:
                 combined_prompt = prompt
 
-            config = types.GenerateContentConfig(
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-                top_p=DEFAULT_TOP_P,
-                top_k=DEFAULT_TOP_K,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            )
+            config_options: dict[str, Any] = {
+                "temperature": temperature,
+                "max_output_tokens": max_tokens,
+                "top_p": DEFAULT_TOP_P,
+                "top_k": DEFAULT_TOP_K,
+                "thinking_config": types.ThinkingConfig(thinking_budget=0),
+            }
+            if structured_output:
+                config_options["response_mime_type"] = "application/json"
+            config = types.GenerateContentConfig(**config_options)
 
             prompt_chars = len(combined_prompt)
             byok_label = "  byok=user-key" if user_api_key else ""
@@ -650,14 +783,24 @@ class GeminiClient:
             try:
                 response_text: str = response.text
             except Exception as text_error:
-                logger.error(f"[LLM] Failed to extract response text: {text_error}", exc_info=True)
-                response_text = "Error retrieving response from Gemini API. Please try again."
+                logger.error(
+                    f"[LLM] Failed to extract response text: {text_error}",
+                    exc_info=True,
+                )
+                response_text = (
+                    "Error retrieving response from Gemini API. Please try again."
+                )
 
             # Check for safety filter (finish_reason OTHER than STOP/MAX_TOKENS)
             filtered = False
             if hasattr(response, "candidates") and response.candidates:
                 finish_reason = getattr(response.candidates[0], "finish_reason", None)
-                if finish_reason and str(finish_reason) not in ("FinishReason.STOP", "FinishReason.MAX_TOKENS", "1", "2"):
+                if finish_reason and str(finish_reason) not in (
+                    "FinishReason.STOP",
+                    "FinishReason.MAX_TOKENS",
+                    "1",
+                    "2",
+                ):
                     filtered = True
 
             logger.info(
@@ -673,8 +816,15 @@ class GeminiClient:
             )
 
             if filtered:
-                logger.warning(f"[LLM] Content filtered by safety settings  model={model_to_use}")
-                return {"model": model_to_use, "response": "The content generation was blocked by safety filters. Please try with different input or contact support.", "done": True, "filtered": True}
+                logger.warning(
+                    f"[LLM] Content filtered by safety settings  model={model_to_use}"
+                )
+                return {
+                    "model": model_to_use,
+                    "response": "The content generation was blocked by safety filters. Please try with different input or contact support.",
+                    "done": True,
+                    "filtered": True,
+                }
 
             return {"model": model_to_use, "response": response_text, "done": True}
 
@@ -687,7 +837,42 @@ class GeminiClient:
                 error=str(e),
             )
             logger.error(f"Error in Gemini generate: {e}", exc_info=True)
-            raise GeminiError(f"Generate failed: {str(e)}", original_error=e)
+            raise GeminiError(f"Generate failed: {str(e)}", original_error=e) from e
+
+    def _local_health_url(self) -> str:
+        """Return the Ollama tags endpoint associated with the generation URL."""
+        if not self.local_llm_url:
+            raise GeminiError("No local LLM endpoint is configured.")
+
+        url = httpx.URL(self.local_llm_url)
+        path = url.path.rstrip("/")
+        if path.endswith("/api/generate") or path.endswith("/api/chat"):
+            path = f"{path.rsplit('/', 1)[0]}/tags"
+        elif path.endswith("/api"):
+            path = f"{path}/tags"
+        elif not path.endswith("/api/tags"):
+            path = f"{path}/api/tags"
+        return str(url.copy_with(path=path, query=None, fragment=None))
+
+    async def _check_local_llm_health(self) -> bool:
+        """Check the configured local Ollama service without running generation."""
+        try:
+            timeout = min(float(self.local_llm_timeout), 10.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(self._local_health_url())
+            healthy = 200 <= response.status_code < 300
+            if not healthy:
+                logger.warning(
+                    "Local LLM health check failed with HTTP %s",
+                    response.status_code,
+                )
+            return healthy
+        except (GeminiError, httpx.HTTPError, ValueError) as health_error:
+            logger.warning(
+                "Local LLM health check failed: %s",
+                type(health_error).__name__,
+            )
+            return False
 
     async def health_check(self) -> bool:
         """
@@ -701,6 +886,7 @@ class GeminiClient:
                 # Use a quota-free model metadata fetch instead of generate_content
                 # so health checks don't burn tokens or trigger rate limits.
                 from google import genai as google_genai
+
                 client = google_genai.Client(
                     vertexai=True,
                     project=self.vertex_project,
@@ -715,10 +901,14 @@ class GeminiClient:
                     timeout=10.0,
                 )
             else:
-                # BYOK-only mode: no server key to verify, nothing to check.
+                # Without a server Gemini key, verify the configured local fallback.
                 if not self.api_key:
+                    if self.local_llm_url:
+                        return await self._check_local_llm_health()
+                    # BYOK-only mode: no server key to verify, nothing to check.
                     return True
                 from google import genai as google_genai
+
                 _hc_client = google_genai.Client(api_key=self.api_key)
                 await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
@@ -732,7 +922,9 @@ class GeminiClient:
             # correctly — it is simply enforcing quota. Treat as healthy.
             err_str = str(e)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                logger.info("Gemini health check: quota limit hit but service is reachable")
+                logger.info(
+                    "Gemini health check: quota limit hit but service is reachable"
+                )
                 return True
             logger.warning(f"Gemini health check failed: {e}")
             return False

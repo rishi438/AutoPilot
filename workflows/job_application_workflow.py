@@ -40,7 +40,12 @@ from langgraph.graph import StateGraph, END
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
-from utils.logging_config import get_structured_logger, session_id_var, set_request_context, clear_request_context
+from utils.logging_config import (
+    get_structured_logger,
+    session_id_var,
+    set_request_context,
+    clear_request_context,
+)
 from api.websocket import (
     broadcast_agent_update,
     broadcast_phase_change,
@@ -68,6 +73,21 @@ DEFAULT_WORKFLOW_PREFERENCES: dict = {
     "workflow_gate_threshold": 0.5,
     "auto_generate_documents": False,
 }
+
+
+def _resolve_workflow_preferences(user_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge workflow defaults with the user's persisted preferences.
+
+    Provider selection is intentionally left untouched: a saved model preference
+    may select a hosted model, while an absent preference lets LLM configuration
+    choose the provider.
+    """
+    return {
+        **DEFAULT_WORKFLOW_PREFERENCES,
+        **(user_data.get("application_preferences") or {}),
+    }
+
+
 from agents.job_analyzer import JobAnalyzerAgent
 from agents.company_research import CompanyResearchAgent
 from agents.profile_matching import ProfileMatchingAgent
@@ -82,7 +102,10 @@ from utils.security import (
     sanitize_dict,
 )
 from config.settings import get_settings
-from models.database import WorkflowSession as WorkflowSessionModel, JobApplication as JobApplicationModel
+from models.database import (
+    WorkflowSession as WorkflowSessionModel,
+    JobApplication as JobApplicationModel,
+)
 from utils.application_dedupe import find_conflicting_job_application
 
 # =============================================================================
@@ -256,7 +279,9 @@ class JobApplicationWorkflow:
         workflow.add_node(
             NodeName.DOCUMENT_GENERATION.value, self._document_generation_parallel_node
         )
-        workflow.add_node(NodeName.ANALYSIS_COMPLETE.value, self._analysis_complete_node)
+        workflow.add_node(
+            NodeName.ANALYSIS_COMPLETE.value, self._analysis_complete_node
+        )
         workflow.add_node(NodeName.ERROR_HANDLER.value, self._error_handler_node)
 
         # Gate decision node (handles low match score pause)
@@ -336,7 +361,9 @@ class JobApplicationWorkflow:
         workflow.add_node(
             NodeName.DOCUMENT_GENERATION.value, self._document_generation_parallel_node
         )
-        workflow.add_node(NodeName.ANALYSIS_COMPLETE.value, self._analysis_complete_node)
+        workflow.add_node(
+            NodeName.ANALYSIS_COMPLETE.value, self._analysis_complete_node
+        )
         workflow.add_node(NodeName.ERROR_HANDLER.value, self._error_handler_node)
 
         # Set entry point for continuation
@@ -408,12 +435,7 @@ class JobApplicationWorkflow:
 
         try:
             # Derive workflow preferences from the user's profile data
-            workflow_preferences = {
-                **DEFAULT_WORKFLOW_PREFERENCES,
-                **(user_data.get("application_preferences") or {}),
-            }
-            # Force local Deepseek for workflow document generation
-            workflow_preferences["preferred_model"] = "deepseek-r1:14b"
+            workflow_preferences = _resolve_workflow_preferences(user_data)
 
             # Create initial state
             initial_state: WorkflowState = create_initial_state(
@@ -506,7 +528,10 @@ class JobApplicationWorkflow:
             # Verify workflow is in the correct state to resume
             # Note: API endpoint changes status to IN_PROGRESS before calling this background task
             current_status = state.get("workflow_status")
-            if current_status not in [WorkflowStatus.AWAITING_CONFIRMATION, WorkflowStatus.IN_PROGRESS]:
+            if current_status not in [
+                WorkflowStatus.AWAITING_CONFIRMATION,
+                WorkflowStatus.IN_PROGRESS,
+            ]:
                 raise ValueError(
                     f"Workflow cannot be continued. Current status: {current_status}"
                 )
@@ -591,7 +616,9 @@ class JobApplicationWorkflow:
 
         resume_recommendations = state.get("resume_recommendations")
         if resume_recommendations:
-            resume_recommendations = sanitize_resume_recommendations(resume_recommendations)
+            resume_recommendations = sanitize_resume_recommendations(
+                resume_recommendations
+            )
 
         # Company research may contain scraped content - sanitize it
         company_research = state.get("company_research")
@@ -613,7 +640,8 @@ class JobApplicationWorkflow:
             ),
             "current_agent": (
                 state.get("current_agent").value
-                if state.get("current_agent") and hasattr(state.get("current_agent"), "value")
+                if state.get("current_agent")
+                and hasattr(state.get("current_agent"), "value")
                 else state.get("current_agent")
             ),
             "agent_status": {
@@ -684,7 +712,10 @@ class JobApplicationWorkflow:
                 )
                 await self.db.commit()
             except Exception as _pre_save_err:
-                logger.debug("Pre-agent current_agent flush failed (non-critical): %s", _pre_save_err)
+                logger.debug(
+                    "Pre-agent current_agent flush failed (non-critical): %s",
+                    _pre_save_err,
+                )
 
         # Get user_id for WebSocket broadcasts
         user_id = str(state.get("user_id", ""))
@@ -845,8 +876,7 @@ class JobApplicationWorkflow:
 
         # Gate decision logic
         should_gate = (
-            overall_fit < gate_threshold
-            or recommendation in GATE_RECOMMENDATIONS
+            overall_fit < gate_threshold or recommendation in GATE_RECOMMENDATIONS
         )
 
         # Get user_id for WebSocket broadcasts
@@ -904,7 +934,9 @@ class JobApplicationWorkflow:
         but documents have not been generated yet.  The user can trigger document
         generation on-demand via POST /api/v1/workflow/{session_id}/generate-documents.
         """
-        logger.info("Analysis complete — document generation deferred by user preference")
+        logger.info(
+            "Analysis complete — document generation deferred by user preference"
+        )
 
         state["current_phase"] = WorkflowPhase.ANALYSIS_COMPLETE
         state["workflow_status"] = WorkflowStatus.ANALYSIS_COMPLETE
@@ -1022,7 +1054,7 @@ class JobApplicationWorkflow:
         # Broadcast workflow completion via WebSocket
         user_id = str(state.get("user_id", ""))
         session_id = state.get("session_id", "")
-        
+
         # Build result summary for broadcast
         profile_matching = state.get("profile_matching", {})
         final_scores = profile_matching.get("final_scores", {})
@@ -1032,7 +1064,7 @@ class JobApplicationWorkflow:
             "has_cover_letter": bool(state.get("cover_letter")),
             "completed_agents": len(state.get("completed_agents", [])),
         }
-        
+
         await broadcast_workflow_complete(
             user_id=user_id,
             session_id=session_id,
@@ -1193,7 +1225,10 @@ class JobApplicationWorkflow:
 
     def _route_after_profile_matching(self, state: WorkflowState) -> str:
         """Route after profile matching — any failure ends the workflow with no partial data."""
-        if state["agent_status"].get(Agent.PROFILE_MATCHING.value) == AgentStatus.COMPLETED:
+        if (
+            state["agent_status"].get(Agent.PROFILE_MATCHING.value)
+            == AgentStatus.COMPLETED
+        ):
             return "success"
         return "error"
 
@@ -1206,7 +1241,10 @@ class JobApplicationWorkflow:
 
     def _route_after_company_research(self, state: WorkflowState) -> str:
         """Route after company research: fail fast, or analysis vs document generation."""
-        if state["agent_status"].get(Agent.COMPANY_RESEARCH.value) != AgentStatus.COMPLETED:
+        if (
+            state["agent_status"].get(Agent.COMPANY_RESEARCH.value)
+            != AgentStatus.COMPLETED
+        ):
             return "error"
         prefs = state.get("workflow_preferences") or {}
         if prefs.get("auto_generate_documents", False):
@@ -1217,7 +1255,9 @@ class JobApplicationWorkflow:
     # STATE PERSISTENCE (PostgreSQL/SQLAlchemy)
     # =========================================================================
 
-    async def _maybe_fail_duplicate_job_after_analyzer(self, state: WorkflowState) -> None:
+    async def _maybe_fail_duplicate_job_after_analyzer(
+        self, state: WorkflowState
+    ) -> None:
         """
         After Job Analyzer returns structured title+company, fail this workflow if
         another non-deleted application already has the same normalized pair.
@@ -1229,7 +1269,10 @@ class JobApplicationWorkflow:
             return
         if state.get("_analyzer_dedupe_checked") is True:
             return
-        if state.get("agent_status", {}).get(Agent.JOB_ANALYZER.value) != AgentStatus.COMPLETED:
+        if (
+            state.get("agent_status", {}).get(Agent.JOB_ANALYZER.value)
+            != AgentStatus.COMPLETED
+        ):
             return
         ja = state.get("job_analysis")
         if not ja:
@@ -1326,7 +1369,8 @@ class JobApplicationWorkflow:
                 )
                 workflow_session.current_agent = (
                     state["current_agent"].value
-                    if state["current_agent"] and hasattr(state["current_agent"], "value")
+                    if state["current_agent"]
+                    and hasattr(state["current_agent"], "value")
                     else state.get("current_agent")
                 )
                 workflow_session.agent_status = {
@@ -1347,17 +1391,21 @@ class JobApplicationWorkflow:
                 end_time_str = state.get("processing_end_time")
                 if end_time_str:
                     from datetime import datetime as dt
+
                     try:
-                        workflow_session.processing_end_time = dt.fromisoformat(end_time_str)
+                        workflow_session.processing_end_time = dt.fromisoformat(
+                            end_time_str
+                        )
                     except (ValueError, TypeError):
                         workflow_session.processing_end_time = None
                 workflow_session.agent_start_times = state.get("agent_start_times", {})
                 workflow_session.agent_durations = state.get("agent_durations", {})
-                
+
                 # Force SQLAlchemy to detect mutations on all JSONB fields.
                 # Without flag_modified(), SQLAlchemy may skip JSONB fields in
                 # the UPDATE statement because dict/list identity hasn't changed.
                 from sqlalchemy.orm.attributes import flag_modified
+
                 for _jsonb_field in (
                     "agent_status",
                     "completed_agents",
@@ -1403,7 +1451,9 @@ class JobApplicationWorkflow:
                                 async with self.db.begin_nested():
                                     await self.db.execute(
                                         update(JobApplicationModel)
-                                        .where(JobApplicationModel.session_id == session_id)
+                                        .where(
+                                            JobApplicationModel.session_id == session_id
+                                        )
                                         .values(**_early_vals)
                                     )
                             except Exception as _upd_err:
@@ -1417,7 +1467,9 @@ class JobApplicationWorkflow:
                         workflow_session.profile_matching = state["profile_matching"]
                         flag_modified(workflow_session, "profile_matching")
                     if state.get("resume_recommendations"):
-                        workflow_session.resume_recommendations = state["resume_recommendations"]
+                        workflow_session.resume_recommendations = state[
+                            "resume_recommendations"
+                        ]
                         flag_modified(workflow_session, "resume_recommendations")
                     if state.get("cover_letter"):
                         workflow_session.cover_letter = state["cover_letter"]
@@ -1446,7 +1498,7 @@ class JobApplicationWorkflow:
     ) -> Optional[WorkflowState]:
         """
         Load workflow state from PostgreSQL database for resumption.
-        
+
         Args:
             session_id: The session ID to load
             user_api_key: Optional user API key to include in the state (BYOK mode)
@@ -1478,17 +1530,10 @@ class JobApplicationWorkflow:
                 else None
             )
             end_time = (
-                doc.processing_end_time.isoformat()
-                if doc.processing_end_time
-                else None
+                doc.processing_end_time.isoformat() if doc.processing_end_time else None
             )
             restored_user_data = doc.user_data or {}
-            restored_prefs = {
-                **DEFAULT_WORKFLOW_PREFERENCES,
-                **(restored_user_data.get("application_preferences") or {}),
-            }
-            # Force local Deepseek for workflow document generation on resumed state
-            restored_prefs["preferred_model"] = "deepseek-r1:14b"
+            restored_prefs = _resolve_workflow_preferences(restored_user_data)
             state = WorkflowState(
                 user_id=str(doc.user_id),
                 session_id=doc.session_id,
@@ -1505,15 +1550,11 @@ class JobApplicationWorkflow:
                 workflow_status=WorkflowStatus(doc.workflow_status),
                 processing_start_time=start_time,
                 processing_end_time=end_time,
-                current_agent=(
-                    Agent(doc.current_agent) if doc.current_agent else None
-                ),
+                current_agent=(Agent(doc.current_agent) if doc.current_agent else None),
                 agent_status={
                     k: AgentStatus(v) for k, v in (doc.agent_status or {}).items()
                 },
-                completed_agents=[
-                    Agent(a) for a in (doc.completed_agents or [])
-                ],
+                completed_agents=[Agent(a) for a in (doc.completed_agents or [])],
                 failed_agents=[Agent(a) for a in (doc.failed_agents or [])],
                 error_messages=doc.error_messages or [],
                 warning_messages=doc.warning_messages or [],
@@ -1525,7 +1566,10 @@ class JobApplicationWorkflow:
             return state
 
         except Exception as e:
-            logger.error(f"Failed to load workflow state for session {session_id}: {e}", exc_info=True)
+            logger.error(
+                f"Failed to load workflow state for session {session_id}: {e}",
+                exc_info=True,
+            )
             return None
 
 
@@ -1534,7 +1578,9 @@ class JobApplicationWorkflow:
 # =============================================================================
 
 
-async def get_initialized_workflow(db: Optional[AsyncSession] = None) -> "JobApplicationWorkflow":
+async def get_initialized_workflow(
+    db: Optional[AsyncSession] = None,
+) -> "JobApplicationWorkflow":
     """
     Get or create a globally initialized workflow instance.
 

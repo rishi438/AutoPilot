@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, List
 
 from utils.llm_client import get_gemini_client
 from utils.llm_parsing import parse_json_from_llm_response
+from utils.llm_prompting import build_llm_system_prompt
 from utils.logging_config import get_structured_logger
 
 # =============================================================================
@@ -20,7 +21,7 @@ structured_logger = get_structured_logger(__name__)
 
 # LLM Configuration
 LLM_TEMPERATURE = 0.7
-LLM_MAX_TOKENS = 16000  # Unified agent output cap
+LLM_MAX_TOKENS = 1024
 
 # Follow-up stages
 FOLLOWUP_STAGES = [
@@ -37,10 +38,14 @@ FOLLOWUP_STAGES = [
 # PROMPT TEMPLATES
 # =============================================================================
 
-SYSTEM_CONTEXT = """You are an expert career coach specializing in professional communication \
-during the job search process. You write complete, polished follow-up emails that are \
-ready to send immediately — no placeholders, no fill-in-the-blank markers, no brackets \
-of any kind. Every email you produce is specific, confident, and leaves a lasting positive impression."""
+SYSTEM_CONTEXT = build_llm_system_prompt(
+    "Professional communication editor",
+    "Draft a concise follow-up email appropriate to the supplied application stage.",
+    extra_rules=(
+        "Write complete, ready-to-send prose without placeholders or fill-in-the-blank markers.",
+        "Do not invent interactions, discussion points, dates, or contact details.",
+    ),
+)
 
 FOLLOWUP_PROMPT = """Generate a complete, ready-to-send professional follow-up email for a job application.
 
@@ -52,7 +57,7 @@ Context:
 - Days Since Last Contact: {days_since_contact}
 - Previous Interactions: {previous_interactions}
 - Key Points to Mention: {key_points}
-- Sender's Name: {user_name}
+- Sign-off: {user_name}
 
 Stage-Specific Guidelines:
 {stage_guidelines}
@@ -65,7 +70,7 @@ around the gap — omit the reference entirely rather than inserting a bracket.
 3. Every sentence must be final, concrete prose. No example text, no italicised suggestions.
 4. Keep the body under 150 words. Every sentence must earn its place.
 5. Address the contact by FIRST NAME ONLY in the greeting (e.g., "Hi Jack," or "Dear Jack," — never use the full name like "Dear Jack Dennis,").
-6. Sign off with "{user_name}" at the end.
+6. End with the exact sign-off "{user_name}".
 7. Subject line must be specific to this role and company — not generic.
 8. If Key Points to Mention are provided, weave them naturally into the email. \
 If none are provided, draw on the company name and role to write something specific and genuine.
@@ -142,7 +147,7 @@ STAGE_GUIDELINES = {
 class FollowUpGeneratorAgent:
     """
     Agent for generating follow-up emails at various stages of job applications.
-    
+
     Supports multiple stages from initial application through offer,
     with stage-appropriate tone and content.
     """
@@ -167,7 +172,7 @@ class FollowUpGeneratorAgent:
     ) -> Dict[str, Any]:
         """
         Generate a follow-up email for a specific stage.
-        
+
         Args:
             stage: Stage of follow-up (after_application, after_interview, etc.)
             company_name: Name of the company
@@ -179,33 +184,37 @@ class FollowUpGeneratorAgent:
             key_points: Optional list of key points to mention
             user_name: Optional user's name for sign-off
             user_api_key: Optional user API key for BYOK mode
-            
+
         Returns:
             Dict containing email content and guidance
         """
         self._current_user_api_key = user_api_key
-        
+
         # Validate stage
         if stage not in FOLLOWUP_STAGES:
             raise ValueError(f"Invalid stage. Must be one of: {FOLLOWUP_STAGES}")
-        
+
         try:
             # Initialize Gemini client
             self.gemini_client = await get_gemini_client()
-            
+
             # Format inputs
             contact_role_str = f"({contact_role})" if contact_role else ""
-            days_str = f"{days_since_contact} days" if days_since_contact else "Not specified"
-            interactions_str = previous_interactions if previous_interactions else "Initial contact"
+            days_str = (
+                f"{days_since_contact} days" if days_since_contact else "Not specified"
+            )
+            interactions_str = (
+                previous_interactions if previous_interactions else "Initial contact"
+            )
             key_points_str = ", ".join(key_points) if key_points else "None specified"
-            user_name_str = user_name if user_name else "[Your Name]"
-            
+            user_name_str = user_name if user_name else "Best regards,"
+
             # Get stage guidelines
             stage_guidelines = STAGE_GUIDELINES.get(stage, "General follow-up")
-            
+
             # Format stage for display
             stage_display = stage.replace("_", " ").title()
-            
+
             # Build prompt
             prompt = FOLLOWUP_PROMPT.format(
                 stage=stage_display,
@@ -219,10 +228,10 @@ class FollowUpGeneratorAgent:
                 user_name=user_name_str,
                 stage_guidelines=stage_guidelines,
             )
-            
+
             structured_logger.log_agent_start("followup_generator", None)
             start_time = datetime.now(timezone.utc)
-            
+
             # Generate response
             response = await self.gemini_client.generate(
                 prompt=prompt,
@@ -230,51 +239,68 @@ class FollowUpGeneratorAgent:
                 temperature=LLM_TEMPERATURE,
                 max_tokens=LLM_MAX_TOKENS,
                 user_api_key=self._current_user_api_key,
+                structured_output=True,
             )
-            
-            duration_ms = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
-            
+
+            duration_ms = (
+                datetime.now(timezone.utc) - start_time
+            ).total_seconds() * 1000
+
             # Check for filtered content
             if response.get("filtered"):
-                structured_logger.log_agent_complete("followup_generator", None, duration_ms)
+                structured_logger.log_agent_complete(
+                    "followup_generator", None, duration_ms
+                )
                 return self._create_filtered_result(response.get("response", ""), stage)
-            
+
             response_text = response.get("response", "")
-            
+
             # Parse JSON response
             parsed = parse_json_from_llm_response(response_text)
-            
+
             if not parsed:
-                logger.error(f"Failed to parse follow-up response: {response_text[:200]}")
+                logger.error(
+                    "Failed to parse follow-up response (%d characters)",
+                    len(response_text),
+                )
                 structured_logger.log_agent_error(
-                    "followup_generator", None, 
-                    Exception("JSON parse failed"), duration_ms
+                    "followup_generator",
+                    None,
+                    Exception("JSON parse failed"),
+                    duration_ms,
                 )
                 return self._create_parse_error_result(response_text, stage, job_title)
-            
-            structured_logger.log_agent_complete("followup_generator", None, duration_ms)
-            
+
+            structured_logger.log_agent_complete(
+                "followup_generator", None, duration_ms
+            )
+
             return {
                 "subject_line": parsed.get(
-                    "subject_line", 
-                    f"Following up - {job_title} application"
+                    "subject_line", f"Following up - {job_title} application"
                 ),
                 "email_body": parsed.get("email_body", ""),
                 "key_elements": parsed.get("key_elements", []),
                 "tone": parsed.get("tone", "professional"),
-                "timing_advice": parsed.get("timing_advice", "Send during business hours"),
-                "next_steps": parsed.get("next_steps", "Wait 5-7 days before following up again"),
+                "timing_advice": parsed.get(
+                    "timing_advice", "Send during business hours"
+                ),
+                "next_steps": parsed.get(
+                    "next_steps", "Wait 5-7 days before following up again"
+                ),
                 "alternative_subject": parsed.get("alternative_subject", ""),
                 "stage": stage,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "version": "1.0",
             }
-            
+
         except Exception as e:
             logger.error(f"Follow-up generation failed: {e}", exc_info=True)
             raise
 
-    def _create_filtered_result(self, filter_message: str, stage: str) -> Dict[str, Any]:
+    def _create_filtered_result(
+        self, filter_message: str, stage: str
+    ) -> Dict[str, Any]:
         """Create a result when content was filtered."""
         return {
             "subject_line": "Following up on my application",
@@ -297,7 +323,7 @@ class FollowUpGeneratorAgent:
         """Create a result when JSON parsing failed."""
         return {
             "subject_line": f"Following up - {job_title} application",
-            "email_body": raw_response if len(raw_response) < 2000 else raw_response[:2000],
+            "email_body": "The generated response could not be validated. Please try again.",
             "key_elements": [],
             "tone": "professional",
             "timing_advice": "Send during business hours",
@@ -313,18 +339,39 @@ class FollowUpGeneratorAgent:
     def get_available_stages() -> List[Dict[str, str]]:
         """Get list of available follow-up stages with descriptions."""
         return [
-            {"id": "after_application", "name": "After Application", 
-             "description": "Follow up after submitting your application"},
-            {"id": "after_phone_screen", "name": "After Phone Screen",
-             "description": "Thank you and follow up after initial phone call"},
-            {"id": "after_interview", "name": "After Interview",
-             "description": "Post-interview thank you and reinforcement"},
-            {"id": "after_final_round", "name": "After Final Round",
-             "description": "Strong close after final interview"},
-            {"id": "no_response", "name": "No Response Check-in",
-             "description": "Gentle check-in when you haven't heard back"},
-            {"id": "after_rejection", "name": "After Rejection",
-             "description": "Gracious response to maintain relationship"},
-            {"id": "after_offer", "name": "After Offer",
-             "description": "Acknowledge offer and clarify next steps"},
+            {
+                "id": "after_application",
+                "name": "After Application",
+                "description": "Follow up after submitting your application",
+            },
+            {
+                "id": "after_phone_screen",
+                "name": "After Phone Screen",
+                "description": "Thank you and follow up after initial phone call",
+            },
+            {
+                "id": "after_interview",
+                "name": "After Interview",
+                "description": "Post-interview thank you and reinforcement",
+            },
+            {
+                "id": "after_final_round",
+                "name": "After Final Round",
+                "description": "Strong close after final interview",
+            },
+            {
+                "id": "no_response",
+                "name": "No Response Check-in",
+                "description": "Gentle check-in when you haven't heard back",
+            },
+            {
+                "id": "after_rejection",
+                "name": "After Rejection",
+                "description": "Gracious response to maintain relationship",
+            },
+            {
+                "id": "after_offer",
+                "name": "After Offer",
+                "description": "Acknowledge offer and clarify next steps",
+            },
         ]

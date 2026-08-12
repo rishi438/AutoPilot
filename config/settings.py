@@ -4,8 +4,10 @@ Manages environment variables, database connections, and application settings.
 """
 
 from typing import List, Optional, Union, Dict, Any
+from urllib.parse import urlsplit
+
 from pydantic_settings import BaseSettings
-from pydantic import field_validator, Field, SecretStr
+from pydantic import Field, SecretStr, field_validator, model_validator
 
 from utils import gemini_api_key_format
 
@@ -29,19 +31,18 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expiration_hours: int = 24
     bcrypt_rounds: int = 12
-    
+
     # Google OAuth Configuration
     google_client_id: Optional[str] = Field(
-        default=None,
-        description="Google OAuth Client ID (from Google Cloud Console)"
+        default=None, description="Google OAuth Client ID (from Google Cloud Console)"
     )
     google_client_secret: Optional[str] = Field(
         default=None,
-        description="Google OAuth Client Secret (from Google Cloud Console)"
+        description="Google OAuth Client Secret (from Google Cloud Console)",
     )
     google_oauth_enabled: bool = Field(
         default=False,
-        description="Enable Google OAuth (auto-enabled when client ID/secret are set)"
+        description="Enable Google OAuth (auto-enabled when client ID/secret are set)",
     )
 
     # Database Configuration - PostgreSQL
@@ -60,44 +61,45 @@ class Settings(BaseSettings):
     encryption_key: Optional[str] = Field(
         default=None,
         description="Fernet encryption key for stored API keys (base64url, 32 bytes). "
-                    "Generate with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"",
+        'Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"',
     )
 
     # Gemini Configuration
     # API key is optional - users can provide their own via BYOK (Bring Your Own Key)
     gemini_api_key: Optional[str] = Field(
         default=None,
-        description="Google Gemini API key (optional - users can provide their own in Settings)"
+        description="Google Gemini API key (optional - users can provide their own in Settings)",
     )
     gemini_model: str = "gemini-3.5-flash"
 
     # Local LLM Configuration
     local_llm_url: Optional[str] = Field(
         default=None,
-        description="URL of the local LLM endpoint for self-hosted generation fallback."
+        description="URL of the local LLM endpoint for self-hosted generation fallback.",
     )
     local_llm_model: Optional[str] = Field(
         default=None,
-        description="Local LLM model name to use when the request does not explicitly specify a local model."
+        description="Local LLM model name to use when the request does not explicitly specify a local model.",
     )
     local_llm_timeout: int = Field(
         default=180,
-        description="Timeout in seconds for requests sent to the local LLM endpoint."
+        ge=10,
+        le=600,
+        description="Timeout in seconds for requests sent to the local LLM endpoint.",
     )
-    
+
     # Vertex AI Configuration (alternative backend - higher rate limits, no free tier limits)
     # Requires: gcloud auth application-default login (or GOOGLE_APPLICATION_CREDENTIALS)
     use_vertex_ai: bool = Field(
         default=False,
-        description="Use Vertex AI instead of Google AI Studio (requires ADC authentication)"
+        description="Use Vertex AI instead of Google AI Studio (requires ADC authentication)",
     )
     vertex_ai_project: Optional[str] = Field(
-        default=None,
-        description="Google Cloud Project ID for Vertex AI"
+        default=None, description="Google Cloud Project ID for Vertex AI"
     )
     vertex_ai_location: str = Field(
         default="us-central1",
-        description="Vertex AI region (e.g., us-central1, europe-west1)"
+        description="Vertex AI region (e.g., us-central1, europe-west1)",
     )
 
     base_url: str = "http://localhost:8000"
@@ -110,31 +112,29 @@ class Settings(BaseSettings):
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587
     smtp_username: Optional[str] = Field(
-        default=None,
-        description="SMTP username (Gmail address for Gmail SMTP)"
+        default=None, description="SMTP username (Gmail address for Gmail SMTP)"
     )
     smtp_password: Optional[SecretStr] = Field(
         default=None,
-        description="SMTP password (Gmail App Password - generate at https://myaccount.google.com/apppasswords)"
+        description="SMTP password (Gmail App Password - generate at https://myaccount.google.com/apppasswords)",
     )
     smtp_from_email: Optional[str] = Field(
         default=None,
-        description="From email address (defaults to smtp_username if not set)"
+        description="From email address (defaults to smtp_username if not set)",
     )
     smtp_from_name: str = "ApplyPilot"
 
     # Analytics Configuration (PostHog)
     posthog_api_key: Optional[str] = Field(
         default=None,
-        description="PostHog API key for product analytics (get from PostHog dashboard)"
+        description="PostHog API key for product analytics (get from PostHog dashboard)",
     )
     posthog_host: str = Field(
         default="https://us.i.posthog.com",
-        description="PostHog API host (us.i.posthog.com for US, eu.i.posthog.com for EU)"
+        description="PostHog API host (us.i.posthog.com for US, eu.i.posthog.com for EU)",
     )
     posthog_enabled: bool = Field(
-        default=True,
-        description="Enable PostHog analytics (requires API key)"
+        default=True, description="Enable PostHog analytics (requires API key)"
     )
 
     # Cloud Tasks Configuration (async LLM workflow offloading)
@@ -143,42 +143,42 @@ class Settings(BaseSettings):
     # This gives automatic retries, longer timeouts, and decoupled execution.
     cloud_tasks_queue_name: str = Field(
         default="workflow-tasks",
-        description="Cloud Tasks queue name for async workflow execution"
+        description="Cloud Tasks queue name for async workflow execution",
     )
     cloud_tasks_location: str = Field(
         default="us-central1",
-        description="GCP region where the Cloud Tasks queue lives"
+        description="GCP region where the Cloud Tasks queue lives",
     )
     cloud_tasks_service_url: Optional[str] = Field(
         default=None,
         description="Cloud Run service URL (e.g. https://job-assistant-prod-xxx.run.app). "
-                    "When set, workflows are dispatched via Cloud Tasks instead of BackgroundTasks."
+        "When set, workflows are dispatched via Cloud Tasks instead of BackgroundTasks.",
     )
     cloud_tasks_service_account: Optional[str] = Field(
         default=None,
         description="Service account email that Cloud Tasks uses to sign OIDC tokens "
-                    "(e.g. job-assistant-tasks-sa@project.iam.gserviceaccount.com)"
+        "(e.g. job-assistant-tasks-sa@project.iam.gserviceaccount.com)",
     )
     cloud_tasks_secret: Optional[str] = Field(
         default=None,
         description="Shared secret sent as X-CloudTasks-Secret header to authenticate "
-                    "Cloud Tasks callbacks on the internal execute endpoint."
+        "Cloud Tasks callbacks on the internal execute endpoint.",
     )
 
     # Cloud Scheduler secret for authenticated internal cron endpoints
     cloud_scheduler_secret: Optional[str] = Field(
         default=None,
         description="Shared secret sent as X-Scheduler-Secret header by Cloud Scheduler "
-                    "to authenticate periodic maintenance calls (e.g. orphaned session cleanup)."
+        "to authenticate periodic maintenance calls (e.g. orphaned session cleanup).",
     )
 
     # Self-hosted / local deployment flags
     disable_email_verification: bool = Field(
         default=False,
         description="When True, newly registered users are automatically marked as email-verified "
-                    "and the email-verified gate on login is skipped. "
-                    "Set to True for self-hosted deployments where SMTP is not configured. "
-                    "Never set this to True on a public, multi-user deployment."
+        "and the email-verified gate on login is skipped. "
+        "Set to True for self-hosted deployments where SMTP is not configured. "
+        "Never set this to True on a public, multi-user deployment.",
     )
 
     @property
@@ -291,11 +291,12 @@ class Settings(BaseSettings):
             return v
         try:
             from cryptography.fernet import Fernet
+
             Fernet(v.encode() if isinstance(v, str) else v)
         except Exception:
             raise ValueError(
                 "ENCRYPTION_KEY is not a valid Fernet key. "
-                "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+                'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
             )
         return v
 
@@ -311,6 +312,36 @@ class Settings(BaseSettings):
                 "(single line; see https://aistudio.google.com/app/apikey)."
             )
         return v
+
+    @field_validator("local_llm_url", "local_llm_model", mode="before")
+    @classmethod
+    def normalize_local_llm_setting(cls, value):
+        """Trim optional local-LLM settings and treat blank values as unset."""
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
+
+    @model_validator(mode="after")
+    def validate_local_llm_configuration(self):
+        """Require a complete, safe local-LLM endpoint configuration."""
+        has_url = self.local_llm_url is not None
+        has_model = self.local_llm_model is not None
+        if has_url != has_model:
+            raise ValueError(
+                "LOCAL_LLM_URL and LOCAL_LLM_MODEL must be configured together"
+            )
+
+        if self.local_llm_url:
+            parsed = urlsplit(self.local_llm_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError(
+                    "LOCAL_LLM_URL must be an absolute http:// or https:// URL"
+                )
+            if parsed.username or parsed.password:
+                raise ValueError("LOCAL_LLM_URL must not contain credentials")
+
+        return self
 
     @field_validator("cors_origins")
     @classmethod
@@ -350,7 +381,12 @@ class Settings(BaseSettings):
     @classmethod
     def validate_base_url(cls, v):
         """Ensure BASE_URL uses HTTPS in production-like environments."""
-        if v and v.startswith("http://") and "localhost" not in v and "127.0.0.1" not in v:
+        if (
+            v
+            and v.startswith("http://")
+            and "localhost" not in v
+            and "127.0.0.1" not in v
+        ):
             raise ValueError(
                 f"BASE_URL must use HTTPS in production environments. Got: {v}"
             )
@@ -463,7 +499,7 @@ from functools import lru_cache
 def get_settings() -> Settings:
     """
     Get cached application settings.
-    
+
     Uses lru_cache to ensure settings are only loaded once from environment,
     improving performance and consistency across the application.
     """

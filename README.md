@@ -22,7 +22,7 @@ Paste a job description — or pull it from any job site with the Chrome extensi
 
 Also includes a dashboard to track every application. And tools for everything around it: interview prep with mock sessions, salary negotiation, job comparison, follow-ups, thank you notes, and references.
 
-Runs on your machine. No subscriptions, no data stored on our servers — just your own Gemini API key connecting directly to Google.
+Runs on your machine. Use your own Gemini API key or connect an Ollama-compatible local model; ApplyPilot does not require a hosted ApplyPilot service.
 
 *Here's what a completed application looks like:*
 
@@ -30,7 +30,7 @@ Runs on your machine. No subscriptions, no data stored on our servers — just y
 
 ---
 
-[Six AI Agents](#six-ai-agents) · [Career Tools](#six-career-tools) · [Quick Start](#quick-start) · [Gemini API Key](#gemini-api-key) · [Chrome Extension](#chrome-extension) · [Highlights](#highlights) · [Optional Features](#optional-features) · [Developer Setup](#developer-setup) · [Environment Variables](#environment-variables) · [How It Works](#how-it-works) · [Project Structure](#project-structure) · [Contributing](#contributing) · [License](#license)
+[Six AI Agents](#six-ai-agents) · [Career Tools](#six-career-tools) · [Quick Start](#quick-start) · [AI Provider](#ai-provider) · [Chrome Extension](#chrome-extension) · [Highlights](#highlights) · [Optional Features](#optional-features) · [Developer Setup](#developer-setup) · [Environment Variables](#environment-variables) · [How It Works](#how-it-works) · [Project Structure](#project-structure) · [Contributing](#contributing) · [License](#license)
 
 ---
 
@@ -200,11 +200,15 @@ INFO:     Application startup complete.
 ```
 
 Open **http://localhost:8000** in your browser and create your account.
-During profile setup you'll be prompted to add your Gemini API key — or you can add it later in **Settings → AI Setup**.
+During profile setup you can add a Gemini API key, or configure a local model as described below.
 
 ---
 
-## Gemini API Key
+## AI Provider
+
+Gemini is the default provider. A local Ollama endpoint is optional; model selection is controlled by user preferences and environment configuration rather than being forced by the workflow.
+
+### Gemini API Key
 
 AI features require a key from Google AI Studio.
 
@@ -216,6 +220,23 @@ AI features require a key from Google AI Studio.
 **For personal use** that's all — no `.env` editing needed. Each user stores their own key, encrypted in the database.
 
 **For multi-user hosting:** add `GEMINI_API_KEY=<your key>` to `.env` to set a shared server-side key so users don't need to provide their own.
+
+### Local Ollama
+
+Run Ollama on the host, pull a model, then set both local variables in `.env`. Leave both unset when using only Gemini.
+
+```bash
+ollama pull qwen2.5:14b
+
+# Native ApplyPilot process
+LOCAL_LLM_URL=http://127.0.0.1:11434/api/generate
+LOCAL_LLM_MODEL=qwen2.5:14b
+LOCAL_LLM_TIMEOUT=180
+```
+
+When ApplyPilot runs in a container, use `host.docker.internal` with Docker Desktop or `host.containers.internal` with Podman instead of `127.0.0.1`. The timeout must be between 10 and 600 seconds.
+
+For local-only generation, do not configure a server or user Gemini key. A saved Gemini BYOK key takes precedence; the configured local endpoint remains available when no Gemini key exists or when the hosted service is unavailable.
 
 ---
 
@@ -236,7 +257,7 @@ The extension appears in your Chrome toolbar. Browse jobs naturally. When you fi
 
 - **Local-first** — PostgreSQL, Redis, and the app all run on your machine. One command to start, no external services required.
 - **Full profile system** — work experience, skills, career preferences; agents use your profile in every output.
-- **BYOK AI keys** — each user adds their own Gemini key via Settings, or the admin sets one server-wide key.
+- **Flexible AI provider** — use per-user Gemini BYOK, a server-wide Gemini key, or a configured local Ollama model.
 - **Google OAuth** — optional "Continue with Google" alongside standard email/password.
 - **Multi-user ready** — JWT auth, encrypted key storage, rate limiting per user, soft delete.
 - **No analytics by default** — PostHog is disabled unless you explicitly enable it in `.env`.
@@ -352,6 +373,9 @@ make build-frontend    # rebuilds dist/ and updates manifest.json
 | `REDIS_URL` | Set automatically | Redis connection |
 | `GEMINI_API_KEY` | _(empty)_ | Server-wide AI key — users can add their own during profile setup or via **Settings → AI Setup** |
 | `GEMINI_MODEL` | `gemini-3.5-flash` | AI model to use — users can change this in **Settings → AI Setup** |
+| `LOCAL_LLM_URL` | _(empty)_ | Ollama-compatible generation endpoint; configure together with `LOCAL_LLM_MODEL` |
+| `LOCAL_LLM_MODEL` | _(empty)_ | Model served by the local endpoint; configure together with `LOCAL_LLM_URL` |
+| `LOCAL_LLM_TIMEOUT` | `180` | Local request timeout in seconds (`10`–`600`) |
 | `BASE_URL` | `http://localhost:8000` | Used in password-reset and verification email links |
 | `DISABLE_EMAIL_VERIFICATION` | `true` | Set `false` when SMTP is configured |
 | `GOOGLE_CLIENT_ID` | _(empty)_ | Enables "Continue with Google" |
@@ -377,7 +401,7 @@ Browser / Chrome Extension
            ├── PostgreSQL   users, profiles, job applications, workflow sessions, agent outputs
            ├── Redis         caching, rate limiting, auth state, background task locks
            │
-           └── Five-Agent Pipeline (Google Gemini + LangGraph)
+           └── Five-Agent Pipeline (Gemini or local LLM + LangGraph)
                   Job Analyzer
                        ↓
                  Profile Matcher  ← gates on low fit score

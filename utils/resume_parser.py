@@ -14,6 +14,7 @@ from typing import Dict, Any, List
 
 from utils.llm_client import get_gemini_client, user_facing_message_from_llm_exception
 from utils.llm_parsing import parse_json_from_llm_response
+from utils.llm_prompting import build_llm_system_prompt
 
 # =============================================================================
 # CONSTANTS
@@ -22,12 +23,14 @@ from utils.llm_parsing import parse_json_from_llm_response
 logger: logging.Logger = logging.getLogger(__name__)
 
 # LLM Configuration
-LLM_MAX_TOKENS: int = 16000  # Unified agent output cap
+LLM_MAX_TOKENS: int = 4096
 LLM_TEMPERATURE: float = 0.2  # Low temperature for accurate extraction
 
 # File processing
 PDF_EXTENSION: str = "pdf"
-DOCX_EXTENSION: str = "docx"  # Note: .doc (legacy) not supported - requires different library
+DOCX_EXTENSION: str = (
+    "docx"  # Note: .doc (legacy) not supported - requires different library
+)
 TXT_EXTENSION: str = "txt"
 SUPPORTED_EXTENSIONS: List[str] = [PDF_EXTENSION, DOCX_EXTENSION, TXT_EXTENSION]
 MAX_FILE_SIZE_MB: int = 10
@@ -37,31 +40,17 @@ MAX_FILE_SIZE_BYTES: int = MAX_FILE_SIZE_MB * 1024 * 1024
 # SYSTEM CONTEXT AND PROMPT
 # =============================================================================
 
-SYSTEM_CONTEXT: str = """You are an expert resume parser with 15+ years of experience in HR and recruiting.
-
-## YOUR EXPERTISE:
-
-**Resume Analysis:**
-- You can parse any resume format (chronological, functional, combination)
-- You understand industry-specific terminology across all sectors
-- You recognize implicit information from context
-- You accurately extract dates, durations, and timelines
-
-**Data Extraction:**
-- You extract structured data accurately from unstructured text
-- You handle missing information gracefully (use null, not guesses)
-- You normalize data formats (dates, locations, skills)
-- You identify the most relevant and recent information
-
-## YOUR PRINCIPLES:
-- Extract EXACTLY what's written - don't embellish or assume
-- Be PRECISE with dates - if only year is given, use that
-- Normalize skills to their common names (e.g., "JS" → "JavaScript")
-- When information is missing, use null rather than guessing
-- Preserve the original meaning and context of descriptions
-- For work experience descriptions: preserve all content from the resume faithfully — do not summarize, shorten, or omit any bullet points or details
-- Only extract a work experience entry if it has BOTH a real company name AND a job title AND dates. A brief one-line mention or footnote (e.g. "Previously worked as a chef...") is NOT a work entry — skip it
-- PDF text extraction sometimes wraps long lines mid-sentence; join continuation lines so each bullet is a complete sentence"""
+SYSTEM_CONTEXT: str = build_llm_system_prompt(
+    "Profession-neutral resume data extractor",
+    "Extract the requested structured profile fields from the supplied resume text.",
+    extra_rules=(
+        "Extract only resume-supported facts; do not infer missing experience, skills, credentials, dates, or personal details.",
+        "Preserve each work description and bullet faithfully without shortening or adding claims.",
+        "Create a work entry only when the resume supplies a company, job title, and dates.",
+        "Preserve partial dates as written and join only obvious line-wrap continuations.",
+        "Normalize formatting without changing the source meaning.",
+    ),
+)
 
 RESUME_PARSE_PROMPT: str = """Analyze this resume and extract structured profile information.
 
@@ -217,9 +206,7 @@ def extract_text_from_docx(content: bytes) -> str:
         raise ValueError(f"Failed to extract DOCX content: {str(e)}")
 
 
-def extract_text_from_file(
-    content: bytes, filename: str
-) -> str:
+def extract_text_from_file(content: bytes, filename: str) -> str:
     """
     Extract text from a file based on its extension.
 
@@ -275,7 +262,9 @@ def extract_text_from_file(
 # =============================================================================
 
 
-async def parse_resume(resume_text: str, user_api_key: str | None = None) -> Dict[str, Any]:
+async def parse_resume(
+    resume_text: str, user_api_key: str | None = None
+) -> Dict[str, Any]:
     """
     Parse resume text using Gemini LLM to extract structured profile data.
 
@@ -292,18 +281,14 @@ async def parse_resume(resume_text: str, user_api_key: str | None = None) -> Dic
         ValueError: If parsing fails or LLM returns invalid response
     """
     if not resume_text or len(resume_text.strip()) < 50:
-        raise ValueError(
-            "Resume text is too short. Please provide a complete resume."
-        )
+        raise ValueError("Resume text is too short. Please provide a complete resume.")
 
     start_time = datetime.now(timezone.utc)
 
     try:
         gemini_client = await get_gemini_client()
 
-        prompt = RESUME_PARSE_PROMPT.format(
-            resume_text=resume_text[:15000]
-        )
+        prompt = RESUME_PARSE_PROMPT.format(resume_text=resume_text[:15000])
 
         response = await gemini_client.generate(
             prompt=prompt,
@@ -311,6 +296,7 @@ async def parse_resume(resume_text: str, user_api_key: str | None = None) -> Dic
             temperature=LLM_TEMPERATURE,
             max_tokens=LLM_MAX_TOKENS,
             user_api_key=user_api_key,
+            structured_output=True,
         )
 
         if response.get("filtered"):
@@ -397,9 +383,19 @@ def _clean_parsed_data(data: Dict[str, Any]) -> Dict[str, Any]:
 
     # String fields - ensure they're strings or None
     string_fields = [
-        "full_name", "email", "phone", "linkedin_url", "github_url", "portfolio_url",
-        "city", "state", "country",
-        "professional_title", "summary", "parsing_confidence", "parsing_notes"
+        "full_name",
+        "email",
+        "phone",
+        "linkedin_url",
+        "github_url",
+        "portfolio_url",
+        "city",
+        "state",
+        "country",
+        "professional_title",
+        "summary",
+        "parsing_confidence",
+        "parsing_notes",
     ]
     for field in string_fields:
         value = data.get(field)
@@ -428,9 +424,7 @@ def _clean_parsed_data(data: Dict[str, Any]) -> Dict[str, Any]:
     work_exp = data.get("work_experience", [])
     if isinstance(work_exp, list):
         cleaned["work_experience"] = [
-            _clean_work_experience(exp)
-            for exp in work_exp
-            if isinstance(exp, dict)
+            _clean_work_experience(exp) for exp in work_exp if isinstance(exp, dict)
         ]
     else:
         cleaned["work_experience"] = []
@@ -439,9 +433,7 @@ def _clean_parsed_data(data: Dict[str, Any]) -> Dict[str, Any]:
     education = data.get("education", [])
     if isinstance(education, list):
         cleaned["education"] = [
-            _clean_education(edu)
-            for edu in education
-            if isinstance(edu, dict)
+            _clean_education(edu) for edu in education if isinstance(edu, dict)
         ]
     else:
         cleaned["education"] = []
@@ -450,9 +442,7 @@ def _clean_parsed_data(data: Dict[str, Any]) -> Dict[str, Any]:
     languages = data.get("languages", [])
     if isinstance(languages, list):
         cleaned["languages"] = [
-            _clean_language(lang)
-            for lang in languages
-            if isinstance(lang, dict)
+            _clean_language(lang) for lang in languages if isinstance(lang, dict)
         ]
     else:
         cleaned["languages"] = []
@@ -555,7 +545,5 @@ def _create_parse_error_result(raw_response: str) -> Dict[str, Any]:
         "parsing_confidence": "LOW",
         "parsing_notes": "Failed to parse LLM response as JSON",
         "parse_error": True,
-        "raw_response": raw_response[:2000],  # Keep some for debugging
         "parse_method": "PARSE_ERROR",
     }
-

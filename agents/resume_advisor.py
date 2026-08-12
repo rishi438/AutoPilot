@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from workflows.state_schema import WorkflowState, ResumeRecommendationsResult
 from utils.llm_parsing import parse_json_from_llm_response
+from utils.llm_prompting import build_llm_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -17,44 +18,23 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 LLM_TEMPERATURE: float = 0.25  # Low for consistent, practical advice
-LLM_MAX_TOKENS: int = 16000  # Aligned with unified agent output cap
+LLM_MAX_TOKENS: int = 4096
 LLM_TIMEOUT: float = 90.0  # Longer timeout for detailed analysis
 
 # =============================================================================
 # PROMPTS
 # =============================================================================
 
-SYSTEM_CONTEXT: str = """You are an elite resume strategist and ATS optimization expert with 20+ years of experience helping candidates land interviews at top companies.
-
-## YOUR EXPERTISE:
-
-**ATS Systems:**
-- You know exactly how Applicant Tracking Systems parse and score resumes
-- You understand keyword matching, density, and placement strategies
-- You know which formats pass ATS and which get rejected
-
-**Hiring Manager Psychology:**
-- You know hiring managers spend only 6-7 seconds on initial resume scan
-- You understand what makes them stop and read vs. move to the next resume
-- You know the "F-pattern" reading behavior and design resumes accordingly
-
-**Industry Knowledge:**
-- You understand resume conventions vary by industry (tech vs. finance vs. healthcare)
-- You know what keywords and phrases trigger interest in each field
-- You recognize which achievements and metrics matter most by role
-
-**Strategic Positioning:**
-- You craft professional summaries that immediately communicate value
-- You know how to frame experience gaps, career changes, and non-traditional backgrounds
-- You transform job duties into achievement statements with measurable impact
-
-## YOUR PRINCIPLES:
-- Every recommendation must be SPECIFIC and ACTIONABLE
-- Use ACTUAL details from the candidate's profile - never generic advice
-- YEARS OF EXPERIENCE RULE: The "Years of Experience" field is TOTAL career years — NEVER use it as domain-specific experience. When claiming "X years of [skill/domain]", derive that number only from the relevant work history entries where that skill was actually used. If you cannot calculate it, say "experience with [skill]" without stating a specific year count.
-- Prioritize changes by IMPACT - what will move the needle most?
-- Consider both ATS optimization AND human reader appeal
-- Be honest about weaknesses but always provide solutions"""
+SYSTEM_CONTEXT: str = build_llm_system_prompt(
+    "Profession-neutral resume evidence editor",
+    "Recommend resume changes that align supplied candidate evidence with the target job.",
+    extra_rules=(
+        "Never add a skill, responsibility, achievement, metric, employer, credential, or date not supported by the profile.",
+        "Treat total career years as domain-specific experience only when dated work history supports that claim.",
+        "Do not claim a specific ATS behavior, pass rate, or employer preference without supplied evidence.",
+        "When suggesting a stronger bullet, preserve the underlying facts and leave unsupported metrics out.",
+    ),
+)
 
 RESUME_ADVISOR_PROMPT: str = """Analyze this candidate's resume strategy for the target job and provide expert optimization recommendations.
 
@@ -179,7 +159,7 @@ Remember: Be SPECIFIC. Use their ACTUAL experience, skills, and the EXACT job re
 class ResumeAdvisorAgent:
     """
     Elite Resume Advisor Agent providing strategic, ATS-optimized resume recommendations.
-    
+
     Uses expert LLM analysis to provide specific, actionable resume optimization advice
     tailored to the target job, leveraging profile matching insights and company context.
     """
@@ -224,7 +204,7 @@ class ResumeAdvisorAgent:
             company_research: Optional[Dict[str, Any]] = state.get("company_research")
             prefs: Dict[str, Any] = state.get("workflow_preferences") or {}
             resume_length: str = prefs.get("resume_length", "concise")
-            user_model: Optional[str] = prefs.get("preferred_model") 
+            user_model: Optional[str] = prefs.get("preferred_model")
 
             if not user_profile:
                 raise ValueError("User profile is required for resume advisory")
@@ -233,7 +213,10 @@ class ResumeAdvisorAgent:
 
             # Generate expert recommendations
             recommendations = await self._generate_recommendations(
-                user_profile, job_analysis, profile_matching, company_research,
+                user_profile,
+                job_analysis,
+                profile_matching,
+                company_research,
                 resume_length=resume_length,
                 user_model=user_model,
             )
@@ -295,19 +278,21 @@ class ResumeAdvisorAgent:
             "For each role highlighted, supply 4-5 achievement bullets. Include detailed rationale "
             "for every keyword and section recommendation."
             if resume_length == "detailed"
-            else
-            "\n\nUSER PREFERENCE — CONCISE: Keep recommendations sharp and scannable. "
+            else "\n\nUSER PREFERENCE — CONCISE: Keep recommendations sharp and scannable. "
             "For each role highlighted, supply 2-3 tight achievement bullets. Prioritise the "
             "highest-impact changes only; omit minor or nice-to-have suggestions."
         )
 
         # Build prompt
-        prompt = RESUME_ADVISOR_PROMPT.format(
-            user_profile=formatted_profile,
-            job_analysis=formatted_job,
-            profile_matching=formatted_matching,
-            company_context=formatted_company,
-        ) + length_instruction
+        prompt = (
+            RESUME_ADVISOR_PROMPT.format(
+                user_profile=formatted_profile,
+                job_analysis=formatted_job,
+                profile_matching=formatted_matching,
+                company_context=formatted_company,
+            )
+            + length_instruction
+        )
 
         # Call LLM
         try:
@@ -319,23 +304,30 @@ class ResumeAdvisorAgent:
                     max_tokens=LLM_MAX_TOKENS,
                     user_api_key=self._current_user_api_key,
                     model=user_model,
+                    structured_output=True,
                 ),
                 timeout=LLM_TIMEOUT,
             )
 
             if response.get("filtered"):
                 logger.warning("Response was filtered")
-                return self._create_fallback_result("Content was filtered by safety settings")
+                return self._create_fallback_result(
+                    "Content was filtered by safety settings"
+                )
 
             response_text = response.get("response", "")
             result = parse_json_from_llm_response(response_text)
 
             if not result:
-                logger.warning("Failed to parse JSON, returning raw response")
-                return {
-                    "raw_advice": response_text[:15000],
-                    "parse_error": True,
-                }
+                logger.warning(
+                    "Failed to parse resume advice response (%d characters)",
+                    len(response_text),
+                )
+                fallback = self._create_fallback_result(
+                    "The generated response could not be validated. Please try again."
+                )
+                fallback["parse_error"] = True
+                return fallback
 
             return result
 
@@ -404,7 +396,11 @@ class ResumeAdvisorAgent:
                 deg = edu.get("degree", "N/A")
                 inst = edu.get("institution", "N/A")
                 start = edu.get("start_date", "N/A")
-                end = edu.get("end_date", "Present") if edu.get("is_current") else edu.get("end_date", "N/A")
+                end = (
+                    edu.get("end_date", "Present")
+                    if edu.get("is_current")
+                    else edu.get("end_date", "N/A")
+                )
                 fos = edu.get("field_of_study")
                 line = f"\n{i}. {deg} — {inst} ({start} - {end})"
                 if fos:
@@ -431,7 +427,9 @@ class ResumeAdvisorAgent:
             sections.append(f"Location: {location}")
 
         sections.append(f"Work Arrangement: {job.get('work_arrangement', 'N/A')}")
-        sections.append(f"Experience Required: {job.get('years_experience_required', 'N/A')} years")
+        sections.append(
+            f"Experience Required: {job.get('years_experience_required', 'N/A')} years"
+        )
 
         # Skills
         required_skills = job.get("required_skills", [])
@@ -472,12 +470,18 @@ class ResumeAdvisorAgent:
         # Executive summary from new format
         exec_summary = matching.get("executive_summary", {})
         if exec_summary:
-            sections.append(f"Overall Assessment: {exec_summary.get('fit_assessment', 'N/A')}")
-            sections.append(f"Recommendation: {exec_summary.get('recommendation', 'N/A')}")
+            sections.append(
+                f"Overall Assessment: {exec_summary.get('fit_assessment', 'N/A')}"
+            )
+            sections.append(
+                f"Recommendation: {exec_summary.get('recommendation', 'N/A')}"
+            )
             sections.append(f"Verdict: {exec_summary.get('one_line_verdict', 'N/A')}")
 
         # Scores
-        sections.append(f"\nQualification Score: {matching.get('qualification_score', 0):.2f}")
+        sections.append(
+            f"\nQualification Score: {matching.get('qualification_score', 0):.2f}"
+        )
         sections.append(f"Preference Score: {matching.get('preference_score', 0):.2f}")
         sections.append(f"Overall Score: {matching.get('overall_score', 0):.2f}")
 
@@ -487,18 +491,28 @@ class ResumeAdvisorAgent:
         if skills_assessment:
             matched = skills_assessment.get("matched_skills", [])
             if matched:
-                skill_names = [s.get("skill", s) if isinstance(s, dict) else s for s in matched[:10]]
+                skill_names = [
+                    s.get("skill", s) if isinstance(s, dict) else s
+                    for s in matched[:10]
+                ]
                 sections.append(f"\nMatched Skills: {', '.join(skill_names)}")
 
             missing = skills_assessment.get("missing_critical_skills", [])
             if missing:
-                skill_names = [s.get("skill", s) if isinstance(s, dict) else s for s in missing[:10]]
+                skill_names = [
+                    s.get("skill", s) if isinstance(s, dict) else s
+                    for s in missing[:10]
+                ]
                 sections.append(f"Missing Skills: {', '.join(skill_names)}")
 
             hidden = skills_assessment.get("hidden_skills", [])
             if hidden:
-                skill_names = [s.get("skill", s) if isinstance(s, dict) else s for s in hidden[:5]]
-                sections.append(f"Hidden Skills (likely have): {', '.join(skill_names)}")
+                skill_names = [
+                    s.get("skill", s) if isinstance(s, dict) else s for s in hidden[:5]
+                ]
+                sections.append(
+                    f"Hidden Skills (likely have): {', '.join(skill_names)}"
+                )
 
         # Application strategy from new format
         app_strategy = matching.get("application_strategy", {})
@@ -542,7 +556,9 @@ class ResumeAdvisorAgent:
             values = company["core_values"][:5]
             sections.append(f"Core Values: {', '.join(values)}")
 
-        return "\n".join(sections) if sections else "Limited company information available"
+        return (
+            "\n".join(sections) if sections else "Limited company information available"
+        )
 
     def _create_fallback_result(self, error_message: str) -> Dict[str, Any]:
         """Create fallback result on error."""

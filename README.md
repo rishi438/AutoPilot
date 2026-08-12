@@ -228,7 +228,7 @@ AI features require a key from Google AI Studio.
 3. Click **Load unpacked**
 4. Select the `extension/` folder from this repo
 
-The extension appears in your Chrome toolbar. Browse jobs naturally. When you find one you like, use **Analyze This Job** to send the posting to your dashboard for the full AI workflow, or use **Match Form To Profile** to suggest values into open fields.
+The extension appears in your Chrome toolbar. Browse jobs naturally. When you find one you like, use **Analyze This Job** to send the posting to your dashboard for the full AI workflow, or use **Match Form To Profile** to fill application forms from your profile (AI mapping plus deterministic rules for screening and contact fields — always review before submit).
 
 ---
 
@@ -349,7 +349,7 @@ make build-frontend    # rebuilds dist/ and updates manifest.json
 | `DATABASE_URL` | Set automatically | PostgreSQL connection |
 | `REDIS_URL` | Set automatically | Redis connection |
 | `GEMINI_API_KEY` | _(empty)_ | Server-wide AI key — users can add their own during profile setup or via **Settings → AI Setup** |
-| `GEMINI_MODEL` | `gemini-3-flash-preview` | AI model to use — users can change this in **Settings → AI Setup** |
+| `GEMINI_MODEL` | `gemini-3.5-flash` | AI model to use — users can change this in **Settings → AI Setup** |
 | `BASE_URL` | `http://localhost:8000` | Used in password-reset and verification email links |
 | `DISABLE_EMAIL_VERIFICATION` | `true` | Set `false` when SMTP is configured |
 | `GOOGLE_CLIENT_ID` | _(empty)_ | Enables "Continue with Google" |

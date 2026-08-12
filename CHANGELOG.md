@@ -7,13 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [2.0.0] - 2026-05-29
 
 ### Added
 
-#### Chrome Extension — Form autofill ("Match Form To Profile")
+#### Chrome Extension v2.0.0 — Hybrid form autofill ("Match Form To Profile")
 
-**`POST /api/v1/extension/autofill/map`** returns profile-backed field mappings for visible forms. New **`form-autofill.js`** content script (serialize + apply), popup **Match Form To Profile** flow, API integration tests in **`tests/test_api/`**, and rate-limit header forwarding on **`APIError.to_response`**. Extension popup and landing mockup copy polish; device-local extras UI removed from the popup.
+**`POST /api/v1/extension/autofill/map`** maps visible application fields to profile data using an LLM, then merges **`api/extension_autofill_rules.py`** deterministic assignments that override the model on known labels (name, email, phone, country, location, work authorization, visa sponsorship, screening Yes/No, work-location acknowledgements, education blocks, consent checkboxes, and more). Cached responses are re-merged on replay so rules stay authoritative.
+
+**`extension/lib/form-autofill.js`** deep-scrolls long application pages, serializes combobox options, re-scans and rematches by label before apply, and uses dedicated paths for Yes/No comboboxes, acknowledgement dropdowns, and applicant location fields. The popup can attach a stored resume file after text fields are filled. Integration tests in **`tests/test_api/test_extension_autofill.py`**.
+
+#### Profile — work authorization, visa sponsorship, stored resume
+
+Profile setup adds **work authorization** (radio), **visa sponsorship** (checkbox), contact fields, and resume upload persisted for extension autofill (**`utils/user_resume_storage.py`**). Migrations **`021`** / **`022`**. Degree alias helper for education combobox matching (**`utils/degree_aliases.py`**).
+
+### Changed
+
+- Chrome extension **manifest**, popup footer, and landing mockup version → **2.0.0**.
+
+---
+
+## [Unreleased]
+
+### Added
 
 #### Chrome Extension — Shared page content extraction
 
@@ -24,6 +40,15 @@ Injectable **`extension/lib/extract-page-content.js`**: selection, JSON-LD, site
 The **Upload File** tab on `/dashboard/new-application` accepts **`.docx`** in addition to **`.pdf`** and **`.txt`** (still **5 MB** max). The API (`POST /api/v1/workflow/start`, `job_file`) validates ZIP magic bytes for DOCX and extracts text with `extract_text_from_docx()` (`docx2txt`), same approach as resume uploads. Legacy binary **`.doc`** (Word 97–2003) is not supported.
 
 ### Changed
+
+#### LLM — Gemini model lineup refresh (Gemini 3.5 Flash default)
+
+Refreshed the selectable Gemini models to match Google's current lineup (verified against the [Gemini API changelog](https://ai.google.dev/gemini-api/docs/changelog)):
+
+- **Added** `gemini-3.5-flash` (stable GA 2026-05-19) and `gemini-3.1-flash-lite` (stable GA 2026-05-07).
+- **New default** `gemini-3.5-flash` replaces the preview `gemini-3-flash-preview` (`config/settings.py`, `.env.local.example`, README). This is the server default **and** the BYOK fallback when a user has not picked a model in **Settings → AI Setup** (`preferred_model = null`); `utils/llm_client.py` resolves `model or settings.gemini_model`.
+- **Removed** shut-down / deprecated options: `gemini-3.1-flash-lite-preview` (shut down 2026-05-25), `gemini-2.0-flash` / `gemini-2.0-flash-lite` (shut down 2026-06-01), plus the stale `gemini-1.5-*` and `gemini-2.5-*-preview` names. The `gemini-2.5-flash` / `gemini-2.5-pro` GA pair is **kept** as a stable, lower-cost tier and the only models that run on a region-pinned Vertex deployment (every `gemini-3.*` model requires `VERTEX_AI_LOCATION=global`).
+- **Fixed** a validation/UI mismatch: `_VALID_MODELS` in `api/profile.py` no longer disagrees with the Settings dropdown, so saving the recommended default via `PATCH /api/v1/profile/preferences` no longer returns `422`. Dropdown (`ui/dashboard/settings.html`) and backend allow-list are now identical. Rule docs (`llm-integration.mdc`, `settings-page.mdc`, `settings-and-env.mdc`) and `USER_GUIDE.md` updated.
 
 #### Dashboard — funnel statistics (Applied card and response rate)
 

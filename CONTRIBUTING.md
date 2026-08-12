@@ -193,9 +193,9 @@ pytest tests/test_api/test_auth.py -v
 
 > **Note:** `tests/test_api/` contains integration tests (no live server needed — uses an in-process ASGI client). The root-level `tests/test_*.py` files are **live-server tests** that require a running instance at `localhost:8000` — do not run these in CI.
 
-Before committing, run `pre-commit run --all-files`. The hooks validate common
-file formats, reject secrets and invalid Python, apply Ruff import/lint fixes,
-and format Python with Black.
+Before committing, stage your changes and run `pre-commit run`. The hooks
+validate common file formats, reject secrets and invalid Python, apply Ruff
+import/lint fixes, and format changed Python files with Black.
 
 ### E2E Browser Tests (Playwright)
 

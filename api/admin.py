@@ -6,25 +6,24 @@ Protected by the require_admin dependency — only users with is_admin=True may 
 
 import logging
 import secrets
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func, case, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.database import User, WorkflowSession, JobApplication, WorkflowStatusEnum
+from models.database import JobApplication, User, WorkflowSession, WorkflowStatusEnum
 from utils.auth import require_admin
 from utils.database import get_database, get_session
-from utils.error_responses import internal_error, unauthorized_error
+from utils.error_responses import APIError, internal_error, unauthorized_error
 from utils.logging_config import mask_email
 from utils.maintenance import (
-    is_maintenance_mode,
-    get_maintenance_info,
-    enable_maintenance_mode,
     disable_maintenance_mode,
+    enable_maintenance_mode,
+    get_maintenance_info,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,26 +38,24 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 class MaintenanceRequest(BaseModel):
     """Request model for maintenance mode."""
-    
+
     enabled: bool = Field(..., description="Enable or disable maintenance mode")
-    message: Optional[str] = Field(
-        None, 
-        description="Custom maintenance message to display",
-        max_length=500
+    message: str | None = Field(
+        None, description="Custom maintenance message to display", max_length=500
     )
-    estimated_end: Optional[str] = Field(
+    estimated_end: str | None = Field(
         None,
         description="Estimated end time (e.g., '2 hours', '15:00 UTC')",
-        max_length=100
+        max_length=100,
     )
 
 
 class MaintenanceResponse(BaseModel):
     """Response model for maintenance status."""
-    
+
     enabled: bool
-    message: Optional[str]
-    estimated_end: Optional[str]
+    message: str | None
+    estimated_end: str | None
 
 
 # =============================================================================
@@ -68,14 +65,14 @@ class MaintenanceResponse(BaseModel):
 
 @router.get("/maintenance", response_model=MaintenanceResponse)
 async def get_maintenance_status(
-    current_user: Dict[str, Any] = Depends(require_admin),
+    current_user: dict[str, Any] = Depends(require_admin),
 ) -> MaintenanceResponse:
     """
     Get current maintenance mode status.
-    
+
     Args:
         current_user: Authenticated user (required)
-        
+
     Returns:
         Current maintenance mode status and settings
     """
@@ -86,15 +83,15 @@ async def get_maintenance_status(
             message=info.get("message"),
             estimated_end=info.get("estimated_end"),
         )
-    except Exception as e:
-        logger.error(f"Failed to get maintenance status: {e}", exc_info=True)
-        raise internal_error("Failed to get maintenance status")
+    except Exception as exc:
+        logger.error(f"Failed to get maintenance status: {exc}", exc_info=True)
+        raise internal_error("Failed to get maintenance status") from exc
 
 
 @router.post("/maintenance", response_model=MaintenanceResponse)
 async def set_maintenance_mode(
     request_data: MaintenanceRequest,
-    current_user: Dict[str, Any] = Depends(require_admin),
+    current_user: dict[str, Any] = Depends(require_admin),
 ) -> MaintenanceResponse:
     """
     Enable or disable maintenance mode. Requires admin role.
@@ -102,16 +99,16 @@ async def set_maintenance_mode(
     Args:
         request_data: Maintenance mode settings
         current_user: Authenticated user (required)
-        
+
     Returns:
         Updated maintenance mode status
-        
+
     Raises:
-        HTTPException: 500 if operation fails
+        APIError: If maintenance mode cannot be updated.
     """
     try:
         user_email = current_user.get("email", "unknown")
-        
+
         if request_data.enabled:
             # Enable maintenance mode
             success = await enable_maintenance_mode(
@@ -119,7 +116,9 @@ async def set_maintenance_mode(
                 estimated_end=request_data.estimated_end,
             )
             if not success:
-                raise internal_error("Failed to enable maintenance mode. Check Redis connection.")
+                raise internal_error(
+                    "Failed to enable maintenance mode. Check Redis connection."
+                )
             logger.warning(
                 f"Maintenance mode ENABLED by {mask_email(user_email)}. "
                 f"Message: {request_data.message}, "
@@ -129,9 +128,11 @@ async def set_maintenance_mode(
             # Disable maintenance mode
             success = await disable_maintenance_mode()
             if not success:
-                raise internal_error("Failed to disable maintenance mode. Check Redis connection.")
+                raise internal_error(
+                    "Failed to disable maintenance mode. Check Redis connection."
+                )
             logger.info(f"Maintenance mode DISABLED by {mask_email(user_email)}")
-        
+
         # Return updated status
         info = await get_maintenance_info()
         return MaintenanceResponse(
@@ -139,44 +140,44 @@ async def set_maintenance_mode(
             message=info.get("message"),
             estimated_end=info.get("estimated_end"),
         )
-        
-    except HTTPException:
+
+    except APIError:
         raise
-    except Exception as e:
-        logger.error(f"Failed to set maintenance mode: {e}", exc_info=True)
-        raise internal_error("Failed to update maintenance mode")
+    except Exception as exc:
+        logger.error(f"Failed to set maintenance mode: {exc}", exc_info=True)
+        raise internal_error("Failed to update maintenance mode") from exc
 
 
 @router.delete("/maintenance")
 async def clear_maintenance_mode(
-    current_user: Dict[str, Any] = Depends(require_admin),
-) -> Dict[str, str]:
+    current_user: dict[str, Any] = Depends(require_admin),
+) -> dict[str, str]:
     """
     Quick endpoint to disable maintenance mode.
-    
+
     Equivalent to POST with enabled=false.
-    
+
     Args:
         current_user: Authenticated user (required)
-        
+
     Returns:
         Success message
     """
     try:
         user_email = current_user.get("email", "unknown")
-        
+
         success = await disable_maintenance_mode()
         if not success:
             raise internal_error("Failed to disable maintenance mode")
-        
+
         logger.info(f"Maintenance mode DISABLED by {mask_email(user_email)}")
         return {"message": "Maintenance mode disabled successfully"}
-        
-    except HTTPException:
+
+    except APIError:
         raise
-    except Exception as e:
-        logger.error(f"Failed to disable maintenance mode: {e}", exc_info=True)
-        raise internal_error("Failed to disable maintenance mode")
+    except Exception as exc:
+        logger.error(f"Failed to disable maintenance mode: {exc}", exc_info=True)
+        raise internal_error("Failed to disable maintenance mode") from exc
 
 
 # =============================================================================
@@ -198,14 +199,14 @@ class MetricsResponse(BaseModel):
     """Response model for the admin metrics endpoint."""
 
     generated_at: str
-    users: Dict[str, int]
+    users: dict[str, int]
     workflows: WorkflowMetrics
-    applications: Dict[str, int]
+    applications: dict[str, int]
 
 
 @router.get("/metrics", response_model=MetricsResponse)
 async def get_metrics(
-    current_user: Dict[str, Any] = Depends(require_admin),
+    current_user: dict[str, Any] = Depends(require_admin),
     db: AsyncSession = Depends(get_database),
 ) -> MetricsResponse:
     """
@@ -222,7 +223,7 @@ async def get_metrics(
         APIError: 500 if database query fails
     """
     try:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         thirty_days_ago = now - timedelta(days=30)
         seven_days_ago = now - timedelta(days=7)
 
@@ -245,19 +246,31 @@ async def get_metrics(
                     func.count(WorkflowSession.session_id).label("total"),
                     func.sum(
                         case(
-                            (WorkflowSession.workflow_status == WorkflowStatusEnum.COMPLETED.value, 1),
+                            (
+                                WorkflowSession.workflow_status
+                                == WorkflowStatusEnum.COMPLETED.value,
+                                1,
+                            ),
                             else_=0,
                         )
                     ).label("completed"),
                     func.sum(
                         case(
-                            (WorkflowSession.workflow_status == WorkflowStatusEnum.FAILED.value, 1),
+                            (
+                                WorkflowSession.workflow_status
+                                == WorkflowStatusEnum.FAILED.value,
+                                1,
+                            ),
                             else_=0,
                         )
                     ).label("failed"),
                     func.sum(
                         case(
-                            (WorkflowSession.workflow_status == WorkflowStatusEnum.IN_PROGRESS.value, 1),
+                            (
+                                WorkflowSession.workflow_status
+                                == WorkflowStatusEnum.IN_PROGRESS.value,
+                                1,
+                            ),
                             else_=0,
                         )
                     ).label("in_progress"),
@@ -269,7 +282,9 @@ async def get_metrics(
         wf_completed = int(workflow_counts.completed or 0)
         wf_failed = int(workflow_counts.failed or 0)
         wf_in_progress = int(workflow_counts.in_progress or 0)
-        success_rate = round((wf_completed / wf_total * 100) if wf_total > 0 else 0.0, 1)
+        success_rate = round(
+            (wf_completed / wf_total * 100) if wf_total > 0 else 0.0, 1
+        )
 
         # ── Applications ───────────────────────────────────────────────────
         total_applications = await db.scalar(
@@ -305,9 +320,9 @@ async def get_metrics(
             },
         )
 
-    except Exception as e:
-        logger.error(f"Failed to fetch metrics: {e}", exc_info=True)
-        raise internal_error("Failed to fetch metrics")
+    except Exception as exc:
+        logger.error(f"Failed to fetch metrics: {exc}", exc_info=True)
+        raise internal_error("Failed to fetch metrics") from exc
 
 
 # =============================================================================
@@ -332,6 +347,7 @@ async def cleanup_orphaned_sessions(request: Request) -> Response:
     HTTPS so it is encrypted in transit.
     """
     from config.settings import get_settings as _get_settings
+
     _settings = _get_settings()
 
     provided_secret = request.headers.get("X-Scheduler-Secret")
@@ -342,7 +358,7 @@ async def cleanup_orphaned_sessions(request: Request) -> Response:
     if not secrets.compare_digest(provided_secret, expected_secret):
         raise unauthorized_error("Unauthorized")
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+    cutoff = datetime.now(UTC) - timedelta(hours=2)
     orphaned_statuses = ["initialized", "in_progress"]
 
     try:
@@ -355,7 +371,9 @@ async def cleanup_orphaned_sessions(request: Request) -> Response:
                 )
                 .values(
                     workflow_status="failed",
-                    error_messages=["Session interrupted by a server event. Please re-submit your job."],
+                    error_messages=[
+                        "Session interrupted by a server event. Please re-submit your job."
+                    ],
                 )
                 .returning(WorkflowSession.session_id)
             )
@@ -366,8 +384,8 @@ async def cleanup_orphaned_sessions(request: Request) -> Response:
             "Cloud Scheduler cleanup: reset %d orphaned workflow session(s) to 'failed'",
             len(rows),
         )
-    except Exception as e:
-        logger.error("Orphaned session cleanup failed: %s", e, exc_info=True)
-        raise internal_error("Cleanup failed")
+    except Exception as exc:
+        logger.error("Orphaned session cleanup failed: %s", exc, exc_info=True)
+        raise internal_error("Cleanup failed") from exc
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)

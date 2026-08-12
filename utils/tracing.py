@@ -22,8 +22,9 @@ Adding a custom span around an agent call:
 """
 
 import logging
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ except ImportError:  # pragma: no cover
 # MODULE STATE
 # =============================================================================
 
-_tracer: Optional[Any] = None  # opentelemetry.trace.Tracer | None
+_tracer: Any | None = None  # opentelemetry.trace.Tracer | None
 
 
 # =============================================================================
@@ -141,7 +142,9 @@ def setup_tracing(
 
     except Exception as exc:
         # Never crash the application due to tracing setup failures.
-        logger.error(f"OpenTelemetry setup failed — tracing disabled: {exc}", exc_info=True)
+        logger.error(
+            f"OpenTelemetry setup failed — tracing disabled: {exc}", exc_info=True
+        )
 
 
 def _build_cloud_trace_exporter():
@@ -152,6 +155,8 @@ def _build_cloud_trace_exporter():
         logger.info("OpenTelemetry: using Google Cloud Trace exporter")
         return CloudTraceSpanExporter()
     except ImportError:
+        from opentelemetry.sdk.trace.export import ConsoleSpanExporter
+
         logger.warning(
             "opentelemetry-exporter-gcp-trace not installed — "
             "falling back to console span exporter in production. "
@@ -168,8 +173,8 @@ def _build_cloud_trace_exporter():
 @asynccontextmanager
 async def trace_span(
     name: str,
-    attributes: Optional[Dict[str, Any]] = None,
-) -> AsyncGenerator[Optional[Any], None]:
+    attributes: dict[str, Any] | None = None,
+) -> AsyncGenerator[Any | None]:
     """
     Async context manager that creates a named child span.
 
@@ -205,7 +210,7 @@ async def trace_span(
             raise
 
 
-def get_current_span() -> Optional[Any]:
+def get_current_span() -> Any | None:
     """Return the currently active span, or None if tracing is off."""
     if not _OTEL_AVAILABLE:
         return None

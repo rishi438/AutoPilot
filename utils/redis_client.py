@@ -4,11 +4,17 @@ Provides async Redis connection management with singleton pattern for caching an
 """
 
 import logging
-from typing import Optional
+
 import redis.asyncio as redis
 from redis.asyncio import Redis
 from redis.exceptions import ConnectionError, TimeoutError
-from config.settings import get_database_settings, get_settings
+
+from config.settings import (
+    DatabaseSettings,
+    Settings,
+    get_database_settings,
+    get_settings,
+)
 
 # =============================================================================
 # CONSTANTS AND CONFIGURATION
@@ -23,7 +29,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 # Global Redis connection instance
 # Using singleton pattern for efficient resource management
-_redis_client: Optional[Redis] = None
+_redis_client: Redis | None = None
 
 # =============================================================================
 # CORE CONNECTION FUNCTIONS

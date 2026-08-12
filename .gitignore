@@ -30,7 +30,8 @@ env/
 
 # Environment variables (never commit secrets)
 .env
-.env.local
+.env.*
+!.env.local.example
 # .env.local.example should be committed — it contains only placeholders
 
 # User-uploaded resume files (local dev)

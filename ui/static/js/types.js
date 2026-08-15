@@ -1,5 +1,5 @@
 /**
- * @fileoverview Shared TypeScript-compatible JSDoc type definitions for the ApplyPilot frontend.
+ * @fileoverview Shared TypeScript-compatible JSDoc type definitions for the Autopilot frontend.
  * These types provide IDE autocomplete and type checking without requiring TypeScript compilation.
  */
 
@@ -377,4 +377,3 @@ if (typeof window !== "undefined") {
 
 // Export empty object to make this a module (for ES modules compatibility)
 export {};
-

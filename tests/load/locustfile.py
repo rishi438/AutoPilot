@@ -1,5 +1,5 @@
 """
-Load testing configuration for ApplyPilot.
+Load testing configuration for Autopilot.
 
 Run with: locust -f tests/load/locustfile.py --host=http://localhost:8000
 
@@ -34,7 +34,7 @@ Requirements: Python, JavaScript, React
 
 VALID_BASIC_INFO = {
     "city": "San Francisco",
-    "state": "California", 
+    "state": "California",
     "country": "United States",
     "professional_title": "Software Engineer",
     "years_experience": 5,
@@ -42,9 +42,7 @@ VALID_BASIC_INFO = {
     "summary": "Experienced software engineer",
 }
 
-VALID_SKILLS = {
-    "skills": ["Python", "JavaScript", "React", "AWS"]
-}
+VALID_SKILLS = {"skills": ["Python", "JavaScript", "React", "AWS"]}
 
 VALID_CAREER_PREFERENCES = {
     "desired_salary_range": {"min": 100000, "max": 200000},
@@ -66,22 +64,22 @@ VALID_CAREER_PREFERENCES = {
 class AuthenticatedUser(HttpUser):
     """
     Simulates an authenticated user browsing the application.
-    
+
     This user:
     1. Registers on startup
     2. Completes profile
     3. Performs various read operations
     4. Occasionally starts workflows
     """
-    
+
     wait_time = between(1, 5)  # Wait 1-5 seconds between tasks
-    
+
     def on_start(self):
         """Called when user starts - register and setup."""
         self.token = None
         self.user_email = f"loadtest_{uuid.uuid4().hex[:8]}@example.com"
         self._register_and_setup()
-    
+
     def _register_and_setup(self):
         """Register user and complete profile."""
         # Register
@@ -94,14 +92,14 @@ class AuthenticatedUser(HttpUser):
                 "full_name": "Load Test User",
             },
         )
-        
+
         if response.status_code == 200:
             self.token = response.json().get("access_token")
             self._complete_profile()
         else:
             # If registration fails (e.g., rate limit), try to login
             self._try_login()
-    
+
     def _try_login(self):
         """Try to login if registration fails."""
         response = self.client.post(
@@ -113,57 +111,57 @@ class AuthenticatedUser(HttpUser):
         )
         if response.status_code == 200:
             self.token = response.json().get("access_token")
-    
+
     def _complete_profile(self):
         """Complete user profile setup."""
         if not self.token:
             return
-        
+
         headers = {"Authorization": f"Bearer {self.token}"}
-        
+
         # Basic info
         self.client.put(
             "/api/v1/profile/basic-info",
             headers=headers,
             json=VALID_BASIC_INFO,
         )
-        
+
         # Work experience
         self.client.put(
             "/api/v1/profile/work-experience",
             headers=headers,
             json={"work_experience": []},
         )
-        
+
         # Skills
         self.client.put(
             "/api/v1/profile/skills-qualifications",
             headers=headers,
             json=VALID_SKILLS,
         )
-        
+
         # Career preferences
         self.client.put(
             "/api/v1/profile/career-preferences",
             headers=headers,
             json=VALID_CAREER_PREFERENCES,
         )
-    
+
     def _get_headers(self):
         """Get auth headers."""
         if self.token:
             return {"Authorization": f"Bearer {self.token}"}
         return {}
-    
+
     # =========================================================================
     # TASKS - Weighted by frequency
     # =========================================================================
-    
+
     @task(10)
     def view_dashboard(self):
         """View dashboard (most common action)."""
         self.client.get("/dashboard", headers=self._get_headers())
-    
+
     @task(8)
     def list_applications(self):
         """List job applications."""
@@ -171,7 +169,7 @@ class AuthenticatedUser(HttpUser):
             "/api/v1/applications/",
             headers=self._get_headers(),
         )
-    
+
     @task(5)
     def get_application_stats(self):
         """Get application statistics."""
@@ -179,7 +177,7 @@ class AuthenticatedUser(HttpUser):
             "/api/v1/applications/stats/overview",
             headers=self._get_headers(),
         )
-    
+
     @task(5)
     def get_profile(self):
         """Get user profile."""
@@ -187,7 +185,7 @@ class AuthenticatedUser(HttpUser):
             "/api/v1/profile/",
             headers=self._get_headers(),
         )
-    
+
     @task(3)
     def get_profile_status(self):
         """Check profile completion status."""
@@ -195,7 +193,7 @@ class AuthenticatedUser(HttpUser):
             "/api/v1/profile/status",
             headers=self._get_headers(),
         )
-    
+
     @task(2)
     def verify_token(self):
         """Verify authentication token."""
@@ -203,12 +201,12 @@ class AuthenticatedUser(HttpUser):
             "/api/v1/auth/verify",
             headers=self._get_headers(),
         )
-    
+
     @task(1)
     def start_workflow(self):
         """
         Start a new workflow (expensive operation - low weight).
-        
+
         Note: This will consume API quota if running against production.
         Set weight to 0 if you want to avoid workflow starts.
         """
@@ -222,37 +220,37 @@ class AuthenticatedUser(HttpUser):
 class UnauthenticatedUser(HttpUser):
     """
     Simulates unauthenticated users hitting public endpoints.
-    
+
     This tests the public-facing parts of the application.
     """
-    
+
     wait_time = between(1, 3)
-    
+
     @task(10)
     def view_homepage(self):
         """View the homepage."""
         self.client.get("/")
-    
+
     @task(5)
     def view_login_page(self):
         """View the login page."""
         self.client.get("/auth/login")
-    
+
     @task(5)
     def view_register_page(self):
         """View the registration page."""
         self.client.get("/auth/register")
-    
+
     @task(3)
     def health_check(self):
         """Hit the health check endpoint."""
         self.client.get("/health")
-    
+
     @task(2)
     def check_oauth_status(self):
         """Check OAuth status (public endpoint)."""
         self.client.get("/api/v1/auth/oauth/status")
-    
+
     @task(1)
     def attempt_protected_endpoint(self):
         """
@@ -265,12 +263,12 @@ class UnauthenticatedUser(HttpUser):
 class APIStressUser(HttpUser):
     """
     Simulates heavy API usage for stress testing.
-    
+
     Use this to find breaking points and rate limit effectiveness.
     """
-    
+
     wait_time = between(0.1, 0.5)  # Very fast requests
-    
+
     def on_start(self):
         """Register and get token."""
         self.user_email = f"stress_{uuid.uuid4().hex[:8]}@example.com"
@@ -283,27 +281,29 @@ class APIStressUser(HttpUser):
                 "full_name": "Stress Test User",
             },
         )
-        
+
         if response.status_code == 200:
             self.token = response.json().get("access_token")
         else:
             self.token = None
-    
+
     def _get_headers(self):
         if self.token:
             return {"Authorization": f"Bearer {self.token}"}
         return {}
-    
+
     @task(5)
     def rapid_list_applications(self):
         """Rapidly list applications."""
         self.client.get("/api/v1/applications/", headers=self._get_headers())
-    
+
     @task(3)
     def rapid_get_stats(self):
         """Rapidly get stats."""
-        self.client.get("/api/v1/applications/stats/overview", headers=self._get_headers())
-    
+        self.client.get(
+            "/api/v1/applications/stats/overview", headers=self._get_headers()
+        )
+
     @task(2)
     def rapid_health_check(self):
         """Rapid health checks."""
@@ -318,28 +318,27 @@ class APIStressUser(HttpUser):
 @events.test_start.add_listener
 def on_test_start(environment, **kwargs):
     """Called when test starts."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("LOAD TEST STARTING")
-    print("="*60)
+    print("=" * 60)
     print(f"Target host: {environment.host}")
     print(f"User classes: {[cls.__name__ for cls in environment.user_classes]}")
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
 
 
-@events.test_stop.add_listener  
+@events.test_stop.add_listener
 def on_test_stop(environment, **kwargs):
     """Called when test stops."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("LOAD TEST COMPLETED")
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
 
 
 # =============================================================================
 # USAGE EXAMPLES
 # =============================================================================
 
-"""
-USAGE EXAMPLES:
+USAGE_EXAMPLES = """
 
 1. Interactive mode (with web UI):
    locust -f tests/load/locustfile.py --host=http://localhost:8000

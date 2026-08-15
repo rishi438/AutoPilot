@@ -1,5 +1,5 @@
 /* ==========================================================================
-   ApplyPilot - Content Script Styles
+   Autopilot - Content Script Styles
    Minimal styles for visual feedback in job pages
    ========================================================================== */
 
@@ -135,5 +135,3 @@
   opacity: 1;
   visibility: visible;
 }
-
-

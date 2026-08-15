@@ -1,5 +1,5 @@
 """
-Database models for ApplyPilot.
+Database models for Autopilot.
 
 SQLAlchemy ORM models:
 - User: User authentication and API keys

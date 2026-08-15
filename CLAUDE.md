@@ -1,6 +1,6 @@
-# ApplyPilot — Claude Code Rules Index
+# Autopilot — Claude Code Rules Index
 
-**Product name:** ApplyPilot (repo folder: `applypilot`).
+**Product name:** Autopilot (repo folder: `applypilot`).
 
 All detailed rules live in `.claude/rules/`. Read the relevant file(s) **before** working in that area. Never load all files — only pull what the task needs.
 

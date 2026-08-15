@@ -1,5 +1,5 @@
 /* ==========================================================================
-   ApplyPilot - Main Stylesheet
+   Autopilot - Main Stylesheet
    A powerful, modern design with dark theme and accent colors
    ========================================================================== */
 
@@ -11,25 +11,25 @@
     --bg-tertiary: #1a1a24;
     --bg-card: rgba(26, 26, 36, 0.8);
     --bg-card-hover: rgba(30, 30, 42, 0.9);
-    
+
     --accent-primary: #00d4ff;
     --accent-secondary: #7c3aed;
     --accent-gradient: linear-gradient(135deg, #00d4ff 0%, #7c3aed 100%);
     --accent-gradient-hover: linear-gradient(135deg, #00e5ff 0%, #8b5cf6 100%);
-    
+
     --text-primary: #ffffff;
     --text-secondary: rgba(255, 255, 255, 0.7);
     --text-muted: rgba(255, 255, 255, 0.5);
     --text-accent: #00d4ff;
-    
+
     --success: #10b981;
     --warning: #f59e0b;
     --danger: #ef4444;
     --info: #3b82f6;
-    
+
     --border-color: rgba(255, 255, 255, 0.1);
     --border-accent: rgba(0, 212, 255, 0.3);
-    
+
     /* Shadows & Effects */
     --glow-accent: 0 0 40px rgba(0, 212, 255, 0.3);
     --glow-accent-strong: 0 0 60px rgba(0, 212, 255, 0.5);
@@ -37,23 +37,23 @@
     --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.4);
     --shadow-lg: 0 8px 40px rgba(0, 0, 0, 0.5);
     --shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.6);
-    
+
     /* Typography */
     --font-primary: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
-    
+
     /* Spacing & Sizing */
     --radius-sm: 8px;
     --radius-md: 12px;
     --radius-lg: 16px;
     --radius-xl: 24px;
     --radius-full: 9999px;
-    
+
     /* Transitions */
     --transition-fast: 0.15s ease;
     --transition-base: 0.3s ease;
     --transition-slow: 0.5s ease;
-    
+
     /* Legacy Support Variables */
     --primary-color: #00d4ff;
     --secondary-color: #7c3aed;
@@ -96,4 +96,3 @@ h1, h2, h3, h4, h5, h6 {
     -webkit-text-fill-color: transparent;
     background-clip: text;
 }
-

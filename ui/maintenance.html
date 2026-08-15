@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Maintenance | {{ app_name or "ApplyPilot" }}{% endblock %}
+{% block title %}Maintenance | {{ app_name or "Autopilot" }}{% endblock %}
 {% block description %}Site is under maintenance{% endblock %}
 {% block extra_head %}
 <style nonce="{{ request.state.csp_nonce | default('') }}">
@@ -108,32 +108,32 @@
             <div class="maintenance-icon">
                 🔧
             </div>
-            
+
             <h1 class="maintenance-title">Under Maintenance</h1>
-            
+
             <p class="maintenance-subtitle">We're making things better!</p>
-            
+
             <p class="maintenance-message" id="maintenanceMessage">
                 {{ message or "We're currently performing scheduled maintenance to improve your experience. We'll be back shortly!" }}
             </p>
-            
+
             {% if estimated_end %}
             <div class="maintenance-eta">
                 <i class="fas fa-clock"></i>
                 <span>Estimated completion: {{ estimated_end }}</span>
             </div>
             {% endif %}
-            
+
             <div class="progress-bar-container">
                 <div class="progress">
                     <div class="progress-bar"></div>
                 </div>
             </div>
-            
+
             <p class="refresh-hint">
                 <i class="fas fa-sync-alt me-1"></i> This page will automatically refresh
             </p>
-            
+
             <div class="social-links">
                 <a href="https://github.com/eliornl/applypilot" target="_blank" rel="noopener noreferrer" title="GitHub">
                     <i class="fab fa-github"></i>
@@ -148,7 +148,7 @@
         setTimeout(() => {
             window.location.reload();
         }, 30000);
-        
+
         // Also check via API every 10 seconds
         setInterval(async () => {
             try {

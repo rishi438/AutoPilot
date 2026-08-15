@@ -1,5 +1,5 @@
 """
-Centralized logging configuration for the ApplyPilot.
+Centralized logging configuration for the Autopilot.
 Provides structured JSON logging, request tracing, log rotation, and security-aware logging.
 """
 
@@ -34,6 +34,7 @@ _SERVICE_META: Dict[str, str] = {
 
 def _get_hostname() -> str:
     import socket
+
     try:
         return socket.gethostname()
     except Exception:
@@ -189,17 +190,17 @@ class JSONFormatter(logging.Formatter):
 
         log_data: Dict[str, Any] = {
             # ---- Standard / aggregator-required fields ----
-            "timestamp":   datetime.now(timezone.utc).isoformat(),
-            "level":       record.levelname,
-            "message":     msg,
-            "logger":      record.name,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "message": msg,
+            "logger": record.name,
             # ---- Service identity (set at startup via setup_logging) ----
-            "service":     _SERVICE_META["service"],
-            "version":     _SERVICE_META["version"],
+            "service": _SERVICE_META["service"],
+            "version": _SERVICE_META["version"],
             "environment": _SERVICE_META["environment"],
-            "host":        _SERVICE_META["host"] or _get_hostname(),
+            "host": _SERVICE_META["host"] or _get_hostname(),
             # ---- Request tracing ----
-            "trace_id":    getattr(record, "request_id", None) or "-",
+            "trace_id": getattr(record, "request_id", None) or "-",
         }
 
         # Optional context
@@ -214,25 +215,33 @@ class JSONFormatter(logging.Formatter):
         # Source location on ERROR and above
         if record.levelno >= logging.ERROR:
             log_data["source"] = {
-                "file":     record.pathname,
-                "line":     record.lineno,
+                "file": record.pathname,
+                "line": record.lineno,
                 "function": record.funcName,
             }
 
         # Exception info
         if record.exc_info and self.include_traceback:
             log_data["exception"] = {
-                "type":      record.exc_info[0].__name__ if record.exc_info[0] else None,
-                "message":   str(record.exc_info[1]) if record.exc_info[1] else None,
+                "type": record.exc_info[0].__name__ if record.exc_info[0] else None,
+                "message": str(record.exc_info[1]) if record.exc_info[1] else None,
                 "traceback": traceback.format_exception(*record.exc_info),
             }
 
         # Well-known performance / HTTP extra fields
         if self.include_extras:
             for field in (
-                "duration_ms", "status_code", "method", "path",
-                "agent", "workflow_id", "service", "operation",
-                "cache_type", "event", "auth_method",
+                "duration_ms",
+                "status_code",
+                "method",
+                "path",
+                "agent",
+                "workflow_id",
+                "service",
+                "operation",
+                "cache_type",
+                "event",
+                "auth_method",
             ):
                 val = getattr(record, field, None)
                 if val is not None:
@@ -259,22 +268,22 @@ class DevelopmentFormatter(logging.Formatter):
     """
 
     LEVEL_COLORS = {
-        "DEBUG":    "\033[36m",      # Cyan
-        "INFO":     "\033[32m",      # Green
-        "WARNING":  "\033[33m",      # Yellow
-        "ERROR":    "\033[31m",      # Red
-        "CRITICAL": "\033[1;31m",    # Bold Red
+        "DEBUG": "\033[36m",  # Cyan
+        "INFO": "\033[32m",  # Green
+        "WARNING": "\033[33m",  # Yellow
+        "ERROR": "\033[31m",  # Red
+        "CRITICAL": "\033[1;31m",  # Bold Red
     }
     # Status-code colour for request log lines
     STATUS_COLORS = {
-        "2": "\033[32m",   # 2xx green
-        "3": "\033[36m",   # 3xx cyan
-        "4": "\033[33m",   # 4xx yellow
-        "5": "\033[31m",   # 5xx red
+        "2": "\033[32m",  # 2xx green
+        "3": "\033[36m",  # 3xx cyan
+        "4": "\033[33m",  # 4xx yellow
+        "5": "\033[31m",  # 5xx red
     }
     RESET = "\033[0m"
-    DIM   = "\033[2m"
-    BOLD  = "\033[1m"
+    DIM = "\033[2m"
+    BOLD = "\033[1m"
 
     def __init__(self, use_colors: bool = True, redact_sensitive: bool = True):
         super().__init__(datefmt="%H:%M:%S")
@@ -337,6 +346,7 @@ class DevelopmentFormatter(logging.Formatter):
         # Colour the HTTP status code embedded in request completion lines,
         # e.g.  "GET /api/... - 200 (22.36ms)"
         import re as _re
+
         status_match = _re.search(r"\b([2345]\d{2})\b", msg)
         if status_match and self.use_colors:
             status_code = status_match.group(1)
@@ -421,8 +431,12 @@ class LoggingConfig:
                 include_traceback=True,
             )
         else:
-            main_formatter = DevelopmentFormatter(redact_sensitive=self.redact_sensitive)
-            error_formatter = DevelopmentFormatter(redact_sensitive=self.redact_sensitive)
+            main_formatter = DevelopmentFormatter(
+                redact_sensitive=self.redact_sensitive
+            )
+            error_formatter = DevelopmentFormatter(
+                redact_sensitive=self.redact_sensitive
+            )
 
         # Console handler
         if self.enable_console_logging:
@@ -464,7 +478,7 @@ class LoggingConfig:
             # uvicorn — access log is disabled (access_log=False in uvicorn.run),
             # but its error/lifecycle logs are still useful at WARNING+.
             "uvicorn",
-            "uvicorn.access",     # disabled via access_log=False, belt-and-suspenders
+            "uvicorn.access",  # disabled via access_log=False, belt-and-suspenders
             "uvicorn.error",
             # HTTP clients
             "httpx",
@@ -477,7 +491,7 @@ class LoggingConfig:
             "google.api_core",
             "google.cloud",
             "google.genai",
-            "models",          # google-genai internal: "AFC is enabled..."
+            "models",  # google-genai internal: "AFC is enabled..."
             "grpc",
             # LangGraph / LangChain internals
             "langgraph",
@@ -487,7 +501,7 @@ class LoggingConfig:
         for name in noisy_loggers:
             lib_logger = logging.getLogger(name)
             lib_logger.setLevel(logging.WARNING)
-            lib_logger.propagate = False   # do NOT bubble up to our root handler
+            lib_logger.propagate = False  # do NOT bubble up to our root handler
 
         # SQLAlchemy — suppress by default; show SQL only at DEBUG level.
         # engine.echo=False (database.py) ensures SA never adds its own duplicate handler.
@@ -594,7 +608,9 @@ def log_execution_time(
                 duration_ms = (perf_counter() - start) * 1000
                 func_logger.log(
                     level,
-                    msg_template.format(func_name=func.__name__, duration_ms=duration_ms),
+                    msg_template.format(
+                        func_name=func.__name__, duration_ms=duration_ms
+                    ),
                     extra={"duration_ms": duration_ms},
                 )
                 return result
@@ -615,7 +631,9 @@ def log_execution_time(
                 duration_ms = (perf_counter() - start) * 1000
                 func_logger.log(
                     level,
-                    msg_template.format(func_name=func.__name__, duration_ms=duration_ms),
+                    msg_template.format(
+                        func_name=func.__name__, duration_ms=duration_ms
+                    ),
                     extra={"duration_ms": duration_ms},
                 )
                 return result
@@ -630,6 +648,7 @@ def log_execution_time(
 
         # Return appropriate wrapper based on function type
         import asyncio
+
         if asyncio.iscoroutinefunction(func):
             return async_wrapper
         return sync_wrapper
@@ -774,12 +793,15 @@ class StructuredLogger:
         msg = f"DB {operation} on {table} - {duration_ms:.2f}ms"
         if rows_affected is not None:
             msg += f" ({rows_affected} rows)"
-        self.logger.debug(msg, extra={
-            "operation": operation,
-            "table": table,
-            "duration_ms": duration_ms,
-            "rows_affected": rows_affected,
-        })
+        self.logger.debug(
+            msg,
+            extra={
+                "operation": operation,
+                "table": table,
+                "duration_ms": duration_ms,
+                "rows_affected": rows_affected,
+            },
+        )
 
     # =========================================================================
     # SECURITY EVENT LOGGING
@@ -908,6 +930,7 @@ def log_startup_info(
 
     # Redact credentials from the DB URL for display
     import re as _re
+
     db_display = _re.sub(r"://[^@]+@", "://<credentials>@", database_url)
 
     llm_backend = (
@@ -977,10 +1000,10 @@ def setup_logging(
     global _logging_config, _SERVICE_META
 
     # Populate service metadata used by JSONFormatter
-    _SERVICE_META["service"]     = service_name
-    _SERVICE_META["version"]     = service_version
+    _SERVICE_META["service"] = service_name
+    _SERVICE_META["version"] = service_version
     _SERVICE_META["environment"] = environment
-    _SERVICE_META["host"]        = _get_hostname()
+    _SERVICE_META["host"] = _get_hostname()
 
     _logging_config = LoggingConfig(
         log_level=log_level,
@@ -1000,4 +1023,3 @@ def setup_logging(
 def get_logging_config() -> Optional[LoggingConfig]:
     """Get the current logging configuration."""
     return _logging_config
-

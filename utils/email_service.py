@@ -47,20 +47,20 @@ def _sanitize_email_header(value: str) -> str:
 class EmailService:
     """
     Email service for sending transactional emails via SMTP.
-    
+
     Designed for Gmail SMTP but works with any SMTP provider.
     """
 
     def __init__(self):
         """Initialize email service with settings."""
         self.settings = get_settings()
-        self.host = getattr(self.settings, 'smtp_host', 'smtp.gmail.com')
-        self.port = getattr(self.settings, 'smtp_port', 587)
-        self.username = getattr(self.settings, 'smtp_username', None)
-        _raw_pw = getattr(self.settings, 'smtp_password', None)
+        self.host = getattr(self.settings, "smtp_host", "smtp.gmail.com")
+        self.port = getattr(self.settings, "smtp_port", 587)
+        self.username = getattr(self.settings, "smtp_username", None)
+        _raw_pw = getattr(self.settings, "smtp_password", None)
         self.password = _raw_pw.get_secret_value() if _raw_pw is not None else None
-        self.from_email = getattr(self.settings, 'smtp_from_email', self.username)
-        self.from_name = getattr(self.settings, 'smtp_from_name', 'ApplyPilot')
+        self.from_email = getattr(self.settings, "smtp_from_email", self.username)
+        self.from_name = getattr(self.settings, "smtp_from_name", "Autopilot")
         self.enabled = self.username is not None and self.password is not None
 
     def is_configured(self) -> bool:
@@ -76,13 +76,13 @@ class EmailService:
     ) -> bool:
         """
         Send an email.
-        
+
         Args:
             to_email: Recipient email address
             subject: Email subject line
             html_content: HTML body of the email
             text_content: Plain text fallback (optional)
-            
+
         Returns:
             True if email was sent successfully, False otherwise
         """
@@ -98,7 +98,9 @@ class EmailService:
             # Create message
             message = MIMEMultipart("alternative")
             message["Subject"] = safe_subject
-            message["From"] = f"{_sanitize_email_header(self.from_name)} <{self.from_email}>"
+            message["From"] = (
+                f"{_sanitize_email_header(self.from_name)} <{self.from_email}>"
+            )
             message["To"] = safe_to_email
 
             # Add plain text version (fallback)
@@ -126,10 +128,15 @@ class EmailService:
             logger.error(f"SMTP authentication failed: {e}", exc_info=True)
             return False
         except smtplib.SMTPException as e:
-            logger.error(f"SMTP error sending email to {mask_email(to_email)}: {e}", exc_info=True)
+            logger.error(
+                f"SMTP error sending email to {mask_email(to_email)}: {e}",
+                exc_info=True,
+            )
             return False
         except Exception as e:
-            logger.error(f"Failed to send email to {mask_email(to_email)}: {e}", exc_info=True)
+            logger.error(
+                f"Failed to send email to {mask_email(to_email)}: {e}", exc_info=True
+            )
             return False
 
     async def send_password_reset_email(
@@ -141,17 +148,17 @@ class EmailService:
     ) -> bool:
         """
         Send password reset email.
-        
+
         Args:
             to_email: User's email address
             reset_token: Password reset token
             reset_url: Full URL for password reset (including token)
             user_name: User's name for personalization
-            
+
         Returns:
             True if email was sent successfully
         """
-        subject = "Reset Your Password - ApplyPilot"
+        subject = "Reset Your Password - Autopilot"
 
         greeting = f"Hi {html.escape(user_name)}," if user_name else "Hi there,"
         safe_reset_url = html.escape(reset_url, quote=True)
@@ -174,7 +181,7 @@ class EmailService:
                         <td style="background: rgba(26, 26, 36, 0.95); padding: 0; border-radius: 20px 20px 0 0; border: 1px solid rgba(255, 255, 255, 0.1); border-bottom: none;">
                             <div style="height: 3px; background: linear-gradient(135deg, #00d4ff 0%, #7c3aed 100%); border-radius: 20px 20px 0 0;"></div>
                             <div style="padding: 36px 40px 28px 40px; text-align: center;">
-                                <h1 style="margin: 0; font-size: 28px; font-weight: 700; color: #00d4ff;">ApplyPilot</h1>
+                                <h1 style="margin: 0; font-size: 28px; font-weight: 700; color: #00d4ff;">Autopilot</h1>
                                 <p style="margin: 6px 0 0 0; color: rgba(255, 255, 255, 0.45); font-size: 13px;">Your AI-Powered Job Search Companion</p>
                             </div>
                         </td>
@@ -185,7 +192,7 @@ class EmailService:
                         <td style="background: rgba(26, 26, 36, 0.8); padding: 32px 40px 36px 40px; border: 1px solid rgba(255, 255, 255, 0.1); border-top: none;">
                             <h2 style="color: #ffffff; margin: 0 0 12px 0; font-size: 22px; font-weight: 600;">{greeting}</h2>
 
-                            <p style="color: rgba(255, 255, 255, 0.7); font-size: 15px; line-height: 1.6; margin: 0 0 28px 0;">We received a request to reset your password for your ApplyPilot account. Click the button below to create a new password:</p>
+                            <p style="color: rgba(255, 255, 255, 0.7); font-size: 15px; line-height: 1.6; margin: 0 0 28px 0;">We received a request to reset your password for your Autopilot account. Click the button below to create a new password:</p>
 
                             <!-- CTA Button -->
                             <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom: 24px;">
@@ -207,13 +214,13 @@ class EmailService:
 
                         </td>
                     </tr>
-                    
+
                     <!-- Footer -->
                     <!-- Footer -->
                     <tr>
                         <td style="background: rgba(26, 26, 36, 0.8); padding: 20px 40px; text-align: center; border: 1px solid rgba(255, 255, 255, 0.1); border-top: none; border-radius: 0 0 20px 20px;">
                             <p style="color: rgba(255, 255, 255, 0.3); font-size: 12px; margin: 0;">
-                                © {datetime.now().year} ApplyPilot. All rights reserved.
+                                © {datetime.now().year} Autopilot. All rights reserved.
                             </p>
                         </td>
                     </tr>
@@ -231,7 +238,7 @@ class EmailService:
 PASSWORD RESET REQUEST
 ======================
 
-We received a request to reset your password for your ApplyPilot account.
+We received a request to reset your password for your Autopilot account.
 
 Click the link below to create a new password:
 {safe_reset_url}
@@ -241,7 +248,7 @@ Click the link below to create a new password:
 If you didn't request a password reset, you can safely ignore this email. Your password will remain unchanged.
 
 ---
-© {datetime.now().year} ApplyPilot. All rights reserved.
+© {datetime.now().year} Autopilot. All rights reserved.
 This is an automated message. Please do not reply.
 """
 
@@ -254,15 +261,15 @@ This is an automated message. Please do not reply.
     ) -> bool:
         """
         Send welcome email to new users.
-        
+
         Args:
             to_email: User's email address
             user_name: User's name for personalization
-            
+
         Returns:
             True if email was sent successfully
         """
-        subject = "Welcome to ApplyPilot — Your AI Job Search Companion"
+        subject = "Welcome to Autopilot — Your AI Job Search Companion"
 
         greeting = f"Hi {html.escape(user_name)}!" if user_name else "Welcome!"
         dashboard_url = f"{self.settings.base_url.rstrip('/')}/profile/setup"
@@ -273,7 +280,7 @@ This is an automated message. Please do not reply.
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Welcome to ApplyPilot</title>
+    <title>Welcome to Autopilot</title>
 </head>
 <body style="margin: 0; padding: 0; background-color: #0a0a0f; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color: #0a0a0f; padding: 40px 20px;">
@@ -285,7 +292,7 @@ This is an automated message. Please do not reply.
                         <td style="background: rgba(26, 26, 36, 0.95); padding: 0; border-radius: 20px 20px 0 0; border: 1px solid rgba(255, 255, 255, 0.1); border-bottom: none;">
                             <div style="height: 3px; background: linear-gradient(135deg, #00d4ff 0%, #7c3aed 100%); border-radius: 20px 20px 0 0;"></div>
                             <div style="padding: 36px 40px 28px 40px; text-align: center;">
-                                <h1 style="margin: 0; font-size: 28px; font-weight: 700; color: #00d4ff;">ApplyPilot</h1>
+                                <h1 style="margin: 0; font-size: 28px; font-weight: 700; color: #00d4ff;">Autopilot</h1>
                                 <p style="margin: 6px 0 0 0; color: rgba(255, 255, 255, 0.45); font-size: 13px;">Your AI-Powered Job Search Companion</p>
                             </div>
                         </td>
@@ -379,7 +386,7 @@ This is an automated message. Please do not reply.
                     <tr>
                         <td style="background: rgba(26, 26, 36, 0.8); padding: 20px 40px; text-align: center; border: 1px solid rgba(255, 255, 255, 0.1); border-top: none; border-radius: 0 0 20px 20px;">
                             <p style="color: rgba(255, 255, 255, 0.3); font-size: 12px; margin: 0;">
-                                © {datetime.now().year} ApplyPilot. All rights reserved.
+                                © {datetime.now().year} Autopilot. All rights reserved.
                             </p>
                         </td>
                     </tr>
@@ -417,7 +424,7 @@ negotiations, job comparisons, and more.
 Get Started → {dashboard_url}
 
 ---
-© {datetime.now().year} ApplyPilot. All rights reserved.
+© {datetime.now().year} Autopilot. All rights reserved.
 """
 
         return await self.send_email(to_email, subject, html_content, text_content)
@@ -431,17 +438,17 @@ Get Started → {dashboard_url}
     ) -> bool:
         """
         Send email verification email.
-        
+
         Args:
             to_email: User's email address
             verification_token: Email verification token
             verification_url: Full URL for email verification (including token)
             user_name: User's name for personalization
-            
+
         Returns:
             True if email was sent successfully
         """
-        subject = "Verify Your Email - ApplyPilot"
+        subject = "Verify Your Email - Autopilot"
 
         greeting = f"Hi {html.escape(user_name)}," if user_name else "Hi there,"
         safe_verification_url = html.escape(verification_url, quote=True)
@@ -465,21 +472,21 @@ Get Started → {dashboard_url}
                             <!-- Gradient top line -->
                             <div style="height: 3px; background: linear-gradient(135deg, #00d4ff 0%, #7c3aed 100%);"></div>
                             <div style="padding: 40px; text-align: center;">
-                                <h1 style="margin: 0; font-size: 32px; font-weight: 700; color: #00d4ff;">ApplyPilot</h1>
+                                <h1 style="margin: 0; font-size: 32px; font-weight: 700; color: #00d4ff;">Autopilot</h1>
                                 <p style="margin: 8px 0 0 0; color: rgba(255, 255, 255, 0.5); font-size: 14px;">Your AI-Powered Job Search Assistant</p>
                             </div>
                         </td>
                     </tr>
-                    
+
                     <!-- Body -->
                     <tr>
                         <td style="background: rgba(26, 26, 36, 0.8); padding: 40px; border: 1px solid rgba(255, 255, 255, 0.1); border-top: none; border-radius: 0 0 24px 24px;">
                             <h2 style="color: #ffffff; margin: 0 0 20px 0; font-size: 24px; font-weight: 600;">Verify Your Email Address</h2>
-                            
+
                             <p style="color: rgba(255, 255, 255, 0.7); font-size: 16px; margin: 0 0 16px 0;">{greeting}</p>
-                            
+
                             <p style="color: rgba(255, 255, 255, 0.7); font-size: 15px; line-height: 1.6; margin: 0 0 30px 0;">Thanks for signing up! Please verify your email address to activate your account and unlock all features.</p>
-                            
+
                             <!-- CTA Button -->
                             <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
                                 <tr>
@@ -488,29 +495,29 @@ Get Started → {dashboard_url}
                                     </td>
                                 </tr>
                             </table>
-                            
+
                             <!-- Info Box -->
                             <div style="background: rgba(0, 212, 255, 0.05); border: 1px solid rgba(0, 212, 255, 0.3); border-radius: 12px; padding: 20px; margin-bottom: 24px;">
                                 <p style="color: #00d4ff; font-size: 14px; margin: 0;">
                                     ⏰ This link will expire in <strong>24 hours</strong>.
                                 </p>
                             </div>
-                            
+
                             <p style="color: rgba(255, 255, 255, 0.5); font-size: 14px; line-height: 1.6; margin: 0 0 24px 0;">If you didn't create an account with us, you can safely ignore this email.</p>
-                            
+
                             <!-- Divider -->
                             <hr style="border: none; border-top: 1px solid rgba(255, 255, 255, 0.1); margin: 30px 0;">
-                            
+
                             <p style="color: rgba(255, 255, 255, 0.5); font-size: 12px; margin: 0 0 8px 0;">If the button doesn't work, copy and paste this link into your browser:</p>
                             <p style="color: #00d4ff; font-size: 12px; word-break: break-all; margin: 0;">{safe_verification_url}</p>
                         </td>
                     </tr>
-                    
+
                     <!-- Footer -->
                     <tr>
                         <td style="padding: 30px; text-align: center;">
                             <p style="color: rgba(255, 255, 255, 0.5); font-size: 12px; margin: 0;">
-                                © {datetime.now().year} ApplyPilot. All rights reserved.<br>
+                                © {datetime.now().year} Autopilot. All rights reserved.<br>
                                 <span style="color: rgba(255, 255, 255, 0.3);">This is an automated message. Please do not reply.</span>
                             </p>
                         </td>
@@ -539,7 +546,7 @@ Click the link below to verify your email:
 If you didn't create an account with us, you can safely ignore this email.
 
 ---
-© {datetime.now().year} ApplyPilot. All rights reserved.
+© {datetime.now().year} Autopilot. All rights reserved.
 This is an automated message. Please do not reply.
 """
 
@@ -553,22 +560,22 @@ This is an automated message. Please do not reply.
     ) -> bool:
         """
         Send email verification with 6-digit code.
-        
+
         Args:
             to_email: User's email address
             verification_code: 6-digit verification code
             user_name: User's name for personalization
-            
+
         Returns:
             True if email was sent successfully
         """
-        subject = "Your Verification Code - ApplyPilot"
-        
+        subject = "Your Verification Code - Autopilot"
+
         greeting = f"Hi {html.escape(user_name)}," if user_name else "Hi there,"
-        
+
         # Format code with spaces for readability (123 456)
         formatted_code = f"{verification_code[:3]} {verification_code[3:]}"
-        
+
         html_content = f"""
 <!DOCTYPE html>
 <html>
@@ -587,7 +594,7 @@ This is an automated message. Please do not reply.
                         <td style="background: rgba(26, 26, 36, 0.95); padding: 0; border-radius: 20px 20px 0 0; border: 1px solid rgba(255, 255, 255, 0.1); border-bottom: none;">
                             <div style="height: 3px; background: linear-gradient(135deg, #00d4ff 0%, #7c3aed 100%); border-radius: 20px 20px 0 0;"></div>
                             <div style="padding: 36px 40px 28px 40px; text-align: center;">
-                                <h1 style="margin: 0; font-size: 28px; font-weight: 700; color: #00d4ff;">ApplyPilot</h1>
+                                <h1 style="margin: 0; font-size: 28px; font-weight: 700; color: #00d4ff;">Autopilot</h1>
                                 <p style="margin: 6px 0 0 0; color: rgba(255, 255, 255, 0.45); font-size: 13px;">Your AI-Powered Job Search Companion</p>
                             </div>
                         </td>
@@ -623,7 +630,7 @@ This is an automated message. Please do not reply.
                     <tr>
                         <td style="background: rgba(26, 26, 36, 0.8); padding: 20px 40px; text-align: center; border: 1px solid rgba(255, 255, 255, 0.1); border-top: none; border-radius: 0 0 20px 20px;">
                             <p style="color: rgba(255, 255, 255, 0.3); font-size: 12px; margin: 0;">
-                                © {datetime.now().year} ApplyPilot. All rights reserved.
+                                © {datetime.now().year} Autopilot. All rights reserved.
                             </p>
                         </td>
                     </tr>
@@ -650,7 +657,7 @@ Your Verification Code: {verification_code}
 If you didn't create an account with us, you can safely ignore this email.
 
 ---
-© {datetime.now().year} ApplyPilot. All rights reserved.
+© {datetime.now().year} Autopilot. All rights reserved.
 This is an automated message. Please do not reply.
 """
 

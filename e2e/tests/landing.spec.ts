@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 /**
  * COMPREHENSIVE LANDING PAGE TESTS
  *
- * Covers every section of the ApplyPilot landing page (index.html):
+ * Covers every section of the Autopilot landing page (index.html):
  *
  * 1.  Page Load & Meta
  * 2.  Navbar — logo, all 6 nav-links, Sign In / Try Free CTAs, mobile hamburger
@@ -48,9 +48,9 @@ test.describe('1. Page Load & Meta', () => {
     expect(res.status()).toBe(200);
   });
 
-  test('page title contains ApplyPilot', async ({ page }) => {
+  test('page title contains Autopilot', async ({ page }) => {
     await page.goto('/');
-    await expect(page).toHaveTitle(/ApplyPilot/i);
+    await expect(page).toHaveTitle(/Autopilot/i);
   });
 
   test('meta description is present', async ({ page }) => {
@@ -117,16 +117,16 @@ test.describe('2. Navbar', () => {
     expect(href).toBe('/');
   });
 
-  test('brand text reads "ApplyPilot"', async ({ page }) => {
+  test('brand text reads "Autopilot"', async ({ page }) => {
     const brand = page.locator('.navbar-brand');
     const text = await brand.textContent();
-    expect(text?.replace(/\s/g, '')).toMatch(/ApplyPilot/i);
+    expect(text?.replace(/\s/g, '')).toMatch(/Autopilot/i);
   });
 
-  test('navbar has "Why ApplyPilot" link pointing to #problem', async ({ page }) => {
+  test('navbar has "Why Autopilot" link pointing to #problem', async ({ page }) => {
     const link = page.locator('.navbar-nav a[href="#problem"]');
     await expect(link).toBeVisible();
-    await expect(link).toContainText(/Why ApplyPilot/i);
+    await expect(link).toContainText(/Why Autopilot/i);
   });
 
   test('navbar has "AI Agents" link pointing to #features', async ({ page }) => {
@@ -491,8 +491,8 @@ test.describe('7. Chrome Extension Section', () => {
     await expect(page.locator('.browser-mockup')).toBeVisible();
   });
 
-  test('extension popup shows "ApplyPilot" brand', async ({ page }) => {
-    await expect(page.locator('.ext-popup-header')).toContainText(/ApplyPilot/i);
+  test('extension popup shows "Autopilot" brand', async ({ page }) => {
+    await expect(page.locator('.ext-popup-header')).toContainText(/Autopilot/i);
   });
 
   test('extension popup shows "Analyze This Job" button', async ({ page }) => {
@@ -735,9 +735,9 @@ test.describe('11. Footer', () => {
     await expect(page.locator('footer.footer')).toBeAttached();
   });
 
-  test('footer brand reads "ApplyPilot"', async ({ page }) => {
+  test('footer brand reads "Autopilot"', async ({ page }) => {
     const brand = page.locator('footer .footer-brand');
-    await expect(brand).toContainText(/ApplyPilot/i);
+    await expect(brand).toContainText(/Autopilot/i);
   });
 
   test('footer "Help & FAQ" link goes to /help', async ({ page }) => {
@@ -876,7 +876,7 @@ test.describe('13. Anchor Navigation', () => {
     await page.waitForLoadState('domcontentloaded');
   });
 
-  test('clicking "Why ApplyPilot" scrolls to #problem section', async ({ page }) => {
+  test('clicking "Why Autopilot" scrolls to #problem section', async ({ page }) => {
     await page.locator('a[href="#problem"]').first().click();
     await page.waitForTimeout(800); // allow scroll animation
     const section = page.locator('#problem');
@@ -1438,10 +1438,10 @@ test.describe('27. Auth Page Extras', () => {
     await expect(email).toBeAttached();
   });
 
-  test('auth pages have brand logo or ApplyPilot text', async ({ page }) => {
+  test('auth pages have brand logo or Autopilot text', async ({ page }) => {
     await page.goto('/auth/login');
     await page.waitForLoadState('domcontentloaded');
-    const brand = page.locator('.navbar-brand, img[alt*="Apply"], img[alt*="Pilot"], h1, a:has-text("ApplyPilot")').first();
+    const brand = page.locator('.navbar-brand, img[alt*="Apply"], img[alt*="Pilot"], h1, a:has-text("Autopilot")').first();
     await expect(brand).toBeAttached();
   });
 
@@ -1490,7 +1490,7 @@ test.describe('28. Static Asset Loading', () => {
     expect(title.length).toBeGreaterThan(0);
   });
 
-  test('page title contains ApplyPilot or brand name', async ({ page }) => {
+  test('page title contains Autopilot or brand name', async ({ page }) => {
     await page.goto('/');
     await page.waitForLoadState('domcontentloaded');
     const title = await page.title();

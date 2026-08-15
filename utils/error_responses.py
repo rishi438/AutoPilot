@@ -1,5 +1,5 @@
 """
-Standardized error responses for the ApplyPilot.
+Standardized error responses for the Autopilot.
 Provides consistent error format across all API endpoints.
 """
 
@@ -324,4 +324,3 @@ def no_api_key_error(
         message=message,
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
     )
-

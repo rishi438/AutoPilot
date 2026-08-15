@@ -1,5 +1,5 @@
 """
-Company Research Agent for ApplyPilot.
+Company Research Agent for Autopilot.
 Uses Gemini LLM for comprehensive company research - no external web search needed.
 Provides strategic insights for job applicants.
 """

@@ -34,7 +34,12 @@ from utils.cache import (
     LOCKOUT_THRESHOLD,
     LOCKOUT_DURATION,
 )
-from utils.auth import get_current_user, extract_token_from_request, revoke_token, invalidate_all_user_tokens
+from utils.auth import (
+    get_current_user,
+    extract_token_from_request,
+    revoke_token,
+    invalidate_all_user_tokens,
+)
 from utils.error_responses import (
     APIError,
     ErrorCode,
@@ -241,7 +246,9 @@ def _bcrypt_safe(password: str) -> str:
     return encoded[:_BCRYPT_MAX_BYTES].decode("utf-8", errors="ignore")
 
 
-def _make_jwt(payload: Dict[str, Any], expire_hours: int, token_type: str = "access") -> str:
+def _make_jwt(
+    payload: Dict[str, Any], expire_hours: int, token_type: str = "access"
+) -> str:
     """
     Encode a JWT with a unique `jti`, `iat`, and `type` claim.
 
@@ -274,6 +281,7 @@ def _make_jwt(payload: Dict[str, Any], expire_hours: int, token_type: str = "acc
         security_settings.jwt_config["secret_key"],
         algorithm=security_settings.jwt_config["algorithm"],
     )
+
 
 # =============================================================================
 # REQUEST/RESPONSE MODELS
@@ -356,7 +364,9 @@ class LoginRequest(BaseModel):
     """
 
     email: EmailStr = Field(..., description="Registered email address")
-    password: str = Field(..., max_length=MAX_PASSWORD_LENGTH, description="User password")
+    password: str = Field(
+        ..., max_length=MAX_PASSWORD_LENGTH, description="User password"
+    )
     remember_me: bool = Field(
         False, description="Extend session duration for convenience (less secure)"
     )
@@ -442,7 +452,9 @@ class PasswordChangeRequest(BaseModel):
 
 @router.post("/register", response_model=AuthResponse)
 async def register_user(
-    request: Request, user_data: RegisterRequest, db: AsyncSession = Depends(get_database)
+    request: Request,
+    user_data: RegisterRequest,
+    db: AsyncSession = Depends(get_database),
 ) -> AuthResponse:
     """
     Register a new user account with email and password.
@@ -459,7 +471,10 @@ async def register_user(
             window_seconds=3600,
         )
         if not is_allowed:
-            raise rate_limit_error("Too many registration attempts. Please try again later.", retry_after=3600)
+            raise rate_limit_error(
+                "Too many registration attempts. Please try again later.",
+                retry_after=3600,
+            )
 
         # Check if user already exists
         result = await db.execute(
@@ -493,7 +508,9 @@ async def register_user(
         )
 
         if auto_verified:
-            logger.info("Email verification disabled (DISABLE_EMAIL_VERIFICATION=true) — auto-verified new user")
+            logger.info(
+                "Email verification disabled (DISABLE_EMAIL_VERIFICATION=true) — auto-verified new user"
+            )
 
         # Insert user into database
         db.add(new_user)
@@ -524,7 +541,9 @@ async def register_user(
         # Skip verification email when auto-verified (no SMTP needed)
         if not auto_verified:
             try:
-                await _send_verification_email(user_data.email.lower(), user_data.full_name)
+                await _send_verification_email(
+                    user_data.email.lower(), user_data.full_name
+                )
             except Exception as email_error:
                 logger.warning(f"Failed to send verification email: {email_error}")
 
@@ -575,7 +594,9 @@ async def login_user(
             window_seconds=3600,
         )
         if not is_allowed:
-            raise rate_limit_error("Too many login attempts. Please try again later.", retry_after=3600)
+            raise rate_limit_error(
+                "Too many login attempts. Please try again later.", retry_after=3600
+            )
 
         # Check for account lockout before processing
         is_locked, remaining_seconds = await check_account_lockout(user_data.email)
@@ -611,7 +632,7 @@ async def login_user(
             # Record failed login attempt
             attempts, is_now_locked = await record_failed_login(user_data.email)
             remaining = LOCKOUT_THRESHOLD - attempts
-            
+
             if is_now_locked:
                 structured_logger.log_account_lockout(user_data.email, LOCKOUT_DURATION)
                 raise APIError(
@@ -620,7 +641,7 @@ async def login_user(
                     status_code=status.HTTP_423_LOCKED,
                     headers={"Retry-After": str(LOCKOUT_DURATION)},
                 )
-            
+
             structured_logger.log_login_failure(
                 user_data.email, "invalid_password", attempts_remaining=remaining
             )
@@ -633,14 +654,16 @@ async def login_user(
 
         # Clear failed login attempts on successful login
         await clear_login_attempts(user_data.email)
-        
+
         # Check if email is verified (required before full access).
         # Skipped when DISABLE_EMAIL_VERIFICATION=true (self-hosted mode).
         if not user.email_verified and not settings.disable_email_verification:
             # Resend verification code
             try:
                 await _send_verification_email(user.email, user.full_name)
-                logger.info(f"Resent verification code during login for: {mask_email(user.email)}")
+                logger.info(
+                    f"Resent verification code during login for: {mask_email(user.email)}"
+                )
             except Exception as e:
                 logger.warning(f"Failed to resend verification code: {e}")
 
@@ -650,7 +673,7 @@ async def login_user(
                 status_code=status.HTTP_403_FORBIDDEN,
                 headers={"X-Verification-Required": "true"},
             )
-        
+
         # Log successful login
         structured_logger.log_login_success(user_data.email, user.auth_method)
 
@@ -719,7 +742,9 @@ async def logout_user(request: Request) -> Dict[str, str]:
     if token:
         revoked = await revoke_token(token)
         if not revoked:
-            logger.warning("Logout: token could not be added to blocklist (Redis may be down)")
+            logger.warning(
+                "Logout: token could not be added to blocklist (Redis may be down)"
+            )
 
     logger.info("User logout requested")
     return {"message": SUCCESS_MESSAGE_LOGOUT}
@@ -742,7 +767,7 @@ async def refresh_token(
     try:
         user_id = current_user.get("id") or current_user.get("_id")
         email = current_user.get("email", "")
-        
+
         if not user_id:
             raise unauthorized_error()
 
@@ -760,7 +785,9 @@ async def refresh_token(
         if old_token:
             revoked = await revoke_token(old_token)
             if not revoked:
-                logger.warning("refresh_token: could not revoke old token (Redis may be down)")
+                logger.warning(
+                    "refresh_token: could not revoke old token (Redis may be down)"
+                )
 
         # Generate new token with fresh expiry
         access_token = _make_jwt(
@@ -861,7 +888,9 @@ async def get_oauth_status() -> Dict[str, Any]:
 @router.get("/google")
 async def google_login(
     request: Request,
-    redirect_url: Optional[str] = Query(None, description="URL to redirect after login"),
+    redirect_url: Optional[str] = Query(
+        None, description="URL to redirect after login"
+    ),
 ) -> RedirectResponse:
     """
     Initiate Google OAuth login flow.
@@ -884,7 +913,9 @@ async def google_login(
         HTTPException: 503 if Google OAuth is not configured
     """
     if not settings.is_google_oauth_configured:
-        raise external_service_error("Google OAuth is not configured. Please contact the administrator.")
+        raise external_service_error(
+            "Google OAuth is not configured. Please contact the administrator."
+        )
 
     # Validate redirect_url: only allow relative paths to prevent open redirects
     safe_redirect = "/dashboard"
@@ -894,7 +925,9 @@ async def google_login(
         if candidate.startswith("/") and not candidate.startswith("//"):
             safe_redirect = candidate
         else:
-            logger.warning(f"OAuth: ignoring non-relative redirect_url: {redirect_url!r}")
+            logger.warning(
+                f"OAuth: ignoring non-relative redirect_url: {redirect_url!r}"
+            )
 
     # Generate a cryptographically secure state token for CSRF protection
     state = secrets.token_urlsafe(32)
@@ -903,9 +936,11 @@ async def google_login(
     state_stored = False
     try:
         from utils.redis_client import get_redis_client
+
         redis_client = await get_redis_client()
         if redis_client:
             import json as _json
+
             await redis_client.setex(
                 f"oauth_state:{state}",
                 600,
@@ -916,7 +951,9 @@ async def google_login(
         logger.error(f"Failed to store OAuth state in Redis: {e}", exc_info=True)
 
     if not state_stored:
-        raise external_service_error("Authentication service temporarily unavailable. Please try again.")
+        raise external_service_error(
+            "Authentication service temporarily unavailable. Please try again."
+        )
 
     # Build callback URL and Google authorization URL
     callback_url = str(request.url_for("google_callback"))
@@ -984,6 +1021,7 @@ async def google_callback(
     try:
         from utils.redis_client import get_redis_client
         import json as _json
+
         redis_client = await get_redis_client()
         if not redis_client:
             logger.error("OAuth callback: Redis unavailable for state verification")
@@ -998,7 +1036,9 @@ async def google_callback(
         # could both read the state before either deletes it.
         stored_raw = await redis_client.getdel(state_key)
         if not stored_raw:
-            logger.warning("OAuth callback: state token not found or expired (possible CSRF)")
+            logger.warning(
+                "OAuth callback: state token not found or expired (possible CSRF)"
+            )
             return RedirectResponse(
                 url="/auth/login?error=invalid_state",
                 status_code=status.HTTP_302_FOUND,
@@ -1009,7 +1049,9 @@ async def google_callback(
         _link_user_id: Optional[str] = stored_data.get("link_user_id")
 
         # Defensive re-validation: reject anything that isn't a relative path
-        if not redirect_after_login.startswith("/") or redirect_after_login.startswith("//"):
+        if not redirect_after_login.startswith("/") or redirect_after_login.startswith(
+            "//"
+        ):
             redirect_after_login = "/dashboard"
 
     except Exception as e:
@@ -1061,7 +1103,9 @@ async def google_callback(
             )
 
         if userinfo_response.status_code != 200:
-            logger.error(f"Google userinfo fetch failed: {userinfo_response.status_code}")
+            logger.error(
+                f"Google userinfo fetch failed: {userinfo_response.status_code}"
+            )
             return RedirectResponse(
                 url="/auth/login?error=userinfo_failed",
                 status_code=status.HTTP_302_FOUND,
@@ -1124,6 +1168,7 @@ async def google_callback(
             exchange_code = secrets.token_urlsafe(32)
             try:
                 from utils.redis_client import get_redis_client as _get_rc2
+
                 rc2 = await _get_rc2()
                 if rc2:
                     await rc2.setex(f"oauth_code:{exchange_code}", 30, jwt_token)
@@ -1133,7 +1178,9 @@ async def google_callback(
                         status_code=status.HTTP_302_FOUND,
                     )
             except Exception as link_exc:
-                logger.error(f"Failed to store link exchange code: {link_exc}", exc_info=True)
+                logger.error(
+                    f"Failed to store link exchange code: {link_exc}", exc_info=True
+                )
                 return RedirectResponse(
                     url="/auth/login?error=service_unavailable",
                     status_code=status.HTTP_302_FOUND,
@@ -1171,7 +1218,9 @@ async def google_callback(
             # Enforce the same account lockout rules as email/password login
             _oauth_locked, _oauth_remaining = await check_account_lockout(email)
             if _oauth_locked:
-                logger.warning(f"OAuth login blocked for locked account: {mask_email(email)}")
+                logger.warning(
+                    f"OAuth login blocked for locked account: {mask_email(email)}"
+                )
                 return RedirectResponse(
                     url="/auth/login?error=account_locked",
                     status_code=status.HTTP_302_FOUND,
@@ -1201,15 +1250,20 @@ async def google_callback(
             # Send welcome email — no verification step for Google users, so send it now
             try:
                 from utils.email_service import get_email_service
+
                 _email_service = get_email_service()
                 if _email_service.is_configured():
                     await _email_service.send_welcome_email(
                         to_email=email,
                         user_name=full_name,
                     )
-                    logger.info(f"Welcome email sent to new Google user: {mask_email(email)}")
+                    logger.info(
+                        f"Welcome email sent to new Google user: {mask_email(email)}"
+                    )
             except Exception as _welcome_err:
-                logger.warning(f"Failed to send welcome email for Google user: {_welcome_err}")
+                logger.warning(
+                    f"Failed to send welcome email for Google user: {_welcome_err}"
+                )
 
         # Override redirect if profile is not complete
         if not user.profile_completed:
@@ -1224,6 +1278,7 @@ async def google_callback(
         exchange_code = secrets.token_urlsafe(32)
         try:
             from utils.redis_client import get_redis_client as _get_rc
+
             rc = await _get_rc()
             if rc:
                 await rc.setex(f"oauth_code:{exchange_code}", 30, jwt_token)
@@ -1260,7 +1315,9 @@ async def google_callback(
 class ExchangeCodeRequest(BaseModel):
     """Request body for the one-time OAuth code exchange."""
 
-    code: str = Field(..., max_length=128, description="One-time code received in the OAuth redirect")
+    code: str = Field(
+        ..., max_length=128, description="One-time code received in the OAuth redirect"
+    )
 
 
 @router.post("/oauth/exchange-code")
@@ -1286,9 +1343,12 @@ async def exchange_oauth_code(
     """
     try:
         from utils.redis_client import get_redis_client
+
         redis_client = await get_redis_client()
         if not redis_client:
-            raise external_service_error("Authentication service temporarily unavailable.")
+            raise external_service_error(
+                "Authentication service temporarily unavailable."
+            )
 
         code_key = f"oauth_code:{request_data.code}"
         # Atomic read-and-delete prevents a race condition where two concurrent
@@ -1342,7 +1402,10 @@ async def link_google_account(
         window_seconds=3600,
     )
     if not is_allowed:
-        raise rate_limit_error("Too many account linking attempts. Please try again later.", retry_after=3600)
+        raise rate_limit_error(
+            "Too many account linking attempts. Please try again later.",
+            retry_after=3600,
+        )
 
     result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
     user = result.scalar_one_or_none()
@@ -1360,13 +1423,18 @@ async def link_google_account(
     try:
         from utils.redis_client import get_redis_client as _get_rc
         import json as _json
+
         rc = await _get_rc()
         if not rc:
-            raise external_service_error("Authentication service temporarily unavailable")
+            raise external_service_error(
+                "Authentication service temporarily unavailable"
+            )
         await rc.setex(
             f"oauth_state:{link_state}",
             600,  # 10-minute TTL
-            _json.dumps({"redirect": "/dashboard/settings", "link_user_id": str(user_id)}),
+            _json.dumps(
+                {"redirect": "/dashboard/settings", "link_user_id": str(user_id)}
+            ),
         )
     except APIError:
         raise
@@ -1426,17 +1494,19 @@ async def unlink_google_account(
 
     # Ensure user has a password if they're unlinking Google
     if not user.password_hash:
-        raise validation_error("Cannot unlink Google account without a password. Please set a password first.")
+        raise validation_error(
+            "Cannot unlink Google account without a password. Please set a password first."
+        )
 
     # Unlink Google account
     user.google_id = None
     if user.auth_method == AuthMethod.GOOGLE.value:
         user.auth_method = AuthMethod.LOCAL.value
-    
+
     await db.commit()
-    
+
     logger.info(f"Unlinked Google account for user: {mask_email(user.email)}")
-    
+
     return {"message": "Google account unlinked successfully"}
 
 
@@ -1459,7 +1529,9 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     """Request model for password reset."""
 
-    token: str = Field(..., max_length=128, description="Password reset token from email")
+    token: str = Field(
+        ..., max_length=128, description="Password reset token from email"
+    )
     new_password: str = Field(
         ...,
         min_length=MIN_PASSWORD_LENGTH,
@@ -1489,6 +1561,7 @@ async def _store_reset_token(email: str, token: str) -> bool:
     """Store password reset token in Redis."""
     try:
         from utils.redis_client import get_redis_client
+
         redis_client = await get_redis_client()
         if redis_client:
             key = f"{RESET_TOKEN_PREFIX}{token}"
@@ -1511,6 +1584,7 @@ async def _consume_reset_token(token: str) -> Optional[str]:
     """
     try:
         from utils.redis_client import get_redis_client
+
         redis_client = await get_redis_client()
         if redis_client:
             key = f"{RESET_TOKEN_PREFIX}{token}"
@@ -1563,7 +1637,10 @@ async def forgot_password(
             window_seconds=3600,
         )
         if not is_allowed:
-            raise rate_limit_error("Too many password reset requests. Please wait before trying again.", retry_after=3600)
+            raise rate_limit_error(
+                "Too many password reset requests. Please wait before trying again.",
+                retry_after=3600,
+            )
 
         # Check if user exists
         result = await db.execute(select(User).where(User.email == email))
@@ -1574,12 +1651,16 @@ async def forgot_password(
         }
 
         if not user:
-            logger.info(f"Password reset requested for non-existent email: {mask_email(email)}")
+            logger.info(
+                f"Password reset requested for non-existent email: {mask_email(email)}"
+            )
             return _generic_reset_response
 
         # Check if user has a password (Google OAuth users without password)
         if not user.password_hash and user.auth_method == AuthMethod.GOOGLE.value:
-            logger.info(f"Password reset requested for Google OAuth user without password: {mask_email(email)}")
+            logger.info(
+                f"Password reset requested for Google OAuth user without password: {mask_email(email)}"
+            )
             return _generic_reset_response
 
         # Generate secure reset token
@@ -1588,10 +1669,12 @@ async def forgot_password(
         # Store token in Redis
         token_stored = await _store_reset_token(email, reset_token)
         if not token_stored:
-            logger.error(f"Failed to store password reset token for: {mask_email(email)}")
+            logger.error(
+                f"Failed to store password reset token for: {mask_email(email)}"
+            )
             return {
                 "message": "Something went wrong. Please try again later.",
-                "email_sent": "false"
+                "email_sent": "false",
             }
 
         # Build reset URL
@@ -1601,8 +1684,9 @@ async def forgot_password(
         # Send email
         try:
             from utils.email_service import get_email_service
+
             email_service = get_email_service()
-            
+
             if email_service.is_configured():
                 email_sent = await email_service.send_password_reset_email(
                     to_email=email,
@@ -1613,7 +1697,9 @@ async def forgot_password(
                 if email_sent:
                     structured_logger.log_password_reset_request(email)
                 else:
-                    logger.warning(f"Failed to send password reset email to: {mask_email(email)}")
+                    logger.warning(
+                        f"Failed to send password reset email to: {mask_email(email)}"
+                    )
             else:
                 # No SMTP configured — surface the reset URL directly so self-hosted
                 # users are not permanently locked out without an email service.
@@ -1629,7 +1715,9 @@ async def forgot_password(
                     "reset_url": reset_url,
                 }
         except Exception as email_error:
-            logger.error(f"Error sending password reset email: {email_error}", exc_info=True)
+            logger.error(
+                f"Error sending password reset email: {email_error}", exc_info=True
+            )
 
         # Always return the same generic message to prevent email enumeration
         return _generic_reset_response
@@ -1672,13 +1760,18 @@ async def reset_password(
             window_seconds=3600,
         )
         if not is_allowed:
-            raise rate_limit_error("Too many password reset attempts. Please wait before trying again.", retry_after=3600)
+            raise rate_limit_error(
+                "Too many password reset attempts. Please wait before trying again.",
+                retry_after=3600,
+            )
 
         # Verify token (atomic GETDEL — also consumes it so it cannot be replayed)
         email = await _verify_reset_token(request_data.token)
-        
+
         if not email:
-            raise validation_error("Invalid or expired reset token. Please request a new password reset.")
+            raise validation_error(
+                "Invalid or expired reset token. Please request a new password reset."
+            )
 
         # Honour account lockout — an attacker who obtained a reset token for a
         # locked account should not be able to bypass the lockout.
@@ -1691,7 +1784,9 @@ async def reset_password(
         user = result.scalar_one_or_none()
 
         if not user:
-            raise validation_error("Invalid or expired reset token. Please request a new password reset.")
+            raise validation_error(
+                "Invalid or expired reset token. Please request a new password reset."
+            )
 
         # Hash new password
         new_password_hash = pwd_context.hash(_bcrypt_safe(request_data.new_password))
@@ -1717,11 +1812,15 @@ async def reset_password(
         try:
             await invalidate_all_user_tokens(str(user.id))
         except Exception as revoke_err:
-            logger.warning(f"Failed to invalidate sessions after password reset: {revoke_err}")
+            logger.warning(
+                f"Failed to invalidate sessions after password reset: {revoke_err}"
+            )
 
         structured_logger.log_password_reset_complete(email)
 
-        return {"message": "Password reset successfully. You can now log in with your new password."}
+        return {
+            "message": "Password reset successfully. You can now log in with your new password."
+        }
 
     except HTTPException:
         raise
@@ -1767,8 +1866,10 @@ async def change_password(
         response.headers["X-RateLimit-Remaining"] = str(rate_result.remaining)
         response.headers["X-RateLimit-Reset"] = str(rate_result.reset_seconds)
         if not rate_result.allowed:
-            raise rate_limit_error("Rate limit exceeded. Maximum 5 password changes per hour.")
-        
+            raise rate_limit_error(
+                "Rate limit exceeded. Maximum 5 password changes per hour."
+            )
+
         result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
         user = result.scalar_one_or_none()
 
@@ -1777,14 +1878,22 @@ async def change_password(
 
         # Verify current password
         if not user.password_hash:
-            raise validation_error("No password set for this account. Please use 'Forgot Password' to set one.")
+            raise validation_error(
+                "No password set for this account. Please use 'Forgot Password' to set one."
+            )
 
-        if not pwd_context.verify(_bcrypt_safe(request_data.current_password), user.password_hash):
+        if not pwd_context.verify(
+            _bcrypt_safe(request_data.current_password), user.password_hash
+        ):
             raise validation_error("Current password is incorrect")
 
         # Check that new password is different
-        if pwd_context.verify(_bcrypt_safe(request_data.new_password), user.password_hash):
-            raise validation_error("New password must be different from current password")
+        if pwd_context.verify(
+            _bcrypt_safe(request_data.new_password), user.password_hash
+        ):
+            raise validation_error(
+                "New password must be different from current password"
+            )
 
         # Hash and set new password
         user.password_hash = pwd_context.hash(_bcrypt_safe(request_data.new_password))
@@ -1821,17 +1930,21 @@ async def change_password(
 async def get_email_service_status() -> Dict[str, Any]:
     """
     Check if email service is configured.
-    
+
     Useful for frontend to show appropriate UI for password reset.
     """
     try:
         from utils.email_service import get_email_service
+
         email_service = get_email_service()
-        
+
         return {
             "email_configured": email_service.is_configured(),
-            "message": "Email service is configured" if email_service.is_configured() 
-                      else "Email service is not configured. Password reset emails cannot be sent.",
+            "message": (
+                "Email service is configured"
+                if email_service.is_configured()
+                else "Email service is not configured. Password reset emails cannot be sent."
+            ),
         }
     except Exception as e:
         logger.error(f"Error checking email status: {e}", exc_info=True)
@@ -1863,6 +1976,7 @@ async def _store_verification_token(email: str, token: str) -> bool:
     """
     try:
         from utils.redis_client import get_redis_client
+
         redis_client = await get_redis_client()
         if redis_client:
             user_key = f"{VERIFICATION_USER_PREFIX}{email.lower()}"
@@ -1899,6 +2013,7 @@ async def _consume_verification_token(token: str) -> Optional[str]:
     """
     try:
         from utils.redis_client import get_redis_client
+
         redis_client = await get_redis_client()
         if redis_client:
             key = f"{VERIFICATION_TOKEN_PREFIX}{token}"
@@ -1909,7 +2024,9 @@ async def _consume_verification_token(token: str) -> Optional[str]:
                     user_key = f"{VERIFICATION_USER_PREFIX}{email.lower()}"
                     await redis_client.delete(user_key)
                 except Exception as cleanup_err:
-                    logger.debug("Failed to remove verification user key: %s", cleanup_err)
+                    logger.debug(
+                        "Failed to remove verification user key: %s", cleanup_err
+                    )
             return email
         return None
     except Exception as e:
@@ -1941,8 +2058,9 @@ async def _send_verification_email(email: str, user_name: Optional[str] = None) 
 
         # Send email with code
         from utils.email_service import get_email_service
+
         email_service = get_email_service()
-        
+
         if email_service.is_configured():
             email_sent = await email_service.send_verification_code_email(
                 to_email=email,
@@ -1953,12 +2071,18 @@ async def _send_verification_email(email: str, user_name: Optional[str] = None) 
                 logger.info(f"Verification code email sent to: {mask_email(email)}")
                 return True
             else:
-                logger.warning(f"Failed to send verification code email to: {mask_email(email)}")
+                logger.warning(
+                    f"Failed to send verification code email to: {mask_email(email)}"
+                )
                 return False
         else:
-            logger.warning(f"Email service not configured. Verification code generated for {mask_email(email)} but not delivered.")
+            logger.warning(
+                f"Email service not configured. Verification code generated for {mask_email(email)} but not delivered."
+            )
             if settings.debug:
-                logger.debug(f"DEBUG: Verification code for {mask_email(email)}: {verification_code}")
+                logger.debug(
+                    f"DEBUG: Verification code for {mask_email(email)}: {verification_code}"
+                )
             return False
     except Exception as e:
         logger.error(f"Error sending verification email: {e}", exc_info=True)
@@ -1975,7 +2099,9 @@ class VerifyCodeRequest(BaseModel):
     """Request model for verifying email with code."""
 
     email: EmailStr = Field(..., description="Email address to verify")
-    code: str = Field(..., min_length=6, max_length=6, description="6-digit verification code")
+    code: str = Field(
+        ..., min_length=6, max_length=6, description="6-digit verification code"
+    )
 
 
 @router.post("/verify-code")
@@ -2005,7 +2131,10 @@ async def verify_email_code(
             window_seconds=3600,
         )
         if not is_allowed:
-            raise rate_limit_error("Too many verification attempts. Please wait before trying again.", retry_after=3600)
+            raise rate_limit_error(
+                "Too many verification attempts. Please wait before trying again.",
+                retry_after=3600,
+            )
 
         code = request_data.code
 
@@ -2027,14 +2156,18 @@ async def verify_email_code(
             return {
                 "message": "Email already verified.",
                 "email_verified": True,
-                "redirect": "/dashboard" if user.profile_completed else "/profile/setup",
+                "redirect": (
+                    "/dashboard" if user.profile_completed else "/profile/setup"
+                ),
             }
 
         # Verify the code
         stored_email = await _verify_verification_token(code)
-        
+
         if not stored_email or stored_email.lower() != email:
-            raise validation_error("Invalid or expired verification code. Please request a new one.")
+            raise validation_error(
+                "Invalid or expired verification code. Please request a new one."
+            )
 
         # Mark email as verified
         user.email_verified = True
@@ -2051,6 +2184,7 @@ async def verify_email_code(
         # Send welcome email now that email is verified
         try:
             from utils.email_service import get_email_service
+
             email_service = get_email_service()
             if email_service.is_configured():
                 await email_service.send_welcome_email(
@@ -2059,7 +2193,9 @@ async def verify_email_code(
                 )
                 logger.info(f"Welcome email sent to: {mask_email(email)}")
         except Exception as email_error:
-            logger.warning(f"Failed to send welcome email after verification: {email_error}")
+            logger.warning(
+                f"Failed to send welcome email after verification: {email_error}"
+            )
 
         # Determine redirect based on profile completion
         redirect_url = "/dashboard" if user.profile_completed else "/profile/setup"
@@ -2081,7 +2217,7 @@ async def verify_email_code(
         expires_in = security_settings.jwt_config["expire_hours"] * SECONDS_PER_HOUR
 
         return {
-            "message": "Email verified successfully! Welcome to ApplyPilot.",
+            "message": "Email verified successfully! Welcome to Autopilot.",
             "email_verified": True,
             "redirect": redirect_url,
             "access_token": access_token,
@@ -2123,9 +2259,11 @@ async def verify_email(
     try:
         # Verify token
         email = await _verify_verification_token(token)
-        
+
         if not email:
-            raise validation_error("Invalid or expired verification token. Please request a new verification email.")
+            raise validation_error(
+                "Invalid or expired verification token. Please request a new verification email."
+            )
 
         # Find user
         result = await db.execute(select(User).where(User.email == email))
@@ -2158,6 +2296,7 @@ async def verify_email(
         # Send welcome email now that email is verified
         try:
             from utils.email_service import get_email_service
+
             email_service = get_email_service()
             if email_service.is_configured():
                 await email_service.send_welcome_email(
@@ -2166,15 +2305,19 @@ async def verify_email(
                 )
                 logger.info(f"Welcome email sent to: {mask_email(email)}")
         except Exception as email_error:
-            logger.warning(f"Failed to send welcome email after verification: {email_error}")
+            logger.warning(
+                f"Failed to send welcome email after verification: {email_error}"
+            )
             # Don't fail verification if welcome email fails
 
         # Check if user has completed profile setup
-        profile_completed = user.profile_completed if hasattr(user, 'profile_completed') else False
+        profile_completed = (
+            user.profile_completed if hasattr(user, "profile_completed") else False
+        )
         redirect_url = "/dashboard" if profile_completed else "/profile/setup"
 
         return {
-            "message": "Email verified successfully! Welcome to ApplyPilot.",
+            "message": "Email verified successfully! Welcome to Autopilot.",
             "email_verified": True,
             "redirect": redirect_url,
         }
@@ -2215,8 +2358,11 @@ async def resend_verification_email(
             window_seconds=3600,
         )
         if not is_allowed:
-            raise rate_limit_error("Too many resend requests. Please wait before trying again.", retry_after=3600)
-        
+            raise rate_limit_error(
+                "Too many resend requests. Please wait before trying again.",
+                retry_after=3600,
+            )
+
         success_message = {
             "message": "If an account exists with this email and is not yet verified, you will receive a verification email shortly."
         }
@@ -2226,13 +2372,17 @@ async def resend_verification_email(
         user = result.scalar_one_or_none()
 
         if not user:
-            logger.info(f"Verification resend requested for non-existent email: {mask_email(email)}")
+            logger.info(
+                f"Verification resend requested for non-existent email: {mask_email(email)}"
+            )
             return success_message
 
         # Check if already verified — return the same generic message to prevent
         # leaking whether the account is already verified.
         if user.email_verified:
-            logger.info(f"Verification resend requested for already verified email: {mask_email(email)}")
+            logger.info(
+                f"Verification resend requested for already verified email: {mask_email(email)}"
+            )
             return success_message
 
         # Send verification email
@@ -2264,7 +2414,7 @@ async def get_verification_status(
     """
     try:
         user_id = current_user.get("id")
-        
+
         result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
         user = result.scalar_one_or_none()
 
@@ -2274,7 +2424,9 @@ async def get_verification_status(
         return {
             "email": user.email,
             "email_verified": user.email_verified,
-            "email_verified_at": user.email_verified_at.isoformat() if user.email_verified_at else None,
+            "email_verified_at": (
+                user.email_verified_at.isoformat() if user.email_verified_at else None
+            ),
         }
 
     except HTTPException:

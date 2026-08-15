@@ -157,7 +157,7 @@ Each file is a **single merged PNG** (not multiple images stacked) that shows th
             <div class="ss-dots"><span></span><span></span><span></span></div>
             <div class="ss-url-bar">
                 <i class="fas fa-lock"></i>
-                <span>applypilot.app / dashboard / applications / …</span>
+                <span>autopilot.app / dashboard / applications / …</span>
             </div>
         </div>
         <div class="ss-panels">

@@ -4,12 +4,13 @@ Revision ID: 001
 Revises: None
 Create Date: 2026-01-02
 
-This migration creates all tables for ApplyPilot:
+This migration creates all tables for Autopilot:
 - users: User authentication and basic identity
 - user_profiles: Extended profile information with JSONB fields
 - workflow_sessions: Workflow state and agent results
 - job_applications: Application tracking with workflow reference
 """
+
 from typing import Sequence, Union
 
 from alembic import op
@@ -25,7 +26,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Create all database tables."""
-    
+
     # ==========================================================================
     # USERS TABLE
     # ==========================================================================
@@ -232,19 +233,18 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Drop all database tables."""
     # Drop in reverse order of creation (respecting foreign key constraints)
-    
+
     # Drop indexes first
     op.drop_index("ix_job_applications_user_score", table_name="job_applications")
     op.drop_index("ix_job_applications_user_created", table_name="job_applications")
     op.drop_index("ix_job_applications_user_status", table_name="job_applications")
     op.drop_constraint("uq_user_job_company", "job_applications", type_="unique")
-    
+
     op.drop_index("ix_workflow_user_created", table_name="workflow_sessions")
     op.drop_index("ix_workflow_user_status", table_name="workflow_sessions")
-    
+
     # Drop tables
     op.drop_table("job_applications")
     op.drop_table("workflow_sessions")
     op.drop_table("user_profiles")
     op.drop_table("users")
-

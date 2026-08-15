@@ -1,6 +1,6 @@
-# ApplyPilot — User Guide
+# Autopilot — User Guide
 
-Welcome to ApplyPilot! This guide walks you through every feature so you can get the most out of your AI-powered job search co-pilot.
+Welcome to Autopilot! This guide walks you through every feature so you can get the most out of your AI-powered job search co-pilot.
 
 ## Table of Contents
 
@@ -238,21 +238,21 @@ The extension loads directly from this repository — no app store required.
 1. Open `chrome://extensions` in Chrome
 2. Enable **Developer Mode** (top-right toggle)
 3. Click **Load unpacked** and select the `extension/` folder from the project directory
-4. The ApplyPilot icon will appear in your toolbar
+4. The Autopilot icon will appear in your toolbar
 
 After any code change, click the ↺ refresh icon on the extension card.
 
 ### Using the Extension — Analyze This Job
 
 1. Browse to a job posting page (detail view with the description visible)
-2. Click the ApplyPilot icon in the toolbar
+2. Click the Autopilot icon in the toolbar
 3. Click **Analyze This Job** — the page content is extracted and sent for analysis
 4. When complete, use **Open Dashboard** in the popup to see the results
 
 ### Using the Extension — Match Form To Profile
 
 1. Browse to an application form with visible fields (main page only in the current release)
-2. Click the ApplyPilot icon in the toolbar
+2. Click the Autopilot icon in the toolbar
 3. Click **Match Form To Profile** — the extension scrolls long forms to reveal hidden questions, scans labels and dropdown options, and sends them to the server with your profile
 4. The server returns field assignments: an AI map merged with **deterministic profile rules** (name, contact, work authorization, visa sponsorship, country, location, education, and common screening questions). Values are written into the page for you to review and edit before you submit
 5. Requires the same login, **completed profile** (including work authorization), and API access as dashboard analyses. If some fields fail, the popup shows how many succeeded and failed — always review before submitting
@@ -272,7 +272,7 @@ The extension has optimized content selectors for many employer career sites and
 - Analyzed jobs appear in your dashboard immediately
 - **Match Form To Profile** runs on the main document only; nested iframes are not scanned in the current release
 - After updating the extension code, reload it at `chrome://extensions` before testing again
-- Open DevTools on the application tab and filter the console for `ApplyPilot` to see scan/apply debug details when troubleshooting
+- Open DevTools on the application tab and filter the console for `Autopilot` to see scan/apply debug details when troubleshooting
 
 ---
 
@@ -309,28 +309,28 @@ Access six AI-powered tools at **Dashboard → Career Tools**.
 
 Generate professional post-interview thank-you emails.
 
-**Input:** Interviewer name/role, interview type, company, job title, key discussion points (optional)  
+**Input:** Interviewer name/role, interview type, company, job title, key discussion points (optional)
 **Output:** Subject line, email body, key points referenced
 
 ### Rejection Analysis
 
 Turn rejection emails into learning opportunities.
 
-**Input:** Rejection email text, job title/company (optional), interview stage reached  
+**Input:** Rejection email text, job title/company (optional), interview stage reached
 **Output:** Likely rejection reasons, improvement suggestions, follow-up template, encouragement message
 
 ### Reference Request Generator
 
 Create professional emails asking for references.
 
-**Input:** Reference name/relationship, company you worked at together, target job (optional)  
+**Input:** Reference name/relationship, company you worked at together, target job (optional)
 **Output:** Subject line, email body, talking points reminder, follow-up timeline, tips
 
 ### Job Comparison Tool
 
 Compare 2–3 job opportunities side by side.
 
-**Input:** 2–3 job descriptions with details, your career priorities (optional)  
+**Input:** 2–3 job descriptions with details, your career priorities (optional)
 **Output:** Overall scores, category breakdown (compensation, growth, balance, culture, fit), pros/cons, recommendation
 
 ### Follow-up Email Generator
@@ -351,7 +351,7 @@ Generate follow-up emails for any application stage.
 
 Comprehensive preparation for salary negotiations.
 
-**Input:** Job title/company, offered salary, your experience, current salary and competing offers (optional), target range  
+**Input:** Job title/company, offered salary, your experience, current salary and competing offers (optional), target range
 **Output:** Market assessment, strategy overview, negotiation script, pushback responses, alternative asks (signing bonus, equity, PTO), email template, do's and don'ts
 
 **Rate limit:** 5/hour (all other career tools are 10/hour)
@@ -404,7 +404,7 @@ All preferences auto-save — there is no Save button:
 
 ### General
 
-**Q: How accurate is the profile match score?**  
+**Q: How accurate is the profile match score?**
 A: The match score is a useful signal, not a definitive verdict. It's calculated by the Profile Matcher agent, which compares your profile against the job's stated requirements across four dimensions:
 
 - **Skills and technologies** — your listed skills are checked against what the job explicitly requires vs. what it lists as "nice to have." Required skills carry more weight. Gaps in required skills pull the score down more than gaps in preferred ones.
@@ -416,30 +416,30 @@ A high score (>75%) means you meet most stated requirements — worth applying c
 
 The score improves with a more complete profile — sparse profiles, especially those with no work experience or skills listed, produce less reliable matching. You can also configure the minimum threshold at which the workflow pauses and asks you to confirm in **Settings → Preferences** (default: 50%).
 
-**Q: Can I apply to low-match jobs?**  
+**Q: Can I apply to low-match jobs?**
 A: Yes. If the score is below 50% the gate decision appears, but you can always click "Continue Anyway." A low score just means you may need to address some gaps in your materials.
 
-**Q: Why does the analysis take ~30 seconds?**  
+**Q: Why does the analysis take ~30 seconds?**
 A: Five AI agents run across four steps — the last two (Resume Advisor and Cover Letter Writer) run in parallel. Each makes an API call to Gemini. This is by design.
 
 ### API Keys
 
-**Q: Do I need my own Gemini API key?**  
+**Q: Do I need my own Gemini API key?**
 A: It depends on how the instance is configured. If the operator has set a `GEMINI_API_KEY` in the server's `.env`, you don't need one. If not, go to **Settings → AI Setup** to add yours.
 
-**Q: Is my API key secure?**  
+**Q: Is my API key secure?**
 A: Yes. Keys are encrypted at rest using Fernet symmetric encryption and are never logged or returned by the API.
 
-**Q: Where do I get a Gemini API key?**  
+**Q: Where do I get a Gemini API key?**
 A: Visit [Google AI Studio](https://aistudio.google.com/app/apikey) and click "Create API Key". Usage is billed directly to your Google account at very low rates.
 
 ### Technical
 
-**Q: What file formats are supported for resumes?**  
+**Q: What file formats are supported for resumes?**
 A: PDF, DOCX, and TXT files up to 10 MB.
 
-**Q: How do I reset my password if email isn't configured?**  
+**Q: How do I reset my password if email isn't configured?**
 A: On self-hosted instances without SMTP, the password reset page shows the reset link directly on screen after you submit your email — no email is sent. Copy the link, open it, and set your new password. If you are the operator and want to enable email delivery, configure the `SMTP_*` variables in your `.env` file.
 
-**Q: Something looks broken — how do I report it?**  
+**Q: Something looks broken — how do I report it?**
 A: Open an issue at `https://github.com/eliornl/applypilot/issues` with the steps to reproduce, what you expected, and what actually happened.

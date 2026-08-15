@@ -1,4 +1,4 @@
-# ApplyPilot — E2E Test Suite
+# Autopilot — E2E Test Suite
 
 End-to-end browser tests using [Playwright](https://playwright.dev/).
 
@@ -422,5 +422,5 @@ npm run test:debug
 npx playwright show-trace test-results/path/to/trace.zip
 ```
 
-Screenshots are captured automatically on failure (`test-results/`).  
+Screenshots are captured automatically on failure (`test-results/`).
 Video is recorded on first retry (`test-results/`).

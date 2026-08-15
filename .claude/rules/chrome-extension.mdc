@@ -41,9 +41,9 @@ chrome.storage.local.set({ jaa_api_url: 'http://localhost:8000/api/v1' })
 
 ## Manifest (current)
 - **version**: `1.1.0`
-- **description**: "Extract any job posting and get AI-powered analysis, resume tips, cover letters, and interview prep on ApplyPilot."
-- **short_name**: `ApplyPilot`
-- **default_title**: `ApplyPilot — AI Job Application Assistant`
+- **description**: "Extract any job posting and get AI-powered analysis, resume tips, cover letters, and interview prep on Autopilot."
+- **short_name**: `Autopilot`
+- **default_title**: `Autopilot — AI Job Application Assistant`
 - `http://localhost:8000/*` is in `host_permissions` (required, not optional) so Chrome grants access automatically in dev
 
 ## Icons

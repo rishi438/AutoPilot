@@ -1,5 +1,5 @@
 """
-Database utilities for the ApplyPilot.
+Database utilities for the Autopilot.
 Provides PostgreSQL connection management with SQLAlchemy async, health monitoring, and session management.
 """
 
@@ -173,6 +173,7 @@ async def connect_to_database() -> None:
 
         # Import and create tables
         from models.database import Base
+
         async with _engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 

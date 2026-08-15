@@ -1,14 +1,14 @@
 /**
- * @fileoverview ApplyPilot - Authentication Manager
+ * @fileoverview Autopilot - Authentication Manager
  * Handles login, registration, form validation, and session management.
- * 
+ *
  * @description Provides authentication functionality including:
  * - Login/logout with JWT tokens
  * - User registration with validation
  * - Password strength validation
  * - Session management with auto-refresh
  * - Remember me functionality
- * 
+ *
  * @version 2.0.0
  */
 
@@ -17,7 +17,7 @@
 /**
  * Authentication manager class.
  * Handles all authentication-related operations.
- * 
+ *
  * @class
  */
 class AuthManager {
@@ -87,7 +87,7 @@ class AuthManager {
         this.isInitialized = false;
         this.validationTimeouts = new Map();
         this.requestAbortController = null;
-        
+
         // Initialize the authentication manager
         this.init();
     }
@@ -108,7 +108,7 @@ class AuthManager {
             this.handleUrlParameters();
             this.setupFormValidation();
             this.validateExistingSession();
-            
+
             this.isInitialized = true;
         } catch (error) {
             console.error('AuthManager initialization failed:', error);
@@ -126,13 +126,13 @@ class AuthManager {
     setupEventListeners() {
         // Form submission handlers
         this.setupFormSubmissionHandlers();
-        
+
         // Password visibility toggles
         this.setupPasswordToggles();
-        
+
         // Real-time validation handlers
         this.setupValidationHandlers();
-        
+
         // Page visibility change handler for session management
         this.setupPageVisibilityHandler();
     }
@@ -236,11 +236,11 @@ class AuthManager {
     async handleLogin(event) {
         event.preventDefault();
         const form = event.target;
-        
+
         try {
             // Clear previous alerts
             this.clearAlerts();
-            
+
             // Validate form
             if (!this.validateForm(form)) {
                 this.showNotification('Please fix the validation errors', 'error');
@@ -259,10 +259,10 @@ class AuthManager {
 
             // Perform login
             const result = await this.performLogin(credentials);
-            
+
             // Handle successful login
             this.handleLoginSuccess(result);
-            
+
         } catch (error) {
             this.handleLoginError(error);
         } finally {
@@ -277,11 +277,11 @@ class AuthManager {
     async handleRegister(event) {
         event.preventDefault();
         const form = event.target;
-        
+
         try {
             // Clear previous alerts
             this.clearAlerts();
-            
+
             // Validate form
             if (!this.validateForm(form)) {
                 this.showNotification('Please fix the validation errors', 'error');
@@ -302,10 +302,10 @@ class AuthManager {
 
             // Perform registration
             const result = await this.performRegistration(registrationData);
-            
+
             // Handle successful registration
             this.handleRegistrationSuccess(result);
-            
+
         } catch (error) {
             this.handleRegistrationError(error);
         } finally {
@@ -388,7 +388,7 @@ class AuthManager {
 
             // Make API call
             const response = await fetch(`${this.apiBaseUrl}${endpoint}`, config);
-            
+
             // Handle JSON parsing with error handling
             let result;
             try {
@@ -402,7 +402,7 @@ class AuthManager {
             if (!response.ok) {
                 // Format error message in a user-friendly way
                 let errorMessage = 'An error occurred';
-                
+
                 // Use appropriate user-friendly messages based on status code
                 if (response.status === 401) {
                     errorMessage = 'Invalid email or password';
@@ -415,7 +415,7 @@ class AuthManager {
                 } else if (response.status === 403) {
                     errorMessage = 'You do not have permission to access this resource';
                 }
-                
+
                 throw new Error(errorMessage);
             }
 
@@ -446,10 +446,10 @@ class AuthManager {
         try {
             // Store session data
             this.storeAuthData(result);
-            
+
             // Notify Chrome extension of login (if installed)
             this.notifyChromeExtension(result.access_token, result.user);
-            
+
             // Track login event (if Analytics is loaded)
             if (window.Analytics) {
                 window.Analytics.trackLogin('email');
@@ -457,13 +457,13 @@ class AuthManager {
                     window.Analytics.identify(result.user_id, { email: result.email });
                 }
             }
-            
+
             // Show success message
             this.showNotification('Login successful! Redirecting...', 'success');
-            
+
             // Redirect user
             this.redirectUser(result.profile_completed);
-            
+
         } catch (error) {
             console.error('Login success handling failed:', error);
             this.showNotification('Login succeeded but there was an error. Please refresh the page.', 'warning');
@@ -476,9 +476,9 @@ class AuthManager {
      */
     handleLoginError(error) {
         console.error('Login failed:', error);
-        
+
         let message = AuthManager.ERROR_MESSAGES.LOGIN_FAILED;
-        
+
         // Customize error message based on error type
         if (error.message.includes('network') || error.message.includes('fetch')) {
             message = AuthManager.ERROR_MESSAGES.NETWORK_ERROR;
@@ -487,7 +487,7 @@ class AuthManager {
         } else if (error.message) {
             message = error.message;
         }
-        
+
         this.showNotification(message, 'error');
     }
 
@@ -499,10 +499,10 @@ class AuthManager {
         try {
             // Store session data
             this.storeAuthData(result);
-            
+
             // Notify Chrome extension of login (if installed)
             this.notifyChromeExtension(result.access_token, result.user);
-            
+
             // Track signup event (if Analytics is loaded)
             if (window.Analytics) {
                 window.Analytics.trackSignup('email');
@@ -510,15 +510,15 @@ class AuthManager {
                     window.Analytics.identify(result.user_id, { email: result.email });
                 }
             }
-            
+
             // Show success message
-            this.showNotification('Registration successful! Welcome to ApplyPilot!', 'success');
-            
+            this.showNotification('Registration successful! Welcome to Autopilot!', 'success');
+
             // Redirect to profile setup (new users need to complete profile)
                 setTimeout(() => {
                 window.location.href = '/profile/setup';
             }, AuthManager.CONFIG.REDIRECT_DELAY);
-            
+
         } catch (error) {
             console.error('Registration success handling failed:', error);
             this.showNotification('Registration succeeded but there was an error. Please refresh the page.', 'warning');
@@ -531,9 +531,9 @@ class AuthManager {
      */
     handleRegistrationError(error) {
         console.error('Registration failed:', error);
-        
+
         let message = AuthManager.ERROR_MESSAGES.REGISTRATION_FAILED;
-        
+
         // Customize error message based on error type
         if (error.message.includes('network') || error.message.includes('fetch')) {
             message = AuthManager.ERROR_MESSAGES.NETWORK_ERROR;
@@ -542,7 +542,7 @@ class AuthManager {
         } else if (error.message) {
             message = error.message;
         }
-        
+
         this.showNotification(message, 'error');
     }
 
@@ -561,13 +561,13 @@ class AuthManager {
     validateForm(form) {
         const fields = form.querySelectorAll('[data-validate]');
         let isValid = true;
-        
+
         fields.forEach(field => {
             if (!this.validateField(field)) {
                 isValid = false;
             }
         });
-        
+
         return isValid;
     }
 
@@ -580,10 +580,10 @@ class AuthManager {
         const value = field.value.trim();
         const validationType = field.getAttribute('data-validate');
         const validationRules = validationType.split(',');
-        
+
         let isValid = true;
         let errorMessage = '';
-        
+
         // Check each validation rule
         for (const rule of validationRules) {
             const ruleResult = this.validateRule(value, rule.trim(), field);
@@ -593,15 +593,15 @@ class AuthManager {
                 break;
             }
         }
-        
+
         // Update field UI
         this.updateFieldValidationState(field, isValid, errorMessage);
-        
+
         // Update password strength indicator if applicable
         if (field.type === 'password' && field.id === 'password') {
             this.updatePasswordStrengthIndicator(field, value);
         }
-        
+
         return isValid;
     }
 
@@ -619,19 +619,19 @@ class AuthManager {
                     isValid: value.length > 0,
                     message: AuthManager.ERROR_MESSAGES.REQUIRED_FIELD
                 };
-                
+
             case 'email':
                 return {
                     isValid: AuthManager.VALIDATION_PATTERNS.EMAIL.test(value),
                     message: AuthManager.ERROR_MESSAGES.INVALID_EMAIL
                 };
-                
+
             case 'password':
                 return {
                     isValid: this.validatePassword(value).isValid,
                     message: AuthManager.ERROR_MESSAGES.WEAK_PASSWORD
                 };
-                
+
             case 'password-confirm':
                 const passwordField = document.querySelector('#password');
                 const passwordValue = passwordField ? passwordField.value : '';
@@ -639,19 +639,19 @@ class AuthManager {
                     isValid: value === passwordValue,
                     message: AuthManager.ERROR_MESSAGES.PASSWORDS_MISMATCH
                 };
-                
+
             case 'name':
                 return {
                     isValid: AuthManager.VALIDATION_PATTERNS.NAME.test(value),
                     message: AuthManager.ERROR_MESSAGES.INVALID_NAME
                 };
-                
+
             case 'terms':
                 return {
                     isValid: field.checked,
                     message: AuthManager.ERROR_MESSAGES.TERMS_REQUIRED
                 };
-                
+
             default:
                 return { isValid: true, message: '' };
         }
@@ -671,10 +671,10 @@ class AuthManager {
             number: requirements.REQUIRE_NUMBER ? /\d/.test(password) : true,
             special: requirements.REQUIRE_SPECIAL ? new RegExp(`[${requirements.SPECIAL_CHARS}]`).test(password) : true
         };
-        
+
         const passedChecks = Object.values(checks).filter(check => check).length;
         const totalChecks = Object.keys(checks).length;
-        
+
         return {
             isValid: passedChecks === totalChecks,
             strength: passedChecks / totalChecks,
@@ -692,13 +692,13 @@ class AuthManager {
         if (this.validationTimeouts.has(field)) {
             clearTimeout(this.validationTimeouts.get(field));
         }
-        
+
         // Set new timeout
         const timeout = setTimeout(() => {
             this.validateField(field);
             this.validationTimeouts.delete(field);
         }, AuthManager.CONFIG.VALIDATION_DELAY);
-        
+
         this.validationTimeouts.set(field, timeout);
     }
 
@@ -714,11 +714,11 @@ class AuthManager {
      */
     updateFieldValidationState(field, isValid, errorMessage) {
         const feedbackElement = this.getOrCreateFeedbackElement(field);
-        
+
         // Update field classes
         field.classList.remove('is-valid', 'is-invalid');
         field.classList.add(isValid ? 'is-valid' : 'is-invalid');
-        
+
         // Update feedback
         if (isValid) {
             feedbackElement.textContent = '';
@@ -727,7 +727,7 @@ class AuthManager {
             feedbackElement.textContent = errorMessage;
             feedbackElement.classList.add('show');
         }
-        
+
         // Update ARIA attributes
         field.setAttribute('aria-invalid', isValid ? 'false' : 'true');
         if (!isValid) {
@@ -745,14 +745,14 @@ class AuthManager {
     getOrCreateFeedbackElement(field) {
         const fieldContainer = field.closest('.form-floating') || field.parentNode;
         let feedbackElement = fieldContainer.querySelector('.invalid-feedback');
-        
+
         if (!feedbackElement) {
             feedbackElement = document.createElement('div');
             feedbackElement.className = 'invalid-feedback';
             feedbackElement.id = `${field.id || field.name}-feedback`;
             fieldContainer.appendChild(feedbackElement);
         }
-        
+
         return feedbackElement;
     }
 
@@ -762,12 +762,12 @@ class AuthManager {
      */
     createPasswordStrengthIndicator(passwordField) {
         const container = passwordField.closest('.form-floating') || passwordField.parentNode;
-        
+
         // Check if indicator already exists
         if (container.querySelector('.password-strength-indicator')) {
             return;
         }
-        
+
         const indicator = document.createElement('div');
         indicator.className = 'password-strength-indicator';
         indicator.innerHTML = `
@@ -776,7 +776,7 @@ class AuthManager {
             </div>
             <div class="strength-text">Password strength</div>
         `;
-        
+
         container.appendChild(indicator);
     }
 
@@ -788,23 +788,23 @@ class AuthManager {
     updatePasswordStrengthIndicator(passwordField, password) {
         const container = passwordField.closest('.form-floating') || passwordField.parentNode;
         const indicator = container.querySelector('.password-strength-indicator');
-        
+
         if (!indicator) {
             return;
         }
-        
+
         const validation = this.validatePassword(password);
         const strengthFill = indicator.querySelector('.strength-fill');
         const strengthText = indicator.querySelector('.strength-text');
-        
+
         // Update strength bar
         const strengthPercentage = validation.strength * 100;
         strengthFill.style.width = `${strengthPercentage}%`;
-        
+
         // Update strength text and color
         let strengthLevel = 'weak';
         let strengthMessage = 'Weak password';
-        
+
         if (validation.strength >= 0.8) {
             strengthLevel = 'strong';
             strengthMessage = 'Strong password';
@@ -812,10 +812,10 @@ class AuthManager {
             strengthLevel = 'medium';
             strengthMessage = 'Medium password';
         }
-        
+
         strengthFill.className = `strength-fill ${strengthLevel}`;
         strengthText.textContent = strengthMessage;
-        
+
         // Show/hide indicator based on password length
         indicator.style.display = password.length > 0 ? 'block' : 'none';
     }
@@ -827,11 +827,11 @@ class AuthManager {
     togglePasswordVisibility(toggleButton) {
         const passwordField = toggleButton.parentNode.querySelector('input[type="password"], input[type="text"]');
         const icon = toggleButton.querySelector('i');
-        
+
         if (!passwordField || !icon) {
             return;
         }
-        
+
         if (passwordField.type === 'password') {
             passwordField.type = 'text';
                 icon.className = 'fas fa-eye-slash';
@@ -857,7 +857,7 @@ class AuthManager {
             inputs.forEach(input => {
                 input.disabled = true;
             });
-            
+
             // Update submit button
             if (submitButton) {
                 const originalText = submitButton.getAttribute('data-original-text') || submitButton.textContent;
@@ -870,7 +870,7 @@ class AuthManager {
             inputs.forEach(input => {
                 input.disabled = false;
             });
-            
+
             // Restore submit button
             if (submitButton) {
                 const originalText = submitButton.getAttribute('data-original-text');
@@ -890,11 +890,11 @@ class AuthManager {
     extractFormData(form) {
         const formData = new FormData(form);
         const data = {};
-        
+
         for (const [key, value] of formData.entries()) {
             data[key] = value;
         }
-        
+
         return data;
     }
 
@@ -925,14 +925,14 @@ class AuthManager {
      */
     showAlertNotification(message, type) {
         const alertContainer = this.getOrCreateAlertContainer();
-        
+
         const alertTypes = {
             success: { class: 'alert-success', icon: 'fas fa-check-circle' },
             error: { class: 'alert-danger', icon: 'fas fa-exclamation-triangle' },
             warning: { class: 'alert-warning', icon: 'fas fa-exclamation-circle' },
             info: { class: 'alert-info', icon: 'fas fa-info-circle' }
         };
-        
+
         const alertInfo = alertTypes[type] || alertTypes.info;
 
         const alert = document.createElement('div');
@@ -968,7 +968,7 @@ class AuthManager {
      */
     getOrCreateAlertContainer() {
         let container = document.querySelector('.alert-container');
-        
+
         if (!container) {
             container = document.createElement('div');
             container.className = 'alert-container';
@@ -981,7 +981,7 @@ class AuthManager {
             `;
             document.body.appendChild(container);
         }
-        
+
         return container;
     }
 
@@ -1015,7 +1015,7 @@ class AuthManager {
                 user: user,
                 apiUrl: window.location.origin + ((window.APP_CONFIG && window.APP_CONFIG.apiBase) || '/api/v1')
             }, window.location.origin);
-            
+
             // Method 2: Try direct extension messaging (if extension ID is known)
             // This works when the extension declares externally_connectable in manifest
             if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
@@ -1026,7 +1026,7 @@ class AuthManager {
                     user: user
                 }).catch(() => {}); // Silently fail if extension not available
             }
-            
+
             console.debug('Chrome extension auth notification sent');
         } catch (error) {
             // Silently fail - extension may not be installed
@@ -1043,21 +1043,21 @@ class AuthManager {
             localStorage.setItem(AuthManager.STORAGE_KEYS.AUTH_TOKEN, authData.access_token);
             localStorage.setItem('access_token', authData.access_token); // For backward compatibility
             localStorage.setItem(AuthManager.STORAGE_KEYS.USER_DATA, JSON.stringify(authData.user));
-            
+
             // Store remember me preference
             if (authData.remember_me) {
                 localStorage.setItem(AuthManager.STORAGE_KEYS.REMEMBER_ME, 'true');
             }
-            
+
             // Update instance properties
             this.user = authData.user;
             this.token = authData.access_token;
-            
+
             // Integrate with main app if available
             if (window.app && typeof window.app.setSession === 'function') {
                 window.app.setSession(authData.access_token, authData.user);
             }
-            
+
         } catch (error) {
             console.error('Failed to store authentication data:', error);
             throw new Error('Failed to save session data');
@@ -1101,7 +1101,7 @@ class AuthManager {
         localStorage.removeItem(AuthManager.STORAGE_KEYS.AUTH_TOKEN);
         localStorage.removeItem(AuthManager.STORAGE_KEYS.USER_DATA);
         localStorage.removeItem(AuthManager.STORAGE_KEYS.REMEMBER_ME);
-        
+
         this.user = null;
         this.token = null;
     }
@@ -1113,7 +1113,7 @@ class AuthManager {
         if (!this.isAuthenticated()) {
             return;
         }
-        
+
         try {
             // Use main app's session validation if available
             if (window.app && typeof window.app.checkAuthStatus === 'function') {
@@ -1136,7 +1136,7 @@ class AuthManager {
             // Only allow relative paths (must start with / but not //) to prevent open redirect
             const safeRedirect = (rawRedirect && /^\/(?!\/)/.test(rawRedirect)) ? rawRedirect : null;
             const redirectUrl = safeRedirect || (profileCompleted ? '/dashboard' : '/profile/setup');
-            
+
             setTimeout(() => {
                 window.location.href = redirectUrl;
             }, AuthManager.CONFIG.REDIRECT_DELAY);
@@ -1166,7 +1166,7 @@ class AuthManager {
     handleUrlParameters() {
         try {
             const urlParams = new URLSearchParams(window.location.search);
-            
+
             // Handle OAuth success
             if (urlParams.has('oauth_success')) {
                 this.showNotification('Account linked successfully!', 'success');
@@ -1176,31 +1176,31 @@ class AuthManager {
                 }
                 this.cleanUrl();
             }
-            
+
             // Handle OAuth errors
             if (urlParams.has('oauth_error')) {
                 this.showNotification('OAuth authentication failed. Please try again.', 'error');
                 this.cleanUrl();
             }
-            
+
             // Handle email verification
             if (urlParams.has('verified')) {
                 this.showNotification('Email verified successfully! You can now log in.', 'success');
                 this.cleanUrl();
             }
-            
+
             // Handle registration success
             if (urlParams.has('registered')) {
                 this.showNotification('Registration successful! Please log in.', 'success');
                 this.cleanUrl();
             }
-            
+
             // Handle password reset
             if (urlParams.has('password_reset')) {
                 this.showNotification('Password reset successfully! You can now log in.', 'success');
                 this.cleanUrl();
             }
-            
+
         } catch (error) {
             console.error('URL parameter handling failed:', error);
         }
@@ -1238,7 +1238,7 @@ class AuthManager {
         if (cookieMatch) {
             return cookieMatch[1];
         }
-        
+
         // Try localStorage
         return localStorage.getItem(AuthManager.STORAGE_KEYS.CSRF_TOKEN);
     }
@@ -1250,12 +1250,12 @@ class AuthManager {
         // Clear validation timeouts
         this.validationTimeouts.forEach(timeout => clearTimeout(timeout));
         this.validationTimeouts.clear();
-        
+
         // Abort pending requests
         if (this.requestAbortController) {
             this.requestAbortController.abort();
         }
-        
+
         // Clear session if not remembered
         const rememberMe = localStorage.getItem(AuthManager.STORAGE_KEYS.REMEMBER_ME);
         if (!rememberMe) {
@@ -1333,7 +1333,7 @@ function initializeAuthManager() {
     if (window.location.pathname.includes('/auth/')) {
         window.authManager.redirectIfAuthenticated();
         }
-        
+
         console.log('AuthManager initialized successfully');
     } catch (error) {
         console.error('AuthManager initialization failed:', error);
@@ -1363,4 +1363,3 @@ if (typeof module !== 'undefined' && module.exports) {
 if (typeof window !== 'undefined') {
     window.AuthManager = AuthManager;
 }
-

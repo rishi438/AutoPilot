@@ -1,5 +1,5 @@
 /**
- * ApplyPilot - Content Script
+ * Autopilot - Content Script
  * Injected into job-related pages to enable content extraction
  * and provide visual feedback to the user
  */
@@ -29,16 +29,16 @@ let jaaState = {
 function initContentScript() {
   if (jaaState.isInitialized) return;
   jaaState.isInitialized = true;
-  
+
   // Detect if this is a job page
   detectJobPage();
-  
+
   // Listen for messages from popup/background
   chrome.runtime.onMessage.addListener(handleMessage);
-  
+
   // Observe DOM changes for SPAs
   observeDOMChanges();
-  
+
   console.log('[JAA] Content script initialized');
 }
 
@@ -56,10 +56,10 @@ if (document.readyState === 'loading') {
 function detectJobPage() {
   const url = window.location.href;
   const hostname = window.location.hostname;
-  
+
   // Check URL patterns
   const isJobURL = isJobRelatedURL(url);
-  
+
   // Check page content for job-related keywords
   const pageText = document.body?.textContent?.toLowerCase() || '';
   const jobKeywords = [
@@ -77,11 +77,11 @@ function detectJobPage() {
     'remote',
     'hybrid'
   ];
-  
+
   const hasJobContent = jobKeywords.some(keyword => pageText.includes(keyword));
-  
+
   jaaState.jobDetected = isJobURL || hasJobContent;
-  
+
   if (jaaState.jobDetected) {
     console.log('[JAA] Job page detected:', hostname);
     // Notify background script
@@ -113,7 +113,7 @@ function isJobRelatedURL(url) {
     /icims\.com/i,
     /taleo/i
   ];
-  
+
   return patterns.some(pattern => pattern.test(url));
 }
 
@@ -167,19 +167,19 @@ function handleMessage(message, sender, sendResponse) {
         }
       });
       break;
-      
+
     case 'IS_JOB_PAGE':
       sendResponse({ isJobPage: jaaState.jobDetected });
       break;
-      
+
     case 'PING':
       sendResponse({ pong: true });
       break;
-      
+
     default:
       sendResponse({ success: false, error: 'Unknown message type' });
   }
-  
+
   return true; // Keep channel open for async response
 }
 
@@ -189,13 +189,13 @@ function handleMessage(message, sender, sendResponse) {
 
 function observeDOMChanges() {
   let debounceTimer = null;
-  
+
   const observer = new MutationObserver((mutations) => {
     // Check if any mutation affects the main content area
     const hasSignificantChange = mutations.some(mutation => {
       return mutation.type === 'childList' && mutation.addedNodes.length > 0;
     });
-    
+
     if (hasSignificantChange) {
       // Debounce to avoid excessive processing
       clearTimeout(debounceTimer);
@@ -204,7 +204,7 @@ function observeDOMChanges() {
       }, JAA_CONFIG.MUTATION_DEBOUNCE);
     }
   });
-  
+
   observer.observe(document.body, {
     childList: true,
     subtree: true
@@ -219,7 +219,7 @@ function showExtractIndicator() {
   // Remove existing indicator
   const existing = document.getElementById('jaa-extract-indicator');
   if (existing) existing.remove();
-  
+
   const indicator = document.createElement('div');
   indicator.id = 'jaa-extract-indicator';
   indicator.innerHTML = `
@@ -257,9 +257,9 @@ function showExtractIndicator() {
       }
     </style>
   `;
-  
+
   document.body.appendChild(indicator);
-  
+
   // Auto-remove after 3 seconds
   setTimeout(() => {
     indicator.style.opacity = '0';
@@ -278,12 +278,12 @@ function showExtractIndicator() {
 window.addEventListener('message', (event) => {
   // Only accept messages from the same origin (our web app)
   if (event.origin !== window.location.origin) return;
-  
+
   const message = event.data;
   if (!message || message.type !== 'JAA_AUTH_SUCCESS') return;
-  
+
   console.log('[JAA] Received auth token from web app');
-  
+
   // Relay to the extension's service worker
   chrome.runtime.sendMessage({
     type: 'SAVE_CREDENTIALS',
@@ -296,5 +296,3 @@ window.addEventListener('message', (event) => {
     console.error('[JAA] Failed to sync auth token:', error);
   });
 });
-
-

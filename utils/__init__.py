@@ -1,5 +1,5 @@
 """
-Utility modules for ApplyPilot.
+Utility modules for Autopilot.
 
 Core:
 - auth: JWT token validation and user authentication

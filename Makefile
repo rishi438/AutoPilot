@@ -59,7 +59,7 @@ start-local:
 	@$(MAKE) migrate
 	@echo ""
 	@echo "=============================================="
-	@echo " ApplyPilot is running at http://localhost:8000"
+	@echo " Autopilot is running at http://localhost:8000"
 	@echo " Stop with Ctrl+C, then: make stop-local"
 	@echo "=============================================="
 	@echo ""

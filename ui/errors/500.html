@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Server Error | {{ app_name or "ApplyPilot" }}{% endblock %}
+{% block title %}Server Error | {{ app_name or "Autopilot" }}{% endblock %}
 {% block description %}Something went wrong on our end.{% endblock %}
 {% block extra_head %}
 <style nonce="{{ request.state.csp_nonce | default('') }}">
@@ -99,7 +99,7 @@
                 Something went wrong. Please try again in a few moments. If the problem
                 persists, check that the server is running and your database is reachable.
             </p>
-            
+
             <div class="error-actions">
                 <button data-action="reload" class="btn btn-primary-glow">
                     <i class="fas fa-redo me-2"></i> Try Again

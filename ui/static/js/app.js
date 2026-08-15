@@ -1,7 +1,7 @@
 /**
- * @fileoverview ApplyPilot - Main Application JavaScript
+ * @fileoverview Autopilot - Main Application JavaScript
  * Handles core functionality, API communication, and UI interactions.
- * 
+ *
  * @description This is the main entry point for the frontend application.
  * It provides authentication, API communication, notifications, and UI utilities.
  */
@@ -9,14 +9,14 @@
 /// <reference path="./types.js" />
 
 /**
- * Main application class for the ApplyPilot.
+ * Main application class for the Autopilot.
  * Provides core functionality including authentication, API calls, notifications, and UI utilities.
- * 
+ *
  * @class
  * @example
  * // Access the global instance
  * window.app.showNotification('Hello!', 'success');
- * 
+ *
  * // Make an API call
  * const data = await window.app.apiCall('/workflow/list', 'GET');
  */
@@ -28,19 +28,19 @@ class JobApplicationAssistant {
     constructor() {
         /** @type {string} Base URL for API calls */
         this.apiBaseUrl = (window.APP_CONFIG && window.APP_CONFIG.apiBase) || '/api/v1';
-        
+
         /** @type {string|null} JWT authentication token */
         this.token = localStorage.getItem('access_token') || localStorage.getItem('authToken');
-        
+
         /** @type {import('./types.js').User} Current user data */
         this.user = JSON.parse(localStorage.getItem('user') || '{}');
-        
+
         /** @type {string|null} CSRF token (not used with JWT auth) */
         this.csrfToken = this.getCSRFToken();
-        
+
         /** @type {Promise<any>|null} Tracks ongoing token refresh to prevent duplicates */
         this.refreshPromise = null;
-        
+
         /** @type {number|null} Timer ID for auto-refresh */
         this.refreshTimer = null;
 
@@ -284,7 +284,7 @@ class JobApplicationAssistant {
 
         // Start refresh process
         this.refreshPromise = this._performTokenRefresh();
-        
+
         try {
             const result = await this.refreshPromise;
             this.refreshPromise = null;
@@ -317,14 +317,14 @@ class JobApplicationAssistant {
             }
 
             const result = await response.json();
-            
+
             // Update stored token
             this.token = result.access_token;
             localStorage.setItem('authToken', result.access_token);
-            
+
             // Set up auto-refresh for the new token
             this.setupAutoRefresh();
-            
+
             // Token refreshed successfully
             this.showNotification('Session extended successfully', 'success');
             return result;
@@ -337,21 +337,21 @@ class JobApplicationAssistant {
     /**
      * Make API calls with automatic token refresh.
      * Handles authentication, JSON serialization, and error handling.
-     * 
+     *
      * @param {string} endpoint - API endpoint (e.g., '/workflow/list')
      * @param {'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'} [method='GET'] - HTTP method
      * @param {Object|FormData|null} [data=null] - Request body data
      * @param {import('./types.js').ApiCallOptions} [options={}] - Additional options
      * @returns {Promise<Object>} Response data
      * @throws {Error} If the request fails or returns an error
-     * 
+     *
      * @example
      * // GET request
      * const sessions = await app.apiCall('/workflow/list');
-     * 
+     *
      * // POST request with JSON
      * const result = await app.apiCall('/auth/login', 'POST', { email, password });
-     * 
+     *
      * // POST with FormData
      * const formData = new FormData();
      * formData.append('file', file);
@@ -390,18 +390,18 @@ class JobApplicationAssistant {
                 try {
                     // Token expired, attempting refresh
                     await this.refreshToken();
-                    
+
                     // Retry the original request with the new token
                     config.headers['Authorization'] = `Bearer ${this.token}`;
                     const retryResponse = await fetch(url, config);
-                    
+
                     let retryResult;
                     try {
                         retryResult = await retryResponse.json();
                     } catch (parseError) {
                         throw new Error(`Invalid JSON response on retry: ${retryResponse.status}`);
                     }
-                    
+
                     if (!retryResponse.ok) {
                         const retryErr = new Error(
                             retryResult.message || retryResult.error || `HTTP ${retryResponse.status}`,
@@ -411,7 +411,7 @@ class JobApplicationAssistant {
                         }
                         throw retryErr;
                     }
-                    
+
                     return retryResult;
                 } catch (refreshError) {
                     console.error('Token refresh failed, logging out:', refreshError);
@@ -467,7 +467,7 @@ class JobApplicationAssistant {
             if (endpoint && !endpoint.startsWith('/')) {
                 endpoint = '/' + endpoint;
             }
-            
+
             // If no endpoint specified, throw error
             if (!endpoint) {
                 throw new Error('No endpoint specified for form submission');
@@ -625,12 +625,12 @@ class JobApplicationAssistant {
 
     /**
      * Show a notification toast message.
-     * 
+     *
      * @param {string} message - Message to display
      * @param {import('./types.js').NotificationType} [type='info'] - Notification type
      * @param {number} [duration=5000] - Duration in milliseconds before auto-dismiss
      * @returns {void}
-     * 
+     *
      * @example
      * app.showNotification('Profile saved!', 'success');
      * app.showNotification('Please check your input', 'warning', 8000);
@@ -696,14 +696,14 @@ class JobApplicationAssistant {
      * SECURITY: `content` is inserted as raw innerHTML. Callers MUST pass only
      * static developer-controlled HTML — never raw user input. Use escapeHtml()
      * on any user-supplied strings before passing them here.
-     * 
+     *
      * @param {string} title - Modal title (set via textContent, safe)
      * @param {string} content - Trusted HTML content for the modal body
      * @param {import('./types.js').ModalOptions} [options={}] - Modal options
      * @returns {any|undefined} Bootstrap modal instance
-     * 
+     *
      * @example
-     * app.showModal('Confirm', '<p>Are you sure?</p>', { 
+     * app.showModal('Confirm', '<p>Are you sure?</p>', {
      *   size: 'lg',
      *   footer: '<button class="btn btn-primary">OK</button>'
      * });
@@ -748,12 +748,12 @@ class JobApplicationAssistant {
 
     /**
      * Show a confirmation dialog and wait for user response.
-     * 
+     *
      * @param {string} message - Confirmation message
      * @param {string} [title='Confirm'] - Dialog title
      * @param {import('./types.js').ModalOptions} [options={}] - Modal options
      * @returns {Promise<boolean>} True if confirmed, false if cancelled
-     * 
+     *
      * @example
      * const confirmed = await app.confirm('Delete this item?', 'Confirm Delete');
      * if (confirmed) {
@@ -908,7 +908,7 @@ class JobApplicationAssistant {
 
     /**
      * Store user session data in localStorage.
-     * 
+     *
      * @param {string} token - JWT access token
      * @param {import('./types.js').User} user - User data
      * @returns {void}
@@ -933,7 +933,7 @@ class JobApplicationAssistant {
         localStorage.removeItem('access_token');
         localStorage.removeItem('authToken');
         localStorage.removeItem('user');
-        
+
         // Clear auto-refresh timer
         if (this.refreshTimer) {
             clearTimeout(this.refreshTimer);

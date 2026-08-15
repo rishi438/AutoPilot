@@ -180,7 +180,7 @@ test.describe('1. Dashboard Home', () => {
       await expect(logoutBtn).toBeAttached();
     });
 
-    test('navbar brand shows "ApplyPilot" text', async ({ page }) => {
+    test('navbar brand shows "Autopilot" text', async ({ page }) => {
       await expect(page.locator('.navbar-brand .brand-text')).toBeVisible();
     });
 
@@ -1547,7 +1547,7 @@ test.describe('5A. Dashboard Application List Extended', () => {
 
   test('dashboard title matches app name', async ({ page }) => {
     const title = await page.title();
-    expect(title).toMatch(/Dashboard|Applications|ApplyPilot/i);
+    expect(title).toMatch(/Dashboard|Applications|Autopilot/i);
   });
 
   test('dashboard body is visible on mobile (375px)', async ({ browser }) => {

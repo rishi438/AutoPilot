@@ -1,5 +1,5 @@
 """
-Pytest configuration and fixtures for the ApplyPilot tests.
+Pytest configuration and fixtures for the Autopilot tests.
 
 Uses local PostgreSQL and Redis for testing to match production environment.
 """
@@ -19,6 +19,7 @@ from sqlalchemy import text, delete
 
 # Load environment variables before importing app modules
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from main import app
@@ -70,6 +71,7 @@ app.dependency_overrides[get_database] = get_test_database
 # =============================================================================
 # FIXTURES
 # =============================================================================
+
 
 @pytest_asyncio.fixture
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
@@ -139,9 +141,9 @@ async def test_user(db_session: AsyncSession, test_user_data: Dict[str, Any]) ->
     db_session.add(user)
     await db_session.commit()
     await db_session.refresh(user)
-    
+
     yield user
-    
+
     # Cleanup: Delete the test user
     try:
         await db_session.execute(delete(User).where(User.id == user.id))
@@ -151,15 +153,17 @@ async def test_user(db_session: AsyncSession, test_user_data: Dict[str, Any]) ->
 
 
 @pytest_asyncio.fixture
-async def google_user(db_session: AsyncSession, google_user_data: Dict[str, Any]) -> User:
+async def google_user(
+    db_session: AsyncSession, google_user_data: Dict[str, Any]
+) -> User:
     """Create a Google OAuth test user in the database."""
     user = User(**google_user_data)
     db_session.add(user)
     await db_session.commit()
     await db_session.refresh(user)
-    
+
     yield user
-    
+
     # Cleanup: Delete the test user
     try:
         await db_session.execute(delete(User).where(User.id == user.id))

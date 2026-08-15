@@ -1,6 +1,6 @@
 {% extends "base.html" %}
-{% block title %}Login - {{ app_name or "ApplyPilot" }}{% endblock %}
-{% block description %}Login to your ApplyPilot account{% endblock %}
+{% block title %}Login - {{ app_name or "Autopilot" }}{% endblock %}
+{% block description %}Login to your Autopilot account{% endblock %}
 {% block extra_head %}
 <!-- Auth Page Specific Styles -->
     <style nonce="{{ request.state.csp_nonce | default('') }}">
@@ -228,7 +228,7 @@
             display: none !important;
             pointer-events: none !important;
         }
-        
+
         /* Disable password reveal in Edge */
         input::-ms-reveal,
         input::-ms-clear {
@@ -461,11 +461,11 @@
                 <!-- Login Form -->
                 <form id="loginForm" novalidate>
                     <div class="form-floating email-validation-container">
-                        <input 
-                            type="email" 
-                            class="form-control" 
-                            id="email" 
-                            name="email" 
+                        <input
+                            type="email"
+                            class="form-control"
+                            id="email"
+                            name="email"
                             placeholder="name@example.com"
                             autocomplete="email"
                             required
@@ -483,11 +483,11 @@
                     </div>
 
                     <div class="form-floating password-field-container email-validation-container password-validation-container" id="password-container">
-                        <input 
-                            type="password" 
-                            class="form-control" 
-                            id="password" 
-                            name="password" 
+                        <input
+                            type="password"
+                            class="form-control"
+                            id="password"
+                            name="password"
                             placeholder="Password"
                             autocomplete="current-password"
                             required
@@ -551,5 +551,5 @@
 <script src="{{ asset_url('js/auth-login.js') }}"></script>
 
     <!-- Login Page JavaScript -->
-    
+
 {% endblock %}

@@ -1,6 +1,6 @@
 # UI Static Assets
 
-Static assets for the ApplyPilot frontend.
+Static assets for the Autopilot frontend.
 
 ## Directory Structure
 

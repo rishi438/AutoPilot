@@ -1,6 +1,6 @@
-# ApplyPilot Chrome Extension
+# Autopilot Chrome Extension
 
-A Chrome extension that connects your browsing to ApplyPilot in two ways: **Analyze This Job** sends a posting to your dashboard for the full multi-agent workflow, and **Match Form To Profile** fills application forms from your profile for you to review before you submit.
+A Chrome extension that connects your browsing to Autopilot in two ways: **Analyze This Job** sends a posting to your dashboard for the full multi-agent workflow, and **Match Form To Profile** fills application forms from your profile for you to review before you submit.
 
 ## Current Version
 
@@ -134,9 +134,9 @@ The popup is pixel-matched to the main app:
 
 ## Troubleshooting
 
-**"Not authenticated"** — Log out and back in from the extension popup.  
-**Job not detected** — Make sure you're on the job detail page, not search results.  
-**Extension not loading** — Check `chrome://extensions/` for errors; verify all icon files exist.  
+**"Not authenticated"** — Log out and back in from the extension popup.
+**Job not detected** — Make sure you're on the job detail page, not search results.
+**Extension not loading** — Check `chrome://extensions/` for errors; verify all icon files exist.
 **API errors (dev)** — Confirm the server is running at `http://localhost:8000` and that `IS_DEV = true` in both JS files.
 
 ## Privacy & Security

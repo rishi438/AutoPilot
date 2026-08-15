@@ -1,5 +1,5 @@
 """
-Security utilities for the ApplyPilot.
+Security utilities for the Autopilot.
 Provides input sanitization, XSS prevention, and security helpers.
 """
 
@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Union
 
 try:
     import bleach
+
     _BLEACH_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _BLEACH_AVAILABLE = False
@@ -34,8 +35,25 @@ STYLE_EXPRESSION_PATTERN = re.compile(r"expression\s*\(", re.IGNORECASE)
 
 # HTML tags that are generally safe (for basic formatting)
 SAFE_TAGS = {
-    "p", "br", "b", "i", "u", "strong", "em", "ul", "ol", "li",
-    "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "code", "pre"
+    "p",
+    "br",
+    "b",
+    "i",
+    "u",
+    "strong",
+    "em",
+    "ul",
+    "ol",
+    "li",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "blockquote",
+    "code",
+    "pre",
 }
 
 
@@ -64,7 +82,9 @@ def sanitize_html(content: str, allow_basic_formatting: bool = False) -> str:
     # Truncate extremely long content
     if len(content) > MAX_TEXT_LENGTH:
         content = content[:MAX_TEXT_LENGTH]
-        logger.warning(f"Content truncated from {len(content)} to {MAX_TEXT_LENGTH} chars")
+        logger.warning(
+            f"Content truncated from {len(content)} to {MAX_TEXT_LENGTH} chars"
+        )
 
     # Remove script tags and their content
     content = SCRIPT_PATTERN.sub("", content)
@@ -85,7 +105,9 @@ def sanitize_html(content: str, allow_basic_formatting: bool = False) -> str:
         if _BLEACH_AVAILABLE:
             # bleach.clean strips all tags not in the allowlist and escapes their content,
             # which is far more robust than the regex approach.
-            content = bleach.clean(content, tags=list(SAFE_TAGS), attributes={}, strip=True)
+            content = bleach.clean(
+                content, tags=list(SAFE_TAGS), attributes={}, strip=True
+            )
         else:
             # Fallback: escape all HTML when bleach is not installed
             logger.warning(
@@ -177,7 +199,9 @@ def sanitize_dict(
         return data
 
     html_fields = set(html_fields or [])
-    skip_fields = set(skip_fields or ["id", "user_id", "session_id", "created_at", "updated_at"])
+    skip_fields = set(
+        skip_fields or ["id", "user_id", "session_id", "created_at", "updated_at"]
+    )
 
     return _sanitize_value(data, html_fields, skip_fields)
 
@@ -191,8 +215,7 @@ def _sanitize_value(
     """Recursively sanitize a value."""
     if isinstance(value, dict):
         return {
-            k: _sanitize_value(v, html_fields, skip_fields, k)
-            for k, v in value.items()
+            k: _sanitize_value(v, html_fields, skip_fields, k) for k, v in value.items()
         }
     elif isinstance(value, list):
         return [
@@ -359,4 +382,3 @@ def sanitize_resume_recommendations(recommendations: Dict[str, Any]) -> Dict[str
                 ]
 
     return recommendations
-

@@ -6,7 +6,7 @@ alwaysApply: false
 
 # Frontend Build Pipeline
 
-ApplyPilot uses **esbuild** (not Vite/Webpack) to minify and content-hash all JS and CSS files.
+Autopilot uses **esbuild** (not Vite/Webpack) to minify and content-hash all JS and CSS files.
 The JS files use vanilla global scope — no ES modules, no bundling across files.
 
 ## How It Works

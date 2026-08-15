@@ -1,12 +1,12 @@
 /**
  * Onboarding Tutorial System
  * Interactive step-by-step guide for new users.
- * 
+ *
  * Usage:
  * - Automatically shows for new users (checks localStorage)
  * - Can be triggered manually: Onboarding.start()
  * - Skip/complete saves to localStorage
- * 
+ *
  * API:
  * - Onboarding.start() - Start the tutorial
  * - Onboarding.next() - Go to next step
@@ -25,7 +25,7 @@
     const ALL_STEPS = [
         {
             id: 'welcome',
-            title: 'Welcome to ApplyPilot! 🎉',
+            title: 'Welcome to Autopilot! 🎉',
             content: `
                 <p>Your AI-powered career co-pilot is ready to help you land your dream job.</p>
                 <p>Let's take a quick tour so you know exactly what's available.</p>
@@ -38,7 +38,7 @@
             id: 'extension',
             title: 'Install Chrome Extension',
             content: `
-                <p>Get the most out of ApplyPilot with our <strong>Chrome Extension</strong>!</p>
+                <p>Get the most out of Autopilot with our <strong>Chrome Extension</strong>!</p>
                 <p>With the extension, you can:</p>
                 <ul>
                     <li>🌐 Analyze jobs from <strong>any job site or company careers page</strong></li>
@@ -168,7 +168,7 @@
                 // Check server API key status first
                 this.serverHasApiKey = await this.checkServerApiKey();
                 this.filterSteps();
-                
+
                 // Slight delay to let page render
                 setTimeout(() => this.start(), 500);
             }
@@ -306,7 +306,7 @@
          */
         _render: function() {
             const step = STEPS[this.currentStep];
-            
+
             // Update content
             const imgEl = document.getElementById('onboarding-image');
             const titleEl = document.getElementById('onboarding-title');
@@ -324,14 +324,14 @@
             bodyEl.innerHTML = step.content;
 
             // Update progress dots
-            const progressHtml = STEPS.map((s, i) => 
+            const progressHtml = STEPS.map((s, i) =>
                 `<span class="progress-dot ${i === this.currentStep ? 'active' : ''} ${i < this.currentStep ? 'completed' : ''}"></span>`
             ).join('');
             progressEl.innerHTML = progressHtml;
 
             // Update buttons
             prevBtn.style.visibility = this.currentStep === 0 ? 'hidden' : 'visible';
-            
+
             if (this.currentStep === STEPS.length - 1) {
                 nextBtn.innerHTML = 'Get Started <i class="fas fa-check"></i>';
             } else {

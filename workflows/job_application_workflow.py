@@ -1,5 +1,5 @@
 """
-Main LangGraph workflow orchestrator for the ApplyPilot.
+Main LangGraph workflow orchestrator for the Autopilot.
 Coordinates multi-agent workflow for processing job applications with comprehensive application materials.
 
 WORKFLOW STRUCTURE:
@@ -167,7 +167,7 @@ _workflow_instance: Optional["JobApplicationWorkflow"] = None
 
 class JobApplicationWorkflow:
     """
-    Main workflow orchestrator for ApplyPilot.
+    Main workflow orchestrator for Autopilot.
 
     This class manages the complete multi-agent workflow using LangGraph,
     coordinating between different specialized agents to generate comprehensive

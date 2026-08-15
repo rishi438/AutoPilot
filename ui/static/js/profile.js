@@ -1,5 +1,5 @@
 /**
- * @fileoverview ApplyPilot - Profile Management JavaScript
+ * @fileoverview Autopilot - Profile Management JavaScript
  * Handles profile setup, editing, and data management.
  *
  * @description Provides profile management functionality including:

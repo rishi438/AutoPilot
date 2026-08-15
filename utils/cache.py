@@ -1,5 +1,5 @@
 """
-Cache utilities for the ApplyPilot.
+Cache utilities for the Autopilot.
 Provides high-level caching functions for various data types with automatic
 serialization, TTL management, and graceful fallbacks.
 """
@@ -48,11 +48,13 @@ TTL_WORKFLOW_STATE = 2  # 2 seconds — shorter than 3s poll interval so every p
 TTL_LLM_RESPONSE = 60 * 60  # 1 hour
 TTL_RATE_LIMIT = 60  # 1 minute
 TTL_INTERVIEW_PREP = 60 * 60 * 24 * 7  # 7 days
-TTL_INTERVIEW_PREP_GENERATING = 60 * 10  # 10 minutes — auto-expires if background task crashes
+TTL_INTERVIEW_PREP_GENERATING = (
+    60 * 10
+)  # 10 minutes — auto-expires if background task crashes
 TTL_TOOL_RESULT = 60 * 60  # 1 hour
 TTL_COMPUTE_LOCK = 60  # 1 minute — prevents stampede, auto-expires if compute crashes
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 # Minimum required top-level fields per cache type — used for schema validation on read.
 # Extend this dict when the stored schema gains required fields.
@@ -84,9 +86,7 @@ class _InMemoryRateLimiter:
         self._store: Dict[str, tuple] = {}  # identifier -> (count, window_end)
         self._lock = asyncio.Lock()
 
-    async def check(
-        self, identifier: str, limit: int, window_seconds: int
-    ) -> tuple:
+    async def check(self, identifier: str, limit: int, window_seconds: int) -> tuple:
         """
         Check and increment rate limit counter.
 
@@ -138,12 +138,16 @@ class _CacheMetrics:
 
     def record_hit(self, cache_type: str, latency_ms: float = 0.0) -> None:
         self._hits[cache_type] = self._hits.get(cache_type, 0) + 1
-        self._latency_ms_sum[cache_type] = self._latency_ms_sum.get(cache_type, 0.0) + latency_ms
+        self._latency_ms_sum[cache_type] = (
+            self._latency_ms_sum.get(cache_type, 0.0) + latency_ms
+        )
         self._latency_count[cache_type] = self._latency_count.get(cache_type, 0) + 1
 
     def record_miss(self, cache_type: str, latency_ms: float = 0.0) -> None:
         self._misses[cache_type] = self._misses.get(cache_type, 0) + 1
-        self._latency_ms_sum[cache_type] = self._latency_ms_sum.get(cache_type, 0.0) + latency_ms
+        self._latency_ms_sum[cache_type] = (
+            self._latency_ms_sum.get(cache_type, 0.0) + latency_ms
+        )
         self._latency_count[cache_type] = self._latency_count.get(cache_type, 0) + 1
 
     def record_error(self, cache_type: str) -> None:
@@ -151,7 +155,11 @@ class _CacheMetrics:
 
     def get_stats(self) -> Dict[str, Any]:
         """Return per-type hit rates, latency, and error counts."""
-        all_types = set(list(self._hits.keys()) + list(self._misses.keys()) + list(self._errors.keys()))
+        all_types = set(
+            list(self._hits.keys())
+            + list(self._misses.keys())
+            + list(self._errors.keys())
+        )
         result: Dict[str, Any] = {}
         for t in all_types:
             hits = self._hits.get(t, 0)
@@ -159,9 +167,7 @@ class _CacheMetrics:
             total = hits + misses
             lat_count = self._latency_count.get(t, 0)
             avg_latency = (
-                self._latency_ms_sum.get(t, 0.0) / lat_count
-                if lat_count > 0
-                else 0.0
+                self._latency_ms_sum.get(t, 0.0) / lat_count if lat_count > 0 else 0.0
             )
             result[t] = {
                 "hits": hits,
@@ -183,7 +189,7 @@ _metrics = _CacheMetrics()
 
 def generate_hash(content: str) -> str:
     """Generate MD5 hash for cache key generation."""
-    return hashlib.md5(content.encode('utf-8')).hexdigest()
+    return hashlib.md5(content.encode("utf-8")).hexdigest()
 
 
 async def get_redis_or_none():
@@ -198,10 +204,10 @@ async def get_redis_or_none():
 async def cache_get(key: str) -> Optional[Dict[str, Any]]:
     """
     Get value from cache with automatic JSON deserialization.
-    
+
     Args:
         key: Full cache key
-        
+
     Returns:
         Cached data or None if not found/expired
     """
@@ -209,14 +215,14 @@ async def cache_get(key: str) -> Optional[Dict[str, Any]]:
         redis = await get_redis_or_none()
         if not redis:
             return None
-            
+
         cached = await redis.get(key)
         if cached:
             data = json.loads(cached)
             logger.debug(f"Cache hit: {key}")
             return data
         return None
-        
+
     except Exception as e:
         logger.warning(f"Cache get error for {key}: {e}")
         return None
@@ -225,12 +231,12 @@ async def cache_get(key: str) -> Optional[Dict[str, Any]]:
 async def cache_set(key: str, data: Dict[str, Any], ttl: int) -> bool:
     """
     Set value in cache with automatic JSON serialization.
-    
+
     Args:
         key: Full cache key
         data: Data to cache (must be JSON serializable)
         ttl: Time to live in seconds
-        
+
     Returns:
         True if cached successfully, False otherwise
     """
@@ -238,17 +244,17 @@ async def cache_set(key: str, data: Dict[str, Any], ttl: int) -> bool:
         redis = await get_redis_or_none()
         if not redis:
             return False
-            
+
         # Add metadata
         cache_data = {
             "cached_at": datetime.now(timezone.utc).isoformat(),
             "data": data,
         }
-        
+
         await redis.set(key, json.dumps(cache_data), ex=ttl)
         logger.debug(f"Cache set: {key} (TTL: {ttl}s)")
         return True
-        
+
     except Exception as e:
         logger.warning(f"Cache set error for {key}: {e}")
         return False
@@ -260,11 +266,11 @@ async def cache_delete(key: str) -> bool:
         redis = await get_redis_or_none()
         if not redis:
             return False
-            
+
         await redis.delete(key)
         logger.debug(f"Cache deleted: {key}")
         return True
-        
+
     except Exception as e:
         logger.warning(f"Cache delete error for {key}: {e}")
         return False
@@ -273,10 +279,10 @@ async def cache_delete(key: str) -> bool:
 async def cache_delete_pattern(pattern: str) -> int:
     """
     Delete all keys matching a pattern.
-    
+
     Args:
         pattern: Redis pattern (e.g., "user_profile:*")
-        
+
     Returns:
         Number of keys deleted
     """
@@ -284,17 +290,17 @@ async def cache_delete_pattern(pattern: str) -> int:
         redis = await get_redis_or_none()
         if not redis:
             return 0
-            
+
         keys = []
         async for key in redis.scan_iter(match=pattern):
             keys.append(key)
-            
+
         if keys:
             await redis.delete(*keys)
             logger.info(f"Cache pattern delete: {pattern} ({len(keys)} keys)")
-            
+
         return len(keys)
-        
+
     except Exception as e:
         logger.warning(f"Cache pattern delete error for {pattern}: {e}")
         return 0
@@ -345,11 +351,11 @@ async def get_cached_job_analysis(
 ) -> Optional[Dict[str, Any]]:
     """
     Get cached job analysis results.
-    
+
     Args:
         job_url: Job posting URL
         job_content: Job posting text content
-        
+
     Returns:
         Cached job analysis or None
     """
@@ -364,7 +370,9 @@ async def get_cached_job_analysis(
     if cached and "data" in cached:
         data = cached["data"]
         if not _validate_cache_data(CACHE_PREFIX_JOB_ANALYSIS, data):
-            logger.warning("job_analysis cache entry failed schema validation — evicting")
+            logger.warning(
+                "job_analysis cache entry failed schema validation — evicting"
+            )
             await cache_delete(key)
             _metrics.record_miss(CACHE_PREFIX_JOB_ANALYSIS, latency_ms)
             structured_logger.log_cache_miss("job_analysis", key)
@@ -384,19 +392,19 @@ async def cache_job_analysis(
 ) -> bool:
     """
     Cache job analysis results.
-    
+
     Args:
         analysis: Job analysis results
         job_url: Job posting URL
         job_content: Job posting text content
-        
+
     Returns:
         True if cached successfully
     """
     key = _get_job_cache_key(job_url, job_content)
     if not key:
         return False
-        
+
     return await cache_set(key, analysis, TTL_JOB_ANALYSIS)
 
 
@@ -409,7 +417,9 @@ def _get_company_research_cache_key(company_name: str) -> str:
     """Generate versioned, normalized cache key for company research."""
     normalized = company_name.lower().strip()
     name_hash = generate_hash(normalized)
-    return f"{CACHE_VERSION}:{CACHE_PREFIX_COMPANY_RESEARCH}:{name_hash}:{normalized[:30]}"
+    return (
+        f"{CACHE_VERSION}:{CACHE_PREFIX_COMPANY_RESEARCH}:{name_hash}:{normalized[:30]}"
+    )
 
 
 async def get_cached_company_research(company_name: str) -> Optional[Dict[str, Any]]:
@@ -429,7 +439,9 @@ async def get_cached_company_research(company_name: str) -> Optional[Dict[str, A
     if cached and "data" in cached:
         data = cached["data"]
         if not _validate_cache_data(CACHE_PREFIX_COMPANY_RESEARCH, data):
-            logger.warning(f"company_research cache entry for '{company_name}' failed schema validation — evicting")
+            logger.warning(
+                f"company_research cache entry for '{company_name}' failed schema validation — evicting"
+            )
             await cache_delete(key)
             _metrics.record_miss(CACHE_PREFIX_COMPANY_RESEARCH, latency_ms)
             structured_logger.log_cache_miss("company_research", key[:30])
@@ -540,10 +552,10 @@ def _get_profile_cache_key(user_id: str) -> str:
 async def get_cached_user_profile(user_id: str) -> Optional[Dict[str, Any]]:
     """
     Get cached user profile.
-    
+
     Args:
         user_id: User UUID as string
-        
+
     Returns:
         Cached profile data or None
     """
@@ -563,11 +575,11 @@ async def get_cached_user_profile(user_id: str) -> Optional[Dict[str, Any]]:
 async def cache_user_profile(user_id: str, profile: Dict[str, Any]) -> bool:
     """
     Cache user profile.
-    
+
     Args:
         user_id: User UUID as string
         profile: Profile data
-        
+
     Returns:
         True if cached successfully
     """
@@ -676,10 +688,10 @@ def _get_workflow_cache_key(session_id: str) -> str:
 async def get_cached_workflow_state(session_id: str) -> Optional[Dict[str, Any]]:
     """
     Get cached workflow state.
-    
+
     Args:
         session_id: Workflow session ID
-        
+
     Returns:
         Cached workflow state or None
     """
@@ -699,11 +711,11 @@ async def get_cached_workflow_state(session_id: str) -> Optional[Dict[str, Any]]
 async def cache_workflow_state(session_id: str, state: Dict[str, Any]) -> bool:
     """
     Cache workflow state.
-    
+
     Args:
         session_id: Workflow session ID
         state: Workflow state data
-        
+
     Returns:
         True if cached successfully
     """
@@ -722,7 +734,9 @@ async def invalidate_workflow_state(session_id: str) -> bool:
 # =============================================================================
 
 
-def _get_llm_cache_key(prompt: str, system: Optional[str] = None, user_id: Optional[str] = None) -> str:
+def _get_llm_cache_key(
+    prompt: str, system: Optional[str] = None, user_id: Optional[str] = None
+) -> str:
     """
     Generate versioned cache key for LLM response.
 
@@ -761,7 +775,9 @@ async def get_cached_llm_response(
     if cached and "data" in cached:
         data = cached["data"]
         if not _validate_cache_data(CACHE_PREFIX_LLM_RESPONSE, data):
-            logger.warning("llm_response cache entry failed schema validation — evicting")
+            logger.warning(
+                "llm_response cache entry failed schema validation — evicting"
+            )
             await cache_delete(key)
             _metrics.record_miss(CACHE_PREFIX_LLM_RESPONSE, latency_ms)
             structured_logger.log_cache_miss("llm_response", key[:20])
@@ -809,10 +825,10 @@ def _get_interview_prep_cache_key(session_id: str) -> str:
 async def get_cached_interview_prep(session_id: str) -> Optional[Dict[str, Any]]:
     """
     Get cached interview prep materials.
-    
+
     Args:
         session_id: Workflow session ID
-        
+
     Returns:
         Cached interview prep data or None
     """
@@ -832,11 +848,11 @@ async def get_cached_interview_prep(session_id: str) -> Optional[Dict[str, Any]]
 async def cache_interview_prep(session_id: str, data: Dict[str, Any]) -> bool:
     """
     Cache interview prep materials.
-    
+
     Args:
         session_id: Workflow session ID
         data: Interview prep data
-        
+
     Returns:
         True if cached successfully
     """
@@ -847,10 +863,10 @@ async def cache_interview_prep(session_id: str, data: Dict[str, Any]) -> bool:
 async def invalidate_interview_prep(session_id: str) -> bool:
     """
     Invalidate interview prep cache (for regeneration).
-    
+
     Args:
         session_id: Workflow session ID
-        
+
     Returns:
         True if deleted successfully
     """
@@ -966,7 +982,9 @@ async def get_cached_tool_result(
         if cached:
             data = json.loads(cached)
             if not isinstance(data, dict):
-                logger.warning(f"tool_result cache entry for {tool_name} is not a dict — evicting")
+                logger.warning(
+                    f"tool_result cache entry for {tool_name} is not a dict — evicting"
+                )
                 await redis.delete(key)
                 _metrics.record_miss(tool_name, latency_ms)
                 structured_logger.log_cache_miss(tool_name, key)
@@ -1017,7 +1035,7 @@ async def cache_tool_result(
 
 class RateLimitResult:
     """Result of a rate limit check with all relevant info for headers."""
-    
+
     def __init__(
         self,
         allowed: bool,
@@ -1029,7 +1047,7 @@ class RateLimitResult:
         self.limit = limit
         self.remaining = remaining
         self.reset_seconds = reset_seconds
-    
+
     def get_headers(self) -> Dict[str, str]:
         """Get rate limit headers for HTTP response."""
         return {
@@ -1062,32 +1080,36 @@ async def check_rate_limit(
         redis = await get_redis_or_none()
         if not redis:
             logger.warning("Redis unavailable — using in-memory rate limiter fallback")
-            allowed, remaining, _ = await _fallback_limiter.check(identifier, limit, window_seconds)
+            allowed, remaining, _ = await _fallback_limiter.check(
+                identifier, limit, window_seconds
+            )
             return allowed, remaining
 
         key = f"{CACHE_PREFIX_RATE_LIMIT}:{identifier}"
-        
+
         # Get current count
         current = await redis.get(key)
         current_count = int(current) if current else 0
-        
+
         if current_count >= limit:
             logger.warning(f"Rate limit exceeded for {identifier}")
             return False, 0
-            
+
         # Increment counter
         pipe = redis.pipeline()
         pipe.incr(key)
         if current_count == 0:
             pipe.expire(key, window_seconds)
         await pipe.execute()
-        
+
         remaining = limit - current_count - 1
         return True, remaining
-        
+
     except Exception as e:
         logger.warning(f"Rate limit check error: {e} — using in-memory fallback")
-        allowed, remaining, _ = await _fallback_limiter.check(identifier, limit, window_seconds)
+        allowed, remaining, _ = await _fallback_limiter.check(
+            identifier, limit, window_seconds
+        )
         return allowed, remaining
 
 
@@ -1125,18 +1147,18 @@ async def check_rate_limit_with_headers(
             )
 
         key = f"{CACHE_PREFIX_RATE_LIMIT}:{identifier}"
-        
+
         # Get current count and TTL
         pipe = redis.pipeline()
         pipe.get(key)
         pipe.ttl(key)
         results = await pipe.execute()
-        
+
         current = results[0]
         ttl = results[1]
         current_count = int(current) if current else 0
         reset_seconds = ttl if ttl and ttl > 0 else window_seconds
-        
+
         if current_count >= limit:
             logger.warning(f"Rate limit exceeded for {identifier}")
             return RateLimitResult(
@@ -1145,14 +1167,14 @@ async def check_rate_limit_with_headers(
                 remaining=0,
                 reset_seconds=reset_seconds,
             )
-            
+
         # Increment counter
         pipe = redis.pipeline()
         pipe.incr(key)
         if current_count == 0:
             pipe.expire(key, window_seconds)
         await pipe.execute()
-        
+
         remaining = limit - current_count - 1
         return RateLimitResult(
             allowed=True,
@@ -1160,9 +1182,11 @@ async def check_rate_limit_with_headers(
             remaining=remaining,
             reset_seconds=reset_seconds if ttl and ttl > 0 else window_seconds,
         )
-        
+
     except Exception as e:
-        logger.error(f"Rate limit check error: {e} — using in-memory fallback", exc_info=True)
+        logger.error(
+            f"Rate limit check error: {e} — using in-memory fallback", exc_info=True
+        )
         allowed, remaining, reset_secs = await _fallback_limiter.check(
             identifier, limit, window_seconds
         )
@@ -1183,12 +1207,12 @@ async def get_rate_limit_remaining(
         redis = await get_redis_or_none()
         if not redis:
             return limit
-            
+
         key = f"{CACHE_PREFIX_RATE_LIMIT}:{identifier}"
         current = await redis.get(key)
         current_count = int(current) if current else 0
         return max(0, limit - current_count)
-        
+
     except Exception as e:
         logger.warning(f"Rate limit remaining error: {e}")
         return limit
@@ -1207,10 +1231,10 @@ ATTEMPT_WINDOW = 900  # Track attempts within 15 minutes
 async def record_failed_login(email: str) -> tuple[int, bool]:
     """
     Record a failed login attempt and check for lockout.
-    
+
     Args:
         email: Email address that failed login
-        
+
     Returns:
         Tuple of (current_attempts, is_locked)
     """
@@ -1218,25 +1242,27 @@ async def record_failed_login(email: str) -> tuple[int, bool]:
         redis = await get_redis_or_none()
         if not redis:
             return 0, False
-            
+
         key = f"{CACHE_PREFIX_LOGIN_ATTEMPTS}:{email.lower()}"
-        
+
         # Increment attempt counter
         pipe = redis.pipeline()
         pipe.incr(key)
         pipe.expire(key, ATTEMPT_WINDOW)
         results = await pipe.execute()
-        
+
         current_attempts = results[0]
         is_locked = current_attempts >= LOCKOUT_THRESHOLD
-        
+
         if is_locked:
-            logger.warning(f"Account locked due to failed attempts: {mask_email(email)}")
+            logger.warning(
+                f"Account locked due to failed attempts: {mask_email(email)}"
+            )
             # Set lockout with longer expiry
             await redis.expire(key, LOCKOUT_DURATION)
-            
+
         return current_attempts, is_locked
-        
+
     except Exception as e:
         logger.warning(f"Failed to record login attempt: {e}")
         return 0, False
@@ -1245,10 +1271,10 @@ async def record_failed_login(email: str) -> tuple[int, bool]:
 async def check_account_lockout(email: str) -> tuple[bool, int]:
     """
     Check if account is currently locked out.
-    
+
     Args:
         email: Email address to check
-        
+
     Returns:
         Tuple of (is_locked, remaining_seconds)
     """
@@ -1256,22 +1282,22 @@ async def check_account_lockout(email: str) -> tuple[bool, int]:
         redis = await get_redis_or_none()
         if not redis:
             return False, 0
-            
+
         key = f"{CACHE_PREFIX_LOGIN_ATTEMPTS}:{email.lower()}"
-        
+
         # Get current attempts
         attempts = await redis.get(key)
         if not attempts:
             return False, 0
-            
+
         current_attempts = int(attempts)
         if current_attempts >= LOCKOUT_THRESHOLD:
             # Get TTL to know when lockout expires
             ttl = await redis.ttl(key)
             return True, max(0, ttl)
-            
+
         return False, 0
-        
+
     except Exception as e:
         logger.warning(f"Failed to check lockout: {e}")
         return False, 0
@@ -1280,10 +1306,10 @@ async def check_account_lockout(email: str) -> tuple[bool, int]:
 async def clear_login_attempts(email: str) -> bool:
     """
     Clear login attempts after successful login.
-    
+
     Args:
         email: Email address to clear
-        
+
     Returns:
         True if cleared successfully
     """
@@ -1291,11 +1317,11 @@ async def clear_login_attempts(email: str) -> bool:
         redis = await get_redis_or_none()
         if not redis:
             return False
-            
+
         key = f"{CACHE_PREFIX_LOGIN_ATTEMPTS}:{email.lower()}"
         await redis.delete(key)
         return True
-        
+
     except Exception as e:
         logger.warning(f"Failed to clear login attempts: {e}")
         return False
@@ -1304,10 +1330,10 @@ async def clear_login_attempts(email: str) -> bool:
 async def get_login_attempts(email: str) -> int:
     """
     Get current number of failed login attempts.
-    
+
     Args:
         email: Email address to check
-        
+
     Returns:
         Number of failed attempts
     """
@@ -1315,11 +1341,11 @@ async def get_login_attempts(email: str) -> int:
         redis = await get_redis_or_none()
         if not redis:
             return 0
-            
+
         key = f"{CACHE_PREFIX_LOGIN_ATTEMPTS}:{email.lower()}"
         attempts = await redis.get(key)
         return int(attempts) if attempts else 0
-        
+
     except Exception as e:
         logger.warning(f"Failed to get login attempts: {e}")
         return 0
@@ -1373,7 +1399,9 @@ async def get_cache_stats() -> Dict[str, Any]:
         keyspace_hits = info_stats.get("keyspace_hits", 0)
         keyspace_misses = info_stats.get("keyspace_misses", 0)
         total_lookups = keyspace_hits + keyspace_misses
-        redis_hit_rate = round(keyspace_hits / total_lookups, 3) if total_lookups > 0 else None
+        redis_hit_rate = (
+            round(keyspace_hits / total_lookups, 3) if total_lookups > 0 else None
+        )
 
         # Memory eviction counter — non-zero means Redis is under memory pressure
         evicted_keys = info_stats.get("evicted_keys", 0)
@@ -1394,4 +1422,3 @@ async def get_cache_stats() -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Cache stats error: {e}", exc_info=True)
         return {"status": "error", "error": str(e)}
-

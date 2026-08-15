@@ -1,5 +1,5 @@
 """
-Database models for the ApplyPilot.
+Database models for the Autopilot.
 Defines PostgreSQL table schemas using SQLAlchemy ORM with async support.
 """
 

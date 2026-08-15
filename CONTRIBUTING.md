@@ -1,8 +1,8 @@
-# Contributing to ApplyPilot
+# Contributing to Autopilot
 
 First off — thank you for taking the time to contribute! 🚀
 
-ApplyPilot is a personal open-source project. All contributions are welcome: bug reports, feature ideas, documentation improvements, and code. Please read the relevant section before opening an issue or PR — it makes things faster for everyone.
+Autopilot is a personal open-source project. All contributions are welcome: bug reports, feature ideas, documentation improvements, and code. Please read the relevant section before opening an issue or PR — it makes things faster for everyone.
 
 > Not ready to contribute code yet? You can still help by **starring the repo**, sharing it with others, or opening an issue with feedback.
 

@@ -1,6 +1,6 @@
 {% extends "base.html" %}
-{% block title %}Sign Up - {{ app_name or "ApplyPilot" }}{% endblock %}
-{% block description %}Create your ApplyPilot account{% endblock %}
+{% block title %}Sign Up - {{ app_name or "Autopilot" }}{% endblock %}
+{% block description %}Create your Autopilot account{% endblock %}
 {% block extra_head %}
 <!-- Auth Page Specific Styles -->
     <style nonce="{{ request.state.csp_nonce | default('') }}">
@@ -478,12 +478,12 @@
                     </div>
 
                     <div class="form-floating email-validation-container">
-                        <input 
-                            type="email" 
-                            class="form-control" 
-                            id="email" 
-                            name="email" 
-                            placeholder="name@example.com" 
+                        <input
+                            type="email"
+                            class="form-control"
+                            id="email"
+                            name="email"
+                            placeholder="name@example.com"
                             autocomplete="email"
                             required>
                         <label for="email">Email address</label>

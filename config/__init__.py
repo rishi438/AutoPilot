@@ -1,5 +1,5 @@
 """
-Configuration module for ApplyPilot.
+Configuration module for Autopilot.
 
 - settings: Pydantic settings with environment variable loading
 """

@@ -1,5 +1,5 @@
 """
-FastAPI API Routers for ApplyPilot.
+FastAPI API Routers for Autopilot.
 
 Routers:
 - auth: Authentication, OAuth, email verification, password reset

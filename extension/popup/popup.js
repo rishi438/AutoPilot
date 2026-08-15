@@ -1,5 +1,5 @@
 /**
- * ApplyPilot - Chrome Extension Popup
+ * Autopilot - Chrome Extension Popup
  * Handles user authentication, job extraction, and API communication
  */
 
@@ -127,22 +127,22 @@ async function runSerializeAutofill(tabId, educationCount) {
       }
       try {
         var n = result && result.fields ? result.fields.length : 0;
-        console.warn('[ApplyPilot] scan found ' + n + ' field(s)');
+        console.warn('[Autopilot] scan found ' + n + ' field(s)');
         if (result && result.fields) {
           console.warn(
-            '[ApplyPilot] scan labels:',
+            '[Autopilot] scan labels:',
             result.fields.map(function (f) {
               return (f.input_type || f.tag || '?') + ': ' + String(f.label_text || '').slice(0, 100);
             })
           );
         }
         if (result && result.education_expand) {
-          console.warn('[ApplyPilot] education expand:', result.education_expand);
+          console.warn('[Autopilot] education expand:', result.education_expand);
         }
         if (result && result.scan_debug) {
-          console.warn('[ApplyPilot] scan debug:', result.scan_debug);
+          console.warn('[Autopilot] scan debug:', result.scan_debug);
           console.warn(
-            '[ApplyPilot] scan debug — sponsorship in fields:',
+            '[Autopilot] scan debug — sponsorship in fields:',
             result.scan_debug.sponsorship_in_fields,
             '| minimal Yes/No containers:',
             result.scan_debug.minimal_pair_containers
@@ -153,7 +153,7 @@ async function runSerializeAutofill(tabId, educationCount) {
           );
         } else {
           console.warn(
-            '[ApplyPilot] scan debug: (missing — reload extension at chrome://extensions)'
+            '[Autopilot] scan debug: (missing — reload extension at chrome://extensions)'
           );
         }
       } catch (logErr) {
@@ -683,7 +683,7 @@ async function applyAutofillAssignmentsToTab(tabId, mapped, scanCount, education
   }
   showToast(msg, f > 0 ? 'info' : 'success', 10000);
 
-  console.log('[ApplyPilot popup] autofill result', {
+  console.log('[Autopilot popup] autofill result', {
     scanned: scanned,
     applied: n,
     failed: f,
@@ -696,15 +696,15 @@ async function applyAutofillAssignmentsToTab(tabId, mapped, scanCount, education
       func: (debugPayload) => {
         try {
           if (debugPayload) {
-            console.warn('[ApplyPilot] apply debug — field count: ' + (debugPayload.scanned_field_count || 0));
-            console.warn('[ApplyPilot] apply details:', debugPayload);
+            console.warn('[Autopilot] apply debug — field count: ' + (debugPayload.scanned_field_count || 0));
+            console.warn('[Autopilot] apply details:', debugPayload);
           } else if (window.__jaaLastAutofillDebug) {
-            console.warn('[ApplyPilot] apply debug (cached):', window.__jaaLastAutofillDebug);
+            console.warn('[Autopilot] apply debug (cached):', window.__jaaLastAutofillDebug);
           } else {
-            console.warn('[ApplyPilot] apply finished but no debug payload was returned.');
+            console.warn('[Autopilot] apply finished but no debug payload was returned.');
           }
         } catch (e) {
-          console.warn('[ApplyPilot] apply debug log error', e);
+          console.warn('[Autopilot] apply debug log error', e);
         }
       },
       args: [result && result.debug ? result.debug : null]
@@ -1071,7 +1071,7 @@ async function extractAndSubmitJob() {
     }
 
     if (extracted.diagnostics) {
-      console.info('[ApplyPilot] extract diagnostics — copy this object when reporting bugs:', extracted.diagnostics);
+      console.info('[Autopilot] extract diagnostics — copy this object when reporting bugs:', extracted.diagnostics);
     }
 
     const { content } = extracted;
@@ -1134,7 +1134,7 @@ async function copyPageContent() {
     }
 
     if (extracted.diagnostics) {
-      console.info('[ApplyPilot] extract diagnostics — copy this object when reporting bugs:', extracted.diagnostics);
+      console.info('[Autopilot] extract diagnostics — copy this object when reporting bugs:', extracted.diagnostics);
     }
 
     await navigator.clipboard.writeText(extracted.content);

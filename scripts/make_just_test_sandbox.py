@@ -61,7 +61,7 @@ def _copy_repo(src: Path, dst: Path) -> None:
 
 def _write_readme(dst: Path) -> None:
     dest_line = str(dst)
-    text = f"""# ApplyPilot — Just / Docker test sandbox
+    text = f"""# Autopilot — Just / Docker test sandbox
 
 This tree was created by `scripts/make_just_test_sandbox.py`.
 
@@ -92,7 +92,9 @@ rm -rf {dest_line}
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Clone repo tree for Just/Docker testing.")
+    parser = argparse.ArgumentParser(
+        description="Clone repo tree for Just/Docker testing."
+    )
     parser.add_argument(
         "--dest",
         type=Path,
@@ -102,7 +104,9 @@ def main() -> None:
     args = parser.parse_args()
 
     repo = Path(__file__).resolve().parent.parent
-    dest = args.dest if args.dest is not None else repo.parent / "applypilot-just-sandbox"
+    dest = (
+        args.dest if args.dest is not None else repo.parent / "applypilot-just-sandbox"
+    )
 
     print(f"Source: {repo}")
     print(f"Destination: {dest}")
@@ -115,7 +119,10 @@ def main() -> None:
         check=False,
     )
     if r.returncode != 0:
-        print("Warning: create_dotenv_if_missing.py failed; create .env manually.", file=sys.stderr)
+        print(
+            "Warning: create_dotenv_if_missing.py failed; create .env manually.",
+            file=sys.stderr,
+        )
         sys.exit(r.returncode)
 
     print("")

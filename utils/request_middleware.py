@@ -1,5 +1,5 @@
 """
-Request middleware for the ApplyPilot.
+Request middleware for the Autopilot.
 Provides request ID generation, logging, and performance tracking.
 """
 
@@ -31,6 +31,7 @@ _NEWLINE_RE = re.compile(r"[\r\n\x00]")
 def _sanitize_log_value(value: str) -> str:
     """Strip CR/LF/NUL characters to prevent log-injection attacks."""
     return _NEWLINE_RE.sub(" ", value)
+
 
 # Request ID header name
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -91,7 +92,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
         # Log request start (only at DEBUG level — avoids noise at INFO)
         if not exclude:
-            query = f"?{_sanitize_log_value(str(request.query_params))}" if request.query_params else ""
+            query = (
+                f"?{_sanitize_log_value(str(request.query_params))}"
+                if request.query_params
+                else ""
+            )
             client_ip = _sanitize_log_value(
                 request.client.host if request.client else "unknown"
             )
@@ -128,7 +133,10 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 # Include user context and query string on non-2xx for easier debugging
                 extra_context = ""
                 if status >= 400 and request.query_params:
-                    safe_params = {k: _sanitize_log_value(str(v)) for k, v in request.query_params.items()}
+                    safe_params = {
+                        k: _sanitize_log_value(str(v))
+                        for k, v in request.query_params.items()
+                    }
                     extra_context = f"  params={safe_params}"
                 if user_id:
                     extra_context += f"  user={str(user_id)[:8]}..."
@@ -245,4 +253,3 @@ def add_request_id_header(response: Response, request_id: str) -> Response:
     """
     response.headers[REQUEST_ID_HEADER] = request_id
     return response
-

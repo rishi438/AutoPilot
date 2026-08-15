@@ -1,7 +1,7 @@
 /**
- * @fileoverview ApplyPilot - Dashboard JavaScript
+ * @fileoverview Autopilot - Dashboard JavaScript
  * Handles workflow management, AI processing, and dashboard interactions.
- * 
+ *
  * @description Manages the dashboard view including:
  * - Workflow creation and monitoring
  * - Real-time WebSocket updates
@@ -14,7 +14,7 @@
 /**
  * Dashboard manager class for workflow and application management.
  * Handles real-time updates via WebSocket with polling fallback.
- * 
+ *
  * @class
  */
 class DashboardManager {
@@ -24,37 +24,37 @@ class DashboardManager {
   constructor() {
     /** @type {string} Base URL for API calls */
     this.apiBaseUrl = (window.APP_CONFIG && window.APP_CONFIG.apiBase) || '/api/v1';
-    
+
     /** @type {import('./types.js').WorkflowSession[]} List of workflow sessions */
     this.workflows = [];
-    
+
     /** @type {import('./types.js').WorkflowSession|null} Currently selected workflow */
     this.currentWorkflow = null;
-    
+
     /** @type {Set<string>} Set of session IDs currently being processed */
     this.processingQueue = new Set();
-    
+
     /** @type {number|null} Polling interval ID */
     this.pollingInterval = null;
-    
+
     /** @type {number} Status polling interval in milliseconds */
     this.statusUpdateInterval = 5000;
-    
+
     /** @type {WebSocket|null} WebSocket connection */
     this.ws = null;
-    
+
     /** @type {string|null} Currently subscribed session ID */
     this.wsSessionId = null;
-    
+
     /** @type {number} WebSocket reconnection attempts */
     this.wsReconnectAttempts = 0;
-    
+
     /** @type {number|null} WebSocket ping interval ID */
     this.wsPingInterval = null;
-    
+
     /** @type {any} Status chart instance */
     this.statusChart = null;
-    
+
     /** @type {any} Activity chart instance */
     this.activityChart = null;
 
@@ -191,12 +191,12 @@ class DashboardManager {
       // Load workflow list using the correct endpoint
       // Use /workflow/list as the endpoint for retrieving all job applications
       const response = await this.apiCall("/workflow/list", "GET");
-      
+
       if (response.sessions) {
         this.workflows = response.sessions || [];
         this.renderWorkflowsList();
         this.updateDashboardStats();
-        
+
         // Load recent applications for dashboard homepage
         if (document.querySelector('#recentApplications')) {
           this.renderRecentApplications(this.workflows.slice(0, 5)); // Show top 5 most recent
@@ -334,7 +334,7 @@ class DashboardManager {
     }
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const endpoint = sessionId 
+    const endpoint = sessionId
       ? `/api/ws/workflow/${sessionId}?token=${encodeURIComponent(token)}`
       : `/api/ws/user?token=${encodeURIComponent(token)}`;
     const wsUrl = `${protocol}//${window.location.host}${endpoint}`;
@@ -427,42 +427,42 @@ class DashboardManager {
   /** @param {any} data */
   handleWebSocketMessage(data) {
     console.debug("WebSocket message type:", data.type);
-    
+
     switch (data.type) {
       case "connected":
         // Connection confirmed
         console.log("WebSocket subscription confirmed:", data.message);
         break;
-        
+
       case "pong":
         // Ping response, connection is alive
         break;
-        
+
       case "agent_update":
         // Agent status changed (running, completed, failed)
         this.handleAgentUpdate(data.session_id, data.data);
         break;
-        
+
       case "phase_change":
         // Workflow phase changed
         this.handlePhaseChange(data.session_id, data.data);
         break;
-        
+
       case "workflow_complete":
         // Workflow finished successfully
         this.handleWorkflowComplete(data.session_id, data.data);
         break;
-        
+
       case "workflow_error":
         // Workflow failed
         this.handleWorkflowError(data.session_id, data.data);
         break;
-        
+
       case "gate_decision":
         // Profile matching gate triggered - needs user confirmation
         this.handleGateDecision(data.session_id, data.data);
         break;
-        
+
       // Legacy event types for backwards compatibility
       case "application_status_update":
         (/** @type {any} */ (this)).updateApplicationStatus(data.application_id, data.status, data.progress);
@@ -473,7 +473,7 @@ class DashboardManager {
       case "processing_error":
         this.handleProcessingError(data.application_id, data.error);
         break;
-        
+
       default:
         console.debug("Unknown WebSocket message type:", data.type);
     }
@@ -486,7 +486,7 @@ class DashboardManager {
    */
   handleAgentUpdate(sessionId, data) {
     const { agent, status, message } = data;
-    
+
     // Update UI to show agent progress
     /** @type {Record<string,{running:number,completed:number}>} */
     const progressMap = {
@@ -496,13 +496,13 @@ class DashboardManager {
       "resume_advisor": { running: 70, completed: 85 },
       "cover_letter_writer": { running: 80, completed: 95 },
     };
-    
+
     const agentProgress = progressMap[agent] || { running: 50, completed: 50 };
-    const progress = status === "completed" ? agentProgress.completed : 
+    const progress = status === "completed" ? agentProgress.completed :
                      status === "running" ? agentProgress.running : 0;
-    
+
     this.updateWorkflowStatus(sessionId, "running", progress);
-    
+
     // Show notification for completed agents
     if (status === "completed") {
       this.showMessage(`${this.formatAgentName(agent)} completed`, "success");
@@ -527,13 +527,13 @@ class DashboardManager {
   handleWorkflowComplete(sessionId, data) {
     this.processingQueue.delete(sessionId);
     this.updateWorkflowStatus(sessionId, "completed", 100);
-    
+
     const matchScore = data.match_score ? `${Math.round(data.match_score * 100)}%` : "";
     this.showMessage(
       `Workflow completed! ${matchScore ? `Match score: ${matchScore}` : ""}`,
       "success"
     );
-    
+
     // Track workflow completion (if Analytics is loaded)
     // @ts-ignore
     if (window.Analytics) {
@@ -544,7 +544,7 @@ class DashboardManager {
         agentsCompleted: data.agents_completed || 5,
       });
     }
-    
+
     // Refresh the dashboard to show updated results
     this.loadDashboardData();
   }
@@ -557,7 +557,7 @@ class DashboardManager {
     this.processingQueue.delete(sessionId);
     this.updateWorkflowStatus(sessionId, "failed", 0);
     this.showMessage(`Workflow failed: ${data.error}`, "error");
-    
+
     // Track workflow failure (if Analytics is loaded)
     // @ts-ignore
     if (window.Analytics) {
@@ -573,7 +573,7 @@ class DashboardManager {
   handleGateDecision(sessionId, data) {
     const { match_score, recommendation } = data;
     const scorePercent = Math.round(match_score * 100);
-    
+
     // Show modal asking user if they want to continue
     this.showGateDecisionModal(sessionId, scorePercent, recommendation);
   }
@@ -627,7 +627,7 @@ class DashboardManager {
     if (continueBtn) continueBtn.addEventListener('click', () => window.dashboardManager.continueWorkflow(sessionId));
 
     document.body.appendChild(modal);
-    
+
     // @ts-ignore
     const bsGate = /** @type {any} */ (typeof bootstrap !== "undefined" ? bootstrap : null);
     if (bsGate) {
@@ -695,13 +695,13 @@ class DashboardManager {
   async checkProcessingStatus() {
     try {
       const sessionIds = Array.from(this.processingQueue);
-      
+
       // Check each workflow individually
       for (const sessionId of sessionIds) {
         try {
           const status = await this.getWorkflowStatus(sessionId);
           this.updateWorkflowStatus(sessionId, status.workflow_status, status.progress_percentage);
-          
+
           if (status.workflow_status === "completed" || status.workflow_status === "failed") {
             this.processingQueue.delete(sessionId);
           }
@@ -846,7 +846,7 @@ class DashboardManager {
 
     // Always use FormData to match backend expectations
     const formData = new FormData();
-    
+
     // Handle different input methods
     // Note: job_title and company_name will be extracted by the AI from the job content
     if (jobData.method === "url" && jobData.url) {
@@ -869,7 +869,7 @@ class DashboardManager {
 
   /**
    * Get workflow status from the API.
-   * 
+   *
    * @param {string} sessionId - Workflow session ID
    * @returns {Promise<import('./types.js').WorkflowStatusResponse>} Status response
    * @throws {Error} If the request fails
@@ -886,7 +886,7 @@ class DashboardManager {
 
   /**
    * Update workflow status display in the UI.
-   * 
+   *
    * @param {string} sessionId - Workflow session ID
    * @param {import('./types.js').WorkflowStatus | string} status - New status
    * @param {number} [progress=0] - Progress percentage (0-100)
@@ -897,13 +897,13 @@ class DashboardManager {
       `[data-session-id="${sessionId}"]`,
     );
     if (!workflowCard) return;
-    
+
     console.debug(`Updating workflow status: ${sessionId} to ${status} with progress ${progress}%`);
-    
+
     // Normalize status for UI consistency (backend may send varied formats)
     const normalizedStatus = typeof status === 'string' ? status.toLowerCase() : status;
     console.debug(`Normalized status: ${normalizedStatus}`);
-    
+
     // Map backend workflow statuses to UI status values
     let uiStatus = normalizedStatus;
     if (normalizedStatus === "in_progress" || normalizedStatus === "processing") {
@@ -915,7 +915,7 @@ class DashboardManager {
       // When workflow completes, force progress to 100%
       progress = 100;
     }
-    
+
     console.debug(`Mapped to UI status: ${uiStatus} with ${progress}% progress`);
 
     // Update status badge
@@ -1040,25 +1040,25 @@ class DashboardManager {
     try {
       // Get workflow results first
       const results = await this.apiCall(`/workflow/results/${sessionId}`, "GET");
-      
+
       if (results.cover_letter || results.resume_recommendations) {
         // Create downloadable content
         let content = "";
-        
+
         if (results.cover_letter && results.cover_letter.content) {
           content += "COVER LETTER\n";
           content += "=============\n\n";
           content += results.cover_letter.content;
           content += "\n\n";
         }
-        
+
         if (results.resume_recommendations && results.resume_recommendations.content) {
           content += "RESUME RECOMMENDATIONS\n";
           content += "======================\n\n";
           content += results.resume_recommendations.content;
           content += "\n\n";
         }
-        
+
         // Create and download file
         const blob = new Blob([content], { type: 'text/plain' });
         const url = window.URL.createObjectURL(blob);
@@ -1330,7 +1330,7 @@ class DashboardManager {
       }
     }
   }
-  
+
   /**
    * Render recent applications on the dashboard homepage
    * @param {Array<Record<string,any>>} recentApplications - Array of recent application data
@@ -1338,7 +1338,7 @@ class DashboardManager {
   renderRecentApplications(recentApplications) {
     const container = document.querySelector('#recentApplications');
     if (!container) return;
-    
+
     if (recentApplications.length === 0) {
       container.innerHTML = `
         <div class="empty-state text-center py-4">
@@ -1350,21 +1350,21 @@ class DashboardManager {
       `;
       return;
     }
-    
+
     const html = recentApplications.map((app) => {
       const a = /** @type {Record<string,any>} */ (app);
       const date = new Date(a['created_at']);
-      const formattedDate = date.toLocaleDateString('en-US', { 
-        month: 'short', 
+      const formattedDate = date.toLocaleDateString('en-US', {
+        month: 'short',
         day: 'numeric',
         year: 'numeric'
       });
-      
+
       let statusClass = 'status-active';
       if (a['status'] === 'completed') statusClass = 'status-completed';
       else if (a['status'] === 'failed') statusClass = 'status-failed';
       else if (a['status'] === 'cancelled') statusClass = 'status-cancelled';
-      
+
       return `
         <div class="application-card">
           <div class="application-header">
@@ -1392,7 +1392,7 @@ class DashboardManager {
         </div>
       `;
     }).join('');
-    
+
     container.innerHTML = html;
   }
 

@@ -1,5 +1,5 @@
 /**
- * ApplyPilot frontend build script.
+ * Autopilot frontend build script.
  *
  * Uses esbuild to minify each JS and CSS file independently (no bundling —
  * the existing vanilla-JS global-scope architecture is preserved).

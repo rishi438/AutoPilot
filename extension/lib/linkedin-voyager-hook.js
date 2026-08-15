@@ -3,7 +3,7 @@
  * LinkedIn job search loads posting JSON via fetch/XHR; DOM `<main>` is often feed noise.
  * Persists parsed posting text in sessionStorage — readable from the isolated extractor.
  */
-(function installApplyPilotLiNetworkHook() {
+(function installAutopilotLiNetworkHook() {
   'use strict';
 
   try {

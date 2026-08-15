@@ -1,5 +1,5 @@
 """
-Main FastAPI application for ApplyPilot.
+Main FastAPI application for Autopilot.
 This module sets up the web server, API routes, middleware, and application lifecycle.
 """
 
@@ -192,7 +192,7 @@ async def lifespan(app: FastAPI):
         redis_url=settings.redis_url,
         log_level=settings.log_level,
     )
-    logger.info("Starting ApplyPilot...")
+    logger.info("Starting Autopilot...")
 
     # Startup tasks
     try:
@@ -296,7 +296,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown tasks
-    logger.info("Shutting down ApplyPilot...")
+    logger.info("Shutting down Autopilot...")
     try:
         # Close database connections
         await close_database_connection()
@@ -835,7 +835,7 @@ def add_custom_routes(app: FastAPI):
         """Serve the main application page."""
         if templates is None:
             return HTMLResponse(
-                content="<h1>ApplyPilot</h1><p>Service initializing...</p>",
+                content="<h1>Autopilot</h1><p>Service initializing...</p>",
                 status_code=503,
             )
 
@@ -852,7 +852,7 @@ def add_custom_routes(app: FastAPI):
         except Exception as e:
             logger.error(f"Error serving root page: {e}", exc_info=True)
             return HTMLResponse(
-                content="<h1>ApplyPilot</h1><p>Service temporarily unavailable</p>",
+                content="<h1>Autopilot</h1><p>Service temporarily unavailable</p>",
                 status_code=503,
             )
 

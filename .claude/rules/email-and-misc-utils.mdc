@@ -101,7 +101,7 @@ SMTP_PORT=587
 SMTP_USERNAME=your-email@gmail.com
 SMTP_PASSWORD=your-app-password   # Gmail App Password, not login password — stored as SecretStr
 SMTP_FROM_EMAIL=your-email@gmail.com
-SMTP_FROM_NAME=ApplyPilot
+SMTP_FROM_NAME=Autopilot
 ```
 
 `SMTP_PASSWORD` is a `SecretStr` in settings. Always call `.get_secret_value()` before passing to `smtplib`:

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Page Not Found | {{ app_name or "ApplyPilot" }}{% endblock %}
+{% block title %}Page Not Found | {{ app_name or "Autopilot" }}{% endblock %}
 {% block description %}The page you're looking for doesn't exist.{% endblock %}
 {% block extra_head %}
 <style nonce="{{ request.state.csp_nonce | default('') }}">
@@ -84,10 +84,10 @@
             <div class="error-code">404</div>
             <h1 class="error-title">Page Not Found</h1>
             <p class="error-message">
-                Oops! The page you're looking for seems to have wandered off. 
+                Oops! The page you're looking for seems to have wandered off.
                 It might have been moved, deleted, or never existed in the first place.
             </p>
-            
+
             <div class="error-actions">
                 <a href="/" class="btn btn-primary-glow">
                     <i class="fas fa-home me-2"></i> Go Home

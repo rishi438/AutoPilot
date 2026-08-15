@@ -1,5 +1,5 @@
 """
-Configuration settings for the ApplyPilot.
+Configuration settings for the Autopilot.
 Manages environment variables, database connections, and application settings.
 """
 
@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # Application Configuration
-    app_name: str = "ApplyPilot"
+    app_name: str = "Autopilot"
     app_version: str = "1.0.0"
     app_description: str = "AI-Powered Job Application Co-Pilot"
     debug: bool = False
@@ -126,7 +126,7 @@ class Settings(BaseSettings):
         default=None,
         description="From email address (defaults to smtp_username if not set)",
     )
-    smtp_from_name: str = "ApplyPilot"
+    smtp_from_name: str = "Autopilot"
 
     # Analytics Configuration (PostHog)
     posthog_api_key: str | None = Field(

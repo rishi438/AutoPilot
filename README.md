@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.svg" width="280" height="64" alt="ApplyPilot">
+  <img src="docs/logo.svg" width="280" height="64" alt="Autopilot">
 </p>
 
 [![Python](https://img.shields.io/badge/Python-blue.svg)](https://www.python.org/downloads/)
@@ -22,11 +22,11 @@ Paste a job description — or pull it from any job site with the Chrome extensi
 
 Also includes a dashboard to track every application. And tools for everything around it: interview prep with mock sessions, salary negotiation, job comparison, follow-ups, thank you notes, and references.
 
-Runs on your machine. Use your own Gemini API key or connect an Ollama-compatible local model; ApplyPilot does not require a hosted ApplyPilot service.
+Runs on your machine. Use your own Gemini API key or connect an Ollama-compatible local model; Autopilot does not require a hosted Autopilot service.
 
 *Here's what a completed application looks like:*
 
-![ApplyPilot demo](docs/demo.gif)
+![Autopilot demo](docs/demo.gif)
 
 ---
 
@@ -215,7 +215,7 @@ AI features require a key from Google AI Studio.
 1. Go to [aistudio.google.com/api-keys](https://aistudio.google.com/api-keys)
 2. Sign in with your Google account
 3. Click **Create API key** — copy the entire key string (Google may show different formats over time).
-4. Paste it in ApplyPilot — you'll be prompted during **profile setup**, or add it later via **Settings → AI Setup**
+4. Paste it in Autopilot — you'll be prompted during **profile setup**, or add it later via **Settings → AI Setup**
 
 **For personal use** that's all — no `.env` editing needed. Each user stores their own key, encrypted in the database.
 
@@ -228,13 +228,13 @@ Run Ollama on the host, pull a model, then set both local variables in `.env`. L
 ```bash
 ollama pull qwen2.5:14b
 
-# Native ApplyPilot process
+# Native Autopilot process
 LOCAL_LLM_URL=http://127.0.0.1:11434/api/generate
 LOCAL_LLM_MODEL=qwen2.5:14b
 LOCAL_LLM_TIMEOUT=180
 ```
 
-When ApplyPilot runs in a container, use `host.docker.internal` with Docker Desktop or `host.containers.internal` with Podman instead of `127.0.0.1`. The timeout must be between 10 and 600 seconds.
+When Autopilot runs in a container, use `host.docker.internal` with Docker Desktop or `host.containers.internal` with Podman instead of `127.0.0.1`. The timeout must be between 10 and 600 seconds.
 
 For local-only generation, do not configure a server or user Gemini key. A saved Gemini BYOK key takes precedence; the configured local endpoint remains available when no Gemini key exists or when the hosted service is unavailable.
 
@@ -278,7 +278,7 @@ SMTP_PORT=587
 SMTP_USERNAME=your-gmail@gmail.com
 SMTP_PASSWORD=your-app-password        # myaccount.google.com/apppasswords
 SMTP_FROM_EMAIL=your-gmail@gmail.com
-SMTP_FROM_NAME=ApplyPilot
+SMTP_FROM_NAME=Autopilot
 DISABLE_EMAIL_VERIFICATION=false       # require email verification on sign-up
 ```
 

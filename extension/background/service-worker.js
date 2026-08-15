@@ -1,5 +1,5 @@
 /**
- * ApplyPilot - Background Service Worker
+ * Autopilot - Background Service Worker
  * Handles API communication, authentication, and cross-tab messaging
  */
 
@@ -49,14 +49,14 @@ let state = {
 // Initialize on install
 chrome.runtime.onInstalled.addListener(async (details) => {
   console.log('[JAA] Extension installed:', details.reason);
-  
+
   if (details.reason === 'install') {
     // Open welcome page or dashboard
     chrome.tabs.create({
       url: `${CONFIG.APP_URL}/auth/login?source=extension`
     });
   }
-  
+
   await loadCredentials();
 });
 
@@ -77,17 +77,17 @@ async function loadCredentials() {
       CONFIG.STORAGE_KEYS.USER,
       CONFIG.STORAGE_KEYS.API_URL
     ]);
-    
+
     if (result[CONFIG.STORAGE_KEYS.TOKEN]) {
       state.token = result[CONFIG.STORAGE_KEYS.TOKEN];
       state.user = result[CONFIG.STORAGE_KEYS.USER];
-      
+
       if (result[CONFIG.STORAGE_KEYS.API_URL]) {
         CONFIG.API_BASE_URL = result[CONFIG.STORAGE_KEYS.API_URL];
         CONFIG.APP_URL = CONFIG.API_BASE_URL.replace(/\/api\/v1$/, '').replace(/\/api$/, '');
         CONFIG.DASHBOARD_URL = CONFIG.APP_URL + '/dashboard';
       }
-      
+
       // Verify token is still valid
       const isValid = await verifyToken();
       if (isValid) {
@@ -107,21 +107,21 @@ async function saveCredentials(token, user, apiUrl = null) {
       [CONFIG.STORAGE_KEYS.TOKEN]: token,
       [CONFIG.STORAGE_KEYS.USER]: user
     };
-    
+
     if (apiUrl) {
       data[CONFIG.STORAGE_KEYS.API_URL] = apiUrl;
       CONFIG.API_BASE_URL = apiUrl;
       CONFIG.APP_URL = apiUrl.replace(/\/api\/v1$/, '').replace(/\/api$/, '');
       CONFIG.DASHBOARD_URL = CONFIG.APP_URL + '/dashboard';
     }
-    
+
     await chrome.storage.local.set(data);
-    
+
     state.token = token;
     state.user = user;
-    
+
     setupTokenRefresh();
-    
+
     console.log('[JAA] Credentials saved');
   } catch (error) {
     console.error('[JAA] Failed to save credentials:', error);
@@ -134,15 +134,15 @@ async function clearCredentials() {
       CONFIG.STORAGE_KEYS.TOKEN,
       CONFIG.STORAGE_KEYS.USER
     ]);
-    
+
     state.token = null;
     state.user = null;
-    
+
     if (state.refreshTimer) {
       clearInterval(state.refreshTimer);
       state.refreshTimer = null;
     }
-    
+
     console.log('[JAA] Credentials cleared');
   } catch (error) {
     console.error('[JAA] Failed to clear credentials:', error);
@@ -155,7 +155,7 @@ async function clearCredentials() {
 
 async function verifyToken() {
   if (!state.token) return false;
-  
+
   try {
     const response = await fetch(`${CONFIG.API_BASE_URL}/auth/extension-status`, {
       method: 'GET',
@@ -164,7 +164,7 @@ async function verifyToken() {
         'Content-Type': 'application/json'
       }
     });
-    
+
     return response.ok;
   } catch (error) {
     console.error('[JAA] Token verification failed:', error);
@@ -174,7 +174,7 @@ async function verifyToken() {
 
 async function refreshToken() {
   if (!state.token) return false;
-  
+
   try {
     const response = await fetch(`${CONFIG.API_BASE_URL}/auth/refresh`, {
       method: 'POST',
@@ -183,7 +183,7 @@ async function refreshToken() {
         'Content-Type': 'application/json'
       }
     });
-    
+
     if (response.ok) {
       const data = await response.json();
       await saveCredentials(data.access_token, state.user);
@@ -204,7 +204,7 @@ function setupTokenRefresh() {
   if (state.refreshTimer) {
     clearInterval(state.refreshTimer);
   }
-  
+
   state.refreshTimer = setInterval(async () => {
     if (state.token) {
       await refreshToken();
@@ -218,25 +218,25 @@ function setupTokenRefresh() {
 
 async function apiCall(endpoint, method = 'GET', data = null) {
   const url = `${CONFIG.API_BASE_URL}${endpoint}`;
-  
+
   const config = {
     method,
     headers: {
       'Content-Type': 'application/json'
     }
   };
-  
+
   if (state.token) {
     config.headers['Authorization'] = `Bearer ${state.token}`;
   }
-  
+
   if (data && method !== 'GET') {
     config.body = JSON.stringify(data);
   }
-  
+
   try {
     const response = await fetch(url, config);
-    
+
     // Handle token expiration
     if (response.status === 401 && !endpoint.includes('/auth/')) {
       const refreshed = await refreshToken();
@@ -246,7 +246,7 @@ async function apiCall(endpoint, method = 'GET', data = null) {
         return fetch(url, config);
       }
     }
-    
+
     return response;
   } catch (error) {
     console.error('[JAA] API call failed:', error);
@@ -258,14 +258,14 @@ async function startWorkflow(jobContent, sourceUrl, metadata = {}) {
   if (!state.token) {
     throw new Error('Not authenticated');
   }
-  
+
   const response = await apiCall('/workflow/start', 'POST', {
     job_text: jobContent,
     source: 'extension',
     source_url: sourceUrl,
     ...metadata
   });
-  
+
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     let msg = errorData.detail || errorData.message || `API error: ${response.status}`;
@@ -276,7 +276,7 @@ async function startWorkflow(jobContent, sourceUrl, metadata = {}) {
     }
     throw new Error(msg);
   }
-  
+
   return response.json();
 }
 
@@ -288,7 +288,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender).then(sendResponse).catch(error => {
     sendResponse({ success: false, error: error.message });
   });
-  
+
   return true; // Keep channel open for async response
 });
 
@@ -301,15 +301,15 @@ async function handleMessage(message, sender) {
         isAuthenticated: !!state.token,
         user: state.user
       };
-      
+
     case 'SAVE_CREDENTIALS':
       await saveCredentials(message.token, message.user, message.apiUrl);
       return { success: true };
-      
+
     case 'LOGOUT':
       await clearCredentials();
       return { success: true };
-      
+
     // Workflow
     case 'START_WORKFLOW':
       const result = await startWorkflow(
@@ -318,32 +318,32 @@ async function handleMessage(message, sender) {
         message.metadata
       );
       return { success: true, data: result };
-      
+
     // Job detection notification
     case 'JOB_DETECTED':
       // Update badge or icon when job is detected
       if (sender.tab) {
-        chrome.action.setBadgeText({ 
-          text: '!', 
-          tabId: sender.tab.id 
+        chrome.action.setBadgeText({
+          text: '!',
+          tabId: sender.tab.id
         });
-        chrome.action.setBadgeBackgroundColor({ 
+        chrome.action.setBadgeBackgroundColor({
           color: '#00d4ff',
           tabId: sender.tab.id
         });
       }
       return { success: true };
-      
+
     // API proxy
     case 'API_CALL':
       const response = await apiCall(message.endpoint, message.method, message.data);
       const responseData = await response.json().catch(() => null);
-      return { 
-        success: response.ok, 
+      return {
+        success: response.ok,
         status: response.status,
-        data: responseData 
+        data: responseData
       };
-      
+
     default:
       throw new Error(`Unknown message type: ${message.type}`);
   }
@@ -361,14 +361,14 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     // When user navigates to dashboard or profile setup (login success),
     // inject a script to grab the token from localStorage.
     const appUrl = CONFIG.APP_URL;
-    const isAppPage = tab.url.startsWith(appUrl) && 
+    const isAppPage = tab.url.startsWith(appUrl) &&
         (tab.url.includes('/dashboard') || tab.url.includes('/profile/setup'));
-    
+
     if (isAppPage) {
       // Check storage (not just in-memory state, since service worker may have restarted)
       const stored = await chrome.storage.local.get([CONFIG.STORAGE_KEYS.TOKEN]);
       const hasToken = !!(state.token || stored[CONFIG.STORAGE_KEYS.TOKEN]);
-      
+
       if (!hasToken) {
         try {
           const results = await chrome.scripting.executeScript({
@@ -381,7 +381,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
               return { token, user };
             }
           });
-          
+
           if (results && results[0] && results[0].result && results[0].result.token) {
             const { token, user } = results[0].result;
             await saveCredentials(token, user, appUrl + '/api/v1');
@@ -419,7 +419,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       });
       return;
     }
-    
+
     // Execute shared extractor (same logic as popup — selection-first, generic DOM scoring)
     try {
       let forceDiag = IS_DEV;
@@ -489,7 +489,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         },
         args: [forceDiag]
       });
-      
+
       if (results && results[0] && results[0].result) {
         const data = results[0].result;
 
@@ -514,7 +514,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
           detected_title: data.title,
           detected_company: data.company
         });
-        
+
         // Show success notification
         chrome.notifications.create({
           type: 'basic',
@@ -526,7 +526,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       }
     } catch (error) {
       console.error('[JAA] Context menu extraction failed:', error);
-      
+
       chrome.notifications.create({
         type: 'basic',
         iconUrl: chrome.runtime.getURL('icons/icon128.png'),
@@ -546,16 +546,16 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
   // Verify sender is from our app - allow the currently configured app URL
   const allowedOrigins = [CONFIG.APP_URL];
-  
+
   if (!allowedOrigins.some(origin => sender.url?.startsWith(origin))) {
     sendResponse({ success: false, error: 'Unauthorized origin' });
     return;
   }
-  
+
   handleMessage(message, sender).then(sendResponse).catch(error => {
     sendResponse({ success: false, error: error.message });
   });
-  
+
   return true;
 });
 
@@ -570,5 +570,3 @@ chrome.notifications.onClicked.addListener((notificationId) => {
 });
 
 console.log('[JAA] Background service worker loaded');
-
-

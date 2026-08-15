@@ -5,20 +5,23 @@ Provides JWT token validation and FastAPI authentication dependencies for protec
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from fastapi import Depends, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi import status
 import jwt
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import Depends, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_security_settings
-from utils.database import get_database
-from utils.error_responses import APIError, ErrorCode, unauthorized_error, forbidden_error
 from models.database import User
+from utils.database import get_database
+from utils.error_responses import (
+    APIError,
+    ErrorCode,
+    forbidden_error,
+)
 
 # =============================================================================
 # CONFIGURATION
@@ -41,7 +44,7 @@ async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: AsyncSession = Depends(get_database),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Get current authenticated user from JWT token.
 
@@ -78,7 +81,7 @@ async def get_current_user(
             )
 
         # Validate and decode JWT token
-        user_info: Optional[Dict[str, Any]] = await _validate_jwt_token(token, db)
+        user_info: dict[str, Any] | None = await _validate_jwt_token(token, db)
 
         if not user_info:
             raise APIError(
@@ -119,8 +122,8 @@ async def get_current_user(
 
 
 async def require_admin(
-    current_user: Dict[str, Any] = Depends(get_current_user),
-) -> Dict[str, Any]:
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     """
     Require the current user to have admin privileges.
 
@@ -139,8 +142,8 @@ async def require_admin(
 
 
 async def get_current_user_with_complete_profile(
-    current_user: Dict[str, Any] = Depends(get_current_user),
-) -> Dict[str, Any]:
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
     """
     Get current user with complete profile requirement.
 
@@ -167,7 +170,7 @@ async def get_current_user_with_complete_profile(
 # =============================================================================
 
 
-def extract_token_from_request(request: Request) -> Optional[str]:
+def extract_token_from_request(request: Request) -> str | None:
     """
     Extract authentication token from request.
 
@@ -185,7 +188,7 @@ def extract_token_from_request(request: Request) -> Optional[str]:
     # Allow query-param tokens only for WebSocket upgrade requests
     is_websocket = request.url.path.startswith("/api/ws/")
     if is_websocket:
-        token_param: Optional[str] = request.query_params.get(
+        token_param: str | None = request.query_params.get(
             "token"
         ) or request.query_params.get("access_token")
         if token_param:
@@ -193,7 +196,7 @@ def extract_token_from_request(request: Request) -> Optional[str]:
             return token_param
 
     # For all paths: accept the Authorization header
-    auth_header: Optional[str] = request.headers.get("Authorization")
+    auth_header: str | None = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
         logger.debug("Token found in Authorization header")
         return auth_header.replace("Bearer ", "").strip()
@@ -202,7 +205,7 @@ def extract_token_from_request(request: Request) -> Optional[str]:
     return None
 
 
-def create_access_token(data: dict, expire_hours: Optional[int] = None) -> str:
+def create_access_token(data: dict, expire_hours: int | None = None) -> str:
     """
     Create a new access token.
 
@@ -216,16 +219,22 @@ def create_access_token(data: dict, expire_hours: Optional[int] = None) -> str:
     Returns:
         The encoded JWT token.
     """
-    to_encode: Dict[str, Any] = data.copy()
-    hours = expire_hours if expire_hours is not None else security_settings.jwt_config["expire_hours"]
-    now = datetime.now(timezone.utc)
+    to_encode: dict[str, Any] = data.copy()
+    hours = (
+        expire_hours
+        if expire_hours is not None
+        else security_settings.jwt_config["expire_hours"]
+    )
+    now = datetime.now(UTC)
     expire: datetime = now + timedelta(hours=hours)
-    to_encode.update({
-        "exp": expire,
-        "iat": now,
-        "nbf": now,
-        "jti": str(uuid.uuid4()),
-    })
+    to_encode.update(
+        {
+            "exp": expire,
+            "iat": now,
+            "nbf": now,
+            "jti": str(uuid.uuid4()),
+        }
+    )
     encoded_jwt: str = jwt.encode(
         to_encode,
         security_settings.jwt_config["secret_key"],
@@ -250,19 +259,20 @@ async def revoke_token(token: str) -> bool:
     """
     try:
         from utils.redis_client import get_redis_client
-        payload: Dict[str, Any] = jwt.decode(
+
+        payload: dict[str, Any] = jwt.decode(
             token,
             security_settings.jwt_config["secret_key"],
             algorithms=[security_settings.jwt_config["algorithm"]],
         )
-        jti: Optional[str] = payload.get("jti")
+        jti: str | None = payload.get("jti")
         exp = payload.get("exp")
 
         if not jti or not exp:
             logger.warning("Cannot revoke token: missing jti or exp claim")
             return False
 
-        ttl = max(1, int(exp - datetime.now(timezone.utc).timestamp()) + _BLOCKLIST_TTL_BUFFER)
+        ttl = max(1, int(exp - datetime.now(UTC).timestamp()) + _BLOCKLIST_TTL_BUFFER)
         redis_client = await get_redis_client()
         if redis_client:
             await redis_client.setex(f"{_BLOCKLIST_PREFIX}{jti}", ttl, "1")
@@ -298,8 +308,10 @@ async def invalidate_all_user_tokens(user_id: str) -> bool:
         True if the key was stored, False on Redis error.
     """
     try:
+        from datetime import datetime
+
         from utils.redis_client import get_redis_client
-        from datetime import datetime, timezone
+
         redis_client = await get_redis_client()
         if redis_client:
             key = f"{_INVALIDATED_PREFIX}{user_id}"
@@ -308,9 +320,9 @@ async def invalidate_all_user_tokens(user_id: str) -> bool:
             # Store as integer seconds to match PyJWT's integer `iat` encoding.
             # Floats would be fractionally larger than the new token's `iat` (also
             # issued at "now"), causing the new token to be rejected immediately.
-            now_ts = int(datetime.now(timezone.utc).timestamp())
+            now_ts = int(datetime.now(UTC).timestamp())
             await redis_client.set(key, str(now_ts), ex=8 * 24 * 3600)
-            logger.info("Invalidated all tokens for user %s", user_id[:8])
+            logger.info("Invalidated all tokens for user")
             return True
         logger.warning("Cannot invalidate user tokens: Redis unavailable")
         return False
@@ -335,20 +347,23 @@ async def _is_token_revoked(jti: str) -> bool:
     """
     try:
         from utils.redis_client import get_redis_client
+
         redis_client = await get_redis_client()
         if redis_client:
             result = await redis_client.get(f"{_BLOCKLIST_PREFIX}{jti}")
             return result is not None
-        logger.warning("Blocklist check: Redis unavailable — failing closed (token treated as revoked)")
+        logger.warning(
+            "Blocklist check: Redis unavailable — failing closed (token treated as revoked)"
+        )
         return True
     except Exception as e:
-        logger.warning(f"Blocklist check failed (Redis error): {e} — failing closed (token treated as revoked)")
+        logger.warning(
+            f"Blocklist check failed (Redis error): {e} — failing closed (token treated as revoked)"
+        )
         return True
 
 
-async def _validate_jwt_token(
-    token: str, db: AsyncSession
-) -> Optional[Dict[str, Any]]:
+async def _validate_jwt_token(token: str, db: AsyncSession) -> dict[str, Any] | None:
     """
     Validate JWT token and return user information from database.
 
@@ -372,43 +387,46 @@ async def _validate_jwt_token(
     """
     try:
         # Decode and validate JWT token
-        payload: Dict[str, Any] = jwt.decode(
+        payload: dict[str, Any] = jwt.decode(
             token,
             security_settings.jwt_config["secret_key"],
             algorithms=[security_settings.jwt_config["algorithm"]],
         )
 
         # Reject non-access tokens used as access tokens (e.g., password_reset tokens)
-        token_type: Optional[str] = payload.get("type")
+        token_type: str | None = payload.get("type")
         if token_type is not None and token_type != "access":
-            logger.warning("Rejected token with wrong type (type=%s)", token_type)
+            logger.warning("Rejected token with wrong type")
             return None
 
         # Check revocation blocklist
-        jti: Optional[str] = payload.get("jti")
+        jti: str | None = payload.get("jti")
         if jti and await _is_token_revoked(jti):
-            logger.warning("Rejected revoked token (jti=%s)", jti[:8] if jti else "?")
+            logger.warning("Rejected revoked token")
             return None
 
         # Check per-user invalidation timestamp (set on password change, account recovery)
-        user_id_for_check: Optional[str] = payload.get("sub") or payload.get("user_id") or payload.get("id")
-        iat: Optional[float] = payload.get("iat")
+        user_id_for_check: str | None = (
+            payload.get("sub") or payload.get("user_id") or payload.get("id")
+        )
+        iat: float | None = payload.get("iat")
         if user_id_for_check and iat is not None:
             try:
                 from utils.redis_client import get_redis_client
+
                 redis_client = await get_redis_client()
                 if redis_client:
                     inv_key = f"{_INVALIDATED_PREFIX}{user_id_for_check}"
                     inv_ts = await redis_client.get(inv_key)
                     if inv_ts and float(inv_ts) > iat:
-                        logger.warning("Rejected token issued before user invalidation (user=%s)", str(user_id_for_check)[:8])
+                        logger.warning("Rejected token issued before user invalidation")
                         return None
             except Exception as e:
                 logger.debug(f"User invalidation check skipped (Redis error): {e}")
 
         # Extract user information from token payload
         # Look for user ID in multiple fields for compatibility
-        user_id_str: Optional[str] = (
+        user_id_str: str | None = (
             payload.get("sub") or payload.get("user_id") or payload.get("id")
         )
 
@@ -421,12 +439,15 @@ async def _validate_jwt_token(
         try:
             user_id = uuid.UUID(user_id_str)
         except (ValueError, TypeError) as e:
-            logger.error(f"Invalid UUID format for user_id: {user_id_str}, error: {e}", exc_info=True)
+            logger.error(
+                f"Invalid UUID format for user_id: {user_id_str}, error: {e}",
+                exc_info=True,
+            )
             return None
 
         # Fetch current user information from database using SQLAlchemy
         result = await db.execute(select(User).where(User.id == user_id))
-        user: Optional[User] = result.scalar_one_or_none()
+        user: User | None = result.scalar_one_or_none()
 
         if not user:
             logger.warning(f"User not found in database: {user_id}")

@@ -1,5 +1,6 @@
 .PHONY: start start-d start-local stop-local setup dev test lint clean build-frontend \
         docker-build docker-up docker-up-d docker-down docker-logs docker-reset \
+        security-up security-down zap-baseline semgrep \
         _create_env _create_env_system _macos_sign_venv _macos_sign_node _ensure_docker
 
 VENV := venv
@@ -287,6 +288,29 @@ docker-logs:
 # Stop all services AND delete all data volumes (full reset).
 docker-reset:
 	docker compose down -v
+
+# =============================================================================
+# SECURITY SCANNING â€” Docker Desktop
+# =============================================================================
+
+# Start or stop the independent SonarQube stack without touching the app stack.
+security-up: _ensure_docker
+	docker compose --project-name autopilot-security -f docker-compose.security.yml --profile security up -d
+
+security-down: _ensure_docker
+	docker compose --project-name autopilot-security -f docker-compose.security.yml --profile security down
+
+# Passive DAST scan of the running local application. ZAP exit code 2 means
+# warnings were found; preserve those findings without failing make.
+zap-baseline: _ensure_docker
+	@status=0; \
+	docker run --rm --network autopilot_default ghcr.io/zaproxy/zaproxy:stable zap-baseline.py -t http://app:8000 -m 1 -T 1 || status=$$?; \
+	if [ $$status -eq 2 ]; then echo "ZAP completed with warnings; review the report above."; exit 0; fi; \
+	exit $$status
+
+# Static source and configuration scan. A Semgrep finding exits non-zero.
+semgrep: _ensure_docker
+	docker run --rm --volume "$(CURDIR):/src:ro" --workdir /src semgrep/semgrep semgrep scan --config auto --error --exclude .pytest_cache --exclude .sonar --exclude .tmp .
 
 # =============================================================================
 

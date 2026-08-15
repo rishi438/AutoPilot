@@ -97,7 +97,7 @@ Both commands do the same thing on first run:
 - Starts PostgreSQL, Redis, and the app at **http://localhost:8000**
 - Applies database migrations automatically when the app container starts (then starts the web server)
 
-**After `git pull`:** Run **`make start`** / **`just start`** again — it rebuilds the app Docker image when needed (including the frontend bundle inside the image), then migrations run automatically when the app container starts.
+**After `git pull`:** Run **`just rebuild`** — it rebuilds the app image (including the frontend bundle), then starts the services and runs migrations automatically. Use **`just start`** when you only need to start the existing images.
 
 ```bash
 make start-d      / just start-d       # run in background
@@ -345,8 +345,10 @@ make build-frontend    # rebuilds dist/ and updates manifest.json
 | `make start-local` | No Docker: install services + setup + migrate + start app (macOS) |
 | `make stop-local` | Stop PostgreSQL and Redis Homebrew services |
 | `make start` | Docker: generate `.env` + start all services (foreground) |
-| `just start` | Podman: install if needed + start all services (foreground) |
-| `make start-d` / `just start-d` | Docker: generate `.env` + start all services (background) |
+| `just start` | Podman: install if needed + start existing images (foreground) |
+| `just rebuild` | Podman: rebuild images, then start all services (foreground) |
+| `make start-d` / `just start-d` | Docker: generate `.env` + start existing images (background) |
+| `just rebuild-d` | Docker: rebuild images, then start all services (background) |
 | `make docker-down` / `just docker-down` | Stop Docker services, keep data |
 | `make docker-reset` / `just docker-reset` | Stop Docker services, wipe data volumes |
 | `make docker-logs` / `just docker-logs` | Tail the Docker app log |
@@ -372,7 +374,7 @@ make build-frontend    # rebuilds dist/ and updates manifest.json
 | `DATABASE_URL` | Set automatically | PostgreSQL connection |
 | `REDIS_URL` | Set automatically | Redis connection |
 | `GEMINI_API_KEY` | _(empty)_ | Server-wide AI key — users can add their own during profile setup or via **Settings → AI Setup** |
-| `GEMINI_MODEL` | `gemini-3.5-flash` | AI model to use — users can change this in **Settings → AI Setup** |
+| `GEMINI_MODEL` | `gemini-3.1-pro-preview` | AI model to use — users can change this in **Settings → AI Setup** |
 | `LOCAL_LLM_URL` | _(empty)_ | Ollama-compatible generation endpoint; configure together with `LOCAL_LLM_MODEL` |
 | `LOCAL_LLM_MODEL` | _(empty)_ | Model served by the local endpoint; configure together with `LOCAL_LLM_URL` |
 | `LOCAL_LLM_TIMEOUT` | `180` | Local request timeout in seconds (`10`–`600`) |

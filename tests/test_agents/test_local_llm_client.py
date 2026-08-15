@@ -108,6 +108,62 @@ async def test_structured_local_request_uses_ollama_payload_and_keeps_logs_priva
 
 
 @pytest.mark.asyncio
+async def test_gpt_oss_uses_medium_thinking_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use the dashboard's balanced default when no user preference is supplied."""
+    payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"response": "{}", "done": True})
+
+    _install_http_transport(monkeypatch, handler)
+    client = _make_client(model="gpt-oss:20b")
+
+    await client.generate(prompt="extract", structured_output=True)
+
+    assert payloads[0]["messages"][-1] == {"role": "user", "content": "extract"}
+    assert payloads[0]["messages"][0]["role"] == "system"
+    assert "prompt" not in payloads[0]
+    assert payloads[0]["think"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_gpt_oss_forwards_high_reasoning_and_extends_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """High reasoning reaches Ollama and receives the longer local timeout."""
+    payloads: list[dict[str, Any]] = []
+    requested_timeouts: list[float] = []
+    original_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"message": {"content": "ok"}, "done": True})
+
+    def build_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        requested_timeouts.append(float(kwargs["timeout"]))
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return original_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(llm_module.httpx, "AsyncClient", build_client)
+    client = _make_client(model="gpt-oss:20b")
+
+    result = await client.generate(
+        prompt="hello",
+        model="gpt-oss:20b",
+        max_tokens=4096,
+        local_reasoning_effort="high",
+    )
+
+    assert result["response"] == "ok"
+    assert requested_timeouts == [600.0]
+    assert payloads[0]["think"] == "high"
+    assert payloads[0]["options"]["num_predict"] == 24576
+
+
+@pytest.mark.asyncio
 async def test_uses_configured_local_model_when_model_is_omitted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -183,6 +239,30 @@ async def test_incomplete_or_truncated_response_is_rejected(
     client = _make_client()
 
     with pytest.raises(GeminiError, match=message):
+        await client._generate_with_local_llm(prompt="hello")
+
+
+@pytest.mark.asyncio
+async def test_empty_ollama_response_with_length_reason_reports_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reasoning models can consume their budget before emitting ``response``."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "response": "",
+                "thinking": "private reasoning",
+                "done": True,
+                "done_reason": "length",
+            },
+        )
+
+    _install_http_transport(monkeypatch, handler)
+    client = _make_client()
+
+    with pytest.raises(GeminiError, match="truncated"):
         await client._generate_with_local_llm(prompt="hello")
 
 

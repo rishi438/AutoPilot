@@ -3,15 +3,16 @@ Unit tests for the Job Analyzer Agent.
 Tests job analysis from URL, manual text, and extension inputs with mocked LLM responses.
 """
 
+from datetime import UTC, datetime
+from typing import Any
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
-from datetime import datetime, timezone
-from dataclasses import dataclass
-from typing import Dict, Any, Optional
 
-from agents.job_analyzer import JobAnalyzerAgent, MIN_JOB_TEXT_LENGTH, _normalize_string_list
-from workflows.state_schema import InputMethod
-
+from agents.job_analyzer import (
+    JobAnalyzerAgent,
+    _normalize_string_list,
+)
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -22,10 +23,10 @@ def create_test_workflow_state(
     user_id: str = "test-user-123",
     session_id: str = "test-session-456",
     input_method: str = "manual",
-    job_content: Optional[str] = None,
-    job_url: Optional[str] = None,
-    user_profile: Optional[Dict] = None,
-) -> Dict[str, Any]:
+    job_content: str | None = None,
+    job_url: str | None = None,
+    user_profile: dict | None = None,
+) -> dict[str, Any]:
     """Create a workflow state dict for testing."""
     return {
         "user_id": user_id,
@@ -46,7 +47,7 @@ def create_test_workflow_state(
         "cover_letter": None,
         "current_phase": "initialization",
         "workflow_status": "initialized",
-        "processing_start_time": datetime.now(timezone.utc).isoformat(),
+        "processing_start_time": datetime.now(UTC).isoformat(),
         "processing_end_time": None,
         "agent_status": {},
         "completed_agents": [],
@@ -68,7 +69,7 @@ def mock_gemini_client():
     """Create a mock Gemini client that returns valid job analysis JSON."""
     client = AsyncMock()
     client.generate.return_value = {
-        "response": '''{
+        "response": """{
             "job_title": "Senior Software Engineer",
             "company_name": "TechCorp Inc",
             "job_city": "San Francisco",
@@ -93,7 +94,7 @@ def mock_gemini_client():
             "security_clearance": false,
             "responsibilities": ["Design scalable systems", "Lead technical projects"],
             "benefits": ["Health insurance", "401k", "Remote work"]
-        }''',
+        }""",
         "filtered": False,
     }
     return client
@@ -106,17 +107,17 @@ def sample_job_text():
     Senior Software Engineer - TechCorp Inc
     Location: San Francisco, CA (Hybrid)
     Salary: $150,000 - $200,000
-    
+
     About the Role:
     We are seeking a Senior Software Engineer to join our growing team.
     You will design and build scalable backend systems.
-    
+
     Requirements:
     - 5+ years of software development experience
     - Proficiency in Python and JavaScript
     - Experience with AWS and cloud services
     - Strong communication skills
-    
+
     Benefits:
     - Competitive salary
     - Health insurance
@@ -176,12 +177,13 @@ class TestManualInputProcessing:
     ):
         """Test successful processing of manual job text."""
         agent = JobAnalyzerAgent(gemini_client=mock_gemini_client)
-        
+
         # Mock the cache functions
-        with patch('agents.job_analyzer.get_cached_job_analysis', return_value=None), \
-             patch('agents.job_analyzer.cache_job_analysis', return_value=None):
+        with patch(
+            "agents.job_analyzer.get_cached_job_analysis", return_value=None
+        ), patch("agents.job_analyzer.cache_job_analysis", return_value=None):
             result = await agent.process(workflow_state_manual)
-        
+
         assert "job_analysis" in result
         assert result["job_analysis"]["job_title"] == "Senior Software Engineer"
 
@@ -189,12 +191,12 @@ class TestManualInputProcessing:
     async def test_process_manual_input_too_short(self, mock_gemini_client):
         """Test that short job text raises error."""
         agent = JobAnalyzerAgent(gemini_client=mock_gemini_client)
-        
+
         state = create_test_workflow_state(
             input_method="manual",
             job_content="Too short",
         )
-        
+
         with pytest.raises(ValueError, match="too short|minimum"):
             await agent.process(state)
 
@@ -204,11 +206,12 @@ class TestManualInputProcessing:
     ):
         """Test successful processing of extension-extracted content."""
         agent = JobAnalyzerAgent(gemini_client=mock_gemini_client)
-        
-        with patch('agents.job_analyzer.get_cached_job_analysis', return_value=None), \
-             patch('agents.job_analyzer.cache_job_analysis', return_value=None):
+
+        with patch(
+            "agents.job_analyzer.get_cached_job_analysis", return_value=None
+        ), patch("agents.job_analyzer.cache_job_analysis", return_value=None):
             result = await agent.process(workflow_state_extension)
-        
+
         assert "job_analysis" in result
 
 
@@ -226,15 +229,17 @@ class TestJobAnalysisCaching:
     ):
         """Test that cached results are returned when available."""
         agent = JobAnalyzerAgent(gemini_client=mock_gemini_client)
-        
+
         cached_data = {
             "job_title": "Cached Job",
             "company_name": "Cached Company",
         }
-        
-        with patch('agents.job_analyzer.get_cached_job_analysis', return_value=cached_data):
+
+        with patch(
+            "agents.job_analyzer.get_cached_job_analysis", return_value=cached_data
+        ):
             result = await agent.process(workflow_state_manual)
-        
+
         assert result["job_analysis"]["job_title"] == "Cached Job"
         assert result["job_analysis"]["from_cache"] is True
 
@@ -251,10 +256,10 @@ class TestErrorHandling:
     async def test_missing_job_input_data_raises_error(self, mock_gemini_client):
         """Test that missing job input data raises error."""
         agent = JobAnalyzerAgent(gemini_client=mock_gemini_client)
-        
+
         state = create_test_workflow_state()
         state["job_input_data"] = None
-        
+
         with pytest.raises((ValueError, KeyError, TypeError)):
             await agent.process(state)
 
@@ -262,11 +267,11 @@ class TestErrorHandling:
     async def test_invalid_input_method_raises_error(self, mock_gemini_client):
         """Test that invalid input method raises error."""
         agent = JobAnalyzerAgent(gemini_client=mock_gemini_client)
-        
+
         state = create_test_workflow_state(
             input_method="invalid_method",
         )
-        
+
         with pytest.raises((ValueError, KeyError)):
             await agent.process(state)
 
@@ -284,9 +289,9 @@ class TestLLMResponseParsing:
         """Test parsing valid JSON from LLM response."""
         agent = JobAnalyzerAgent(gemini_client=mock_gemini_client)
         agent._current_user_api_key = None  # Initialize the attribute
-        
+
         result = await agent._parse_generic_job_content(sample_job_text, "manual")
-        
+
         assert result.job_title == "Senior Software Engineer"
         assert result.company_name == "TechCorp Inc"
         assert "Python" in result.required_skills
@@ -299,13 +304,45 @@ class TestLLMResponseParsing:
             "response": "Content filtered",
             "filtered": True,
         }
-        
+
         agent = JobAnalyzerAgent(gemini_client=client)
         agent._current_user_api_key = None
-        
+
         # Should handle gracefully or raise specific error
         with pytest.raises(Exception):
             await agent._parse_generic_job_content(sample_job_text, "manual")
+
+    @pytest.mark.asyncio
+    async def test_parse_without_usable_title_raises_error(self, sample_job_text):
+        """Do not complete a workflow that would create an unnamed dashboard card."""
+        client = AsyncMock()
+        client.generate.return_value = {
+            "response": '{"job_title": null, "company_name": null}',
+            "filtered": False,
+        }
+        agent = JobAnalyzerAgent(gemini_client=client)
+        agent._current_user_api_key = None
+
+        with pytest.raises(ValueError, match="usable job title"):
+            await agent._parse_generic_job_content(sample_job_text, "manual")
+
+    @pytest.mark.asyncio
+    async def test_local_provider_forces_local_generation(
+        self, mock_gemini_client, sample_job_text
+    ):
+        agent = JobAnalyzerAgent(gemini_client=mock_gemini_client)
+        agent._current_user_api_key = None
+
+        await agent._parse_generic_job_content(
+            sample_job_text,
+            "manual",
+            user_model="gpt-oss:20b",
+            force_local=True,
+            local_reasoning_effort="medium",
+        )
+
+        assert mock_gemini_client.generate.call_args.kwargs["force_local"] is True
+        assert mock_gemini_client.generate.call_args.kwargs["model"] == "gpt-oss:20b"
 
 
 # =============================================================================
@@ -317,7 +354,9 @@ class TestJobAnalyzerAdditional:
     """Additional coverage for edge cases not covered in base tests."""
 
     @pytest.mark.asyncio
-    async def test_user_api_key_passed_to_llm(self, mock_gemini_client, sample_job_text):
+    async def test_user_api_key_passed_to_llm(
+        self, mock_gemini_client, sample_job_text
+    ):
         """User API key should reach the internal LLM call."""
         agent = JobAnalyzerAgent(gemini_client=mock_gemini_client)
 
@@ -327,8 +366,9 @@ class TestJobAnalyzerAdditional:
         )
         state["user_api_key"] = "byok-key"
 
-        with patch("agents.job_analyzer.get_cached_job_analysis", return_value=None), \
-             patch("agents.job_analyzer.cache_job_analysis", return_value=None):
+        with patch(
+            "agents.job_analyzer.get_cached_job_analysis", return_value=None
+        ), patch("agents.job_analyzer.cache_job_analysis", return_value=None):
             await agent.process(state)
 
         assert mock_gemini_client.generate.called
@@ -351,7 +391,9 @@ class TestJobAnalyzerAdditional:
                 await agent.process(state)
 
     @pytest.mark.asyncio
-    async def test_process_extension_with_short_text_raises_error(self, mock_gemini_client):
+    async def test_process_extension_with_short_text_raises_error(
+        self, mock_gemini_client
+    ):
         """Extension input that is too short should also raise ValueError."""
         agent = JobAnalyzerAgent(gemini_client=mock_gemini_client)
 

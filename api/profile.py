@@ -6,39 +6,55 @@ Provides 4-step profile setup with validation, completion tracking, and comprehe
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
+from datetime import UTC, datetime
 from enum import Enum
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, validator, field_validator, ValidationInfo, model_validator
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, delete as sa_delete, func
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy.sql.functions import count
 
-from utils.auth import get_current_user, invalidate_all_user_tokens
-from utils.database import get_database
 from config.settings import get_settings
-from utils.json_utils import serialize_object_for_json
-from utils.resume_parser import parse_resume_from_file, SUPPORTED_EXTENSIONS
-from utils.user_resume_storage import delete_resume_file, resume_absolute_path, save_resume_bytes
+from models.database import User, UserWorkflowPreferences
+from models.database import UserProfile as UserProfileModel
+from utils.auth import get_current_user, invalidate_all_user_tokens
 from utils.cache import (
-    get_cached_user_profile,
     cache_user_profile,
-    invalidate_user_profile,
-    invalidate_user_llm_cache,
     check_rate_limit,
+    get_cached_user_profile,
+    invalidate_user_llm_cache,
+    invalidate_user_profile,
 )
+from utils.database import get_database
 from utils.encryption import (
-    encrypt_api_key,
     decrypt_api_key,
+    encrypt_api_key,
+)
+from utils.error_responses import (
+    APIError,
+    ErrorCode,
+    internal_error,
+    no_api_key_error,
+    not_found_error,
+    not_implemented_error,
+    rate_limit_error,
+    validation_error,
 )
 from utils.gemini_api_key_format import validate_gemini_api_key
+from utils.json_utils import serialize_object_for_json
 from utils.logging_config import get_structured_logger, mask_email
-from utils.error_responses import APIError, ErrorCode, internal_error, no_api_key_error, not_found_error, not_implemented_error, rate_limit_error, validation_error
-from models.database import User, UserProfile as UserProfileModel, JobApplication, WorkflowSession, UserWorkflowPreferences
+from utils.resume_parser import SUPPORTED_EXTENSIONS, parse_resume_from_file
+from utils.user_resume_storage import (
+    delete_resume_file,
+    resume_absolute_path,
+    save_resume_bytes,
+)
 
 logger = logging.getLogger(__name__)
 structured_logger = get_structured_logger(__name__)
@@ -62,12 +78,13 @@ def _get_user_resume_asset_model():
         logger.exception("Failed to import UserResumeAsset from models.database")
         return None
 
+
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
 
-def get_user_id_from_token(current_user: Dict[str, Any]) -> uuid.UUID:
+def get_user_id_from_token(current_user: dict[str, Any]) -> uuid.UUID:
     """
     Safely extract user ID from current_user object, checking both 'id' and '_id' keys.
     Converts to UUID for consistency in PostgreSQL operations.
@@ -125,6 +142,10 @@ _VALID_WORK_AUTHORIZATION = frozenset(
         "has_work_authorization",
         "us_lawful_permanent_resident",
         "us_citizen",
+        "requires_sponsorship",
+        "authorized_to_work",
+        "citizen_or_permanent_resident",
+        "other_work_authorization",
     }
 )
 # Maximum allowed salary (upper sanity limit) for desired salary validation
@@ -138,10 +159,10 @@ MIN_WORK_ARRANGEMENT_ITEMS: int = 1
 # Resume upload limits and magic-bytes validation
 MAX_RESUME_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB
 # Maps allowed extension → required leading magic bytes (None = no fixed signature)
-_RESUME_MAGIC: Dict[str, Optional[bytes]] = {
-    "pdf":  b"%PDF",
+_RESUME_MAGIC: dict[str, bytes | None] = {
+    "pdf": b"%PDF",
     "docx": b"PK\x03\x04",  # DOCX/XLSX/PPTX are ZIP-based
-    "txt":  None,            # UTF-8 text has no fixed signature
+    "txt": None,  # UTF-8 text has no fixed signature
 }
 # Legacy Word 97–2003 binary (.doc) — OLE compound document; not supported (use .docx or PDF).
 _MS_WORD_DOC_MAGIC_PREFIX: bytes = b"\xd0\xcf\x11\xe0"
@@ -181,8 +202,8 @@ def _validate_professional_name(value: str, field_name: str) -> str:
 
 
 def _validate_text_field(
-    value: Optional[str], field_name: str, max_length: int
-) -> Optional[str]:
+    value: str | None, field_name: str, max_length: int
+) -> str | None:
     """Validate text fields like descriptions and summaries."""
     if not value:
         return None
@@ -204,7 +225,7 @@ def _validate_text_field(
     return text.strip()
 
 
-def _validate_location(v: Optional[str], field_name: str) -> Optional[str]:
+def _validate_location(v: str | None, field_name: str) -> str | None:
     """Validate and normalize location format."""
     if v is None:
         return None
@@ -228,10 +249,12 @@ def _validate_profile_url_field(value: str, field_label: str) -> None:
     if not t.startswith(("http://", "https://")):
         raise ValueError(f"{field_label} must start with http:// or https://")
     if len(t) > MAX_PROFILE_URL_LENGTH:
-        raise ValueError(f"{field_label} cannot exceed {MAX_PROFILE_URL_LENGTH} characters")
+        raise ValueError(
+            f"{field_label} cannot exceed {MAX_PROFILE_URL_LENGTH} characters"
+        )
 
 
-def _blank_to_none(value: Optional[str]) -> Optional[str]:
+def _blank_to_none(value: str | None) -> str | None:
     if value is None:
         return None
     t = str(value).strip()
@@ -313,7 +336,7 @@ class BasicInfoRequest(BaseModel):
         max_length=MAX_TITLE_LENGTH,
         description="Professional title or headline",
     )
-    years_experience: int = Field(
+    years_experience: float = Field(
         ...,
         ge=0,
         le=MAX_YEARS_EXPERIENCE,
@@ -335,46 +358,53 @@ class BasicInfoRequest(BaseModel):
     github_url: str = Field(default="", max_length=MAX_PROFILE_URL_LENGTH)
     portfolio_url: str = Field(default="", max_length=MAX_PROFILE_URL_LENGTH)
 
-    @validator("city")
+    @field_validator("city")
+    @classmethod
     def validate_city(cls, v: str) -> str:
         result = _validate_location(v, "City")
         if result is None:
             raise ValueError("City cannot be empty")
         return result
 
-    @validator("state")
+    @field_validator("state")
+    @classmethod
     def validate_state(cls, v: str) -> str:
         result = _validate_location(v, "State")
         if result is None:
             raise ValueError("State cannot be empty")
         return result
 
-    @validator("country")
+    @field_validator("country")
+    @classmethod
     def validate_country(cls, v: str) -> str:
         result = _validate_location(v, "Country")
         if result is None:
             raise ValueError("Country cannot be empty")
         return result
 
-    @validator("professional_title")
+    @field_validator("professional_title")
+    @classmethod
     def validate_professional_title(cls, v: str) -> str:
         return _validate_professional_name(v, "Professional title")
 
-    @validator("years_experience")
-    def validate_years_experience(cls, v: int) -> int:
+    @field_validator("years_experience")
+    @classmethod
+    def validate_years_experience(cls, v: float) -> float:
         if v < 0:
             raise ValueError("Years of experience cannot be negative")
         if v > MAX_YEARS_EXPERIENCE:
             raise ValueError(
                 f"Years of experience cannot exceed {MAX_YEARS_EXPERIENCE} years"
             )
-        return v
+        return round(v, 1)
 
-    @validator("summary")
-    def validate_summary(cls, v: Optional[str]) -> Optional[str]:
+    @field_validator("summary")
+    @classmethod
+    def validate_summary(cls, v: str | None) -> str | None:
         return _validate_text_field(v, "Professional summary", MAX_SUMMARY_LENGTH)
 
-    @validator("phone")
+    @field_validator("phone")
+    @classmethod
     def validate_phone(cls, v: str) -> str:
         if not v:
             return ""
@@ -383,21 +413,24 @@ class BasicInfoRequest(BaseModel):
             raise ValueError(f"Phone cannot exceed {MAX_PHONE_LENGTH} characters")
         return t
 
-    @validator("linkedin_url")
+    @field_validator("linkedin_url")
+    @classmethod
     def validate_linkedin_url(cls, v: str) -> str:
         if not v or not str(v).strip():
             return ""
         _validate_profile_url_field(str(v), "LinkedIn URL")
         return str(v).strip()[:MAX_PROFILE_URL_LENGTH]
 
-    @validator("github_url")
+    @field_validator("github_url")
+    @classmethod
     def validate_github_url(cls, v: str) -> str:
         if not v or not str(v).strip():
             return ""
         _validate_profile_url_field(str(v), "GitHub")
         return str(v).strip()[:MAX_PROFILE_URL_LENGTH]
 
-    @validator("portfolio_url")
+    @field_validator("portfolio_url")
+    @classmethod
     def validate_portfolio_url(cls, v: str) -> str:
         if not v or not str(v).strip():
             return ""
@@ -426,13 +459,13 @@ class WorkExperienceItem(BaseModel):
         max_length=7,
         description="Employment start date in YYYY-MM format",
     )
-    end_date: Optional[str] = Field(
+    end_date: str | None = Field(
         None,
         min_length=7,
         max_length=7,
         description="Employment end date in YYYY-MM format or 'Present' for current position",
     )
-    description: Optional[str] = Field(
+    description: str | None = Field(
         None,
         min_length=MIN_LENGTH,
         max_length=MAX_DESCRIPTION_LENGTH,
@@ -440,15 +473,18 @@ class WorkExperienceItem(BaseModel):
     )
     is_current: bool = Field(False, description="Whether this is the current position")
 
-    @validator("company")
+    @field_validator("company")
+    @classmethod
     def validate_company(cls, v: str) -> str:
         return _validate_professional_name(v, "Company name")
 
-    @validator("job_title")
+    @field_validator("job_title")
+    @classmethod
     def validate_job_title(cls, v: str) -> str:
         return _validate_professional_name(v, "Job title")
 
-    @validator("start_date")
+    @field_validator("start_date")
+    @classmethod
     def validate_start_date(cls, v: str) -> str:
         if not v:
             raise ValueError("Start date is required")
@@ -469,16 +505,19 @@ class WorkExperienceItem(BaseModel):
         if not (1 <= month <= 12):
             raise ValueError("Start date month must be between 01 and 12")
 
-        parsed_date: datetime = datetime.strptime(start_date, "%Y-%m").replace(tzinfo=timezone.utc)
-        current_date: datetime = datetime.now(timezone.utc)
+        parsed_date: datetime = datetime.strptime(start_date, "%Y-%m").replace(
+            tzinfo=UTC
+        )
+        current_date: datetime = datetime.now(UTC)
 
         if parsed_date > current_date:
             raise ValueError("Start date cannot be in the future")
 
         return start_date
 
-    @validator("end_date")
-    def validate_end_date(cls, v: Optional[str], values: dict) -> Optional[str]:
+    @field_validator("end_date")
+    @classmethod
+    def validate_end_date(cls, v: str | None, values: dict) -> str | None:
         if not v:
             return None
 
@@ -492,19 +531,21 @@ class WorkExperienceItem(BaseModel):
         except ValueError:
             raise ValueError('End date must be in YYYY-MM format or "Present"')
 
-        current_date = datetime.now(timezone.utc)
-        max_future_date = datetime(current_date.year + 1, 12, 31, tzinfo=timezone.utc)
-        parsed_end_date = parsed_end_date.replace(tzinfo=timezone.utc)
+        current_date = datetime.now(UTC)
+        max_future_date = datetime(current_date.year + 1, 12, 31, tzinfo=UTC)
+        parsed_end_date = parsed_end_date.replace(tzinfo=UTC)
         if parsed_end_date > max_future_date:
             raise ValueError("End date cannot be more than 1 year in the future")
 
         return end_date
 
-    @validator("description")
-    def validate_description(cls, v: Optional[str]) -> Optional[str]:
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, v: str | None) -> str | None:
         return _validate_text_field(v, "Job description", 2000)
 
-    @validator("is_current")
+    @field_validator("is_current")
+    @classmethod
     def validate_is_current(cls, v: bool, values: dict) -> bool:
         if v:
             end_date = values.get("end_date")
@@ -518,16 +559,17 @@ class WorkExperienceItem(BaseModel):
 class WorkExperienceRequest(BaseModel):
     """Work experience step request model."""
 
-    work_experience: List[WorkExperienceItem] = Field(
+    work_experience: list[WorkExperienceItem] = Field(
         default_factory=list,
         max_items=MAX_WORK_EXPERIENCE_ITEMS,
         description="List of work experience entries",
     )
 
-    @validator("work_experience")
+    @field_validator("work_experience")
+    @classmethod
     def validate_work_experience_list(
-        cls, v: List[WorkExperienceItem]
-    ) -> List[WorkExperienceItem]:
+        cls, v: list[WorkExperienceItem]
+    ) -> list[WorkExperienceItem]:
         if not v:
             return v
 
@@ -555,11 +597,10 @@ class EducationItem(BaseModel):
         max_length=MAX_TITLE_LENGTH,
         description="Degree or qualification",
     )
-    field_of_study: str = Field(
-        ...,
-        min_length=MIN_LENGTH,
+    field_of_study: str | None = Field(
+        None,
         max_length=MAX_FIELD_OF_STUDY_LENGTH,
-        description="Major or field of study (required)",
+        description="Major or field of study (optional)",
     )
     start_date: str = Field(
         ...,
@@ -567,29 +608,37 @@ class EducationItem(BaseModel):
         max_length=7,
         description="Start date in YYYY-MM format (required)",
     )
-    end_date: Optional[str] = Field(
+    end_date: str | None = Field(
         None,
         max_length=7,
         description="End / graduation date in YYYY-MM format",
     )
     is_current: bool = Field(False, description="Currently enrolled")
 
-    @validator("institution")
+    @field_validator("institution")
+    @classmethod
     def validate_institution(cls, v: str) -> str:
         return _validate_professional_name(v, "Institution")
 
-    @validator("degree")
+    @field_validator("degree")
+    @classmethod
     def validate_degree(cls, v: str) -> str:
         return _validate_professional_name(v, "Degree")
 
-    @validator("field_of_study")
-    def validate_field_of_study(cls, v: str) -> str:
+    @field_validator("field_of_study")
+    @classmethod
+    def validate_field_of_study(cls, v: str | None) -> str | None:
+        if v is None or not str(v).strip():
+            return None
         ft = _validate_professional_name(v, "Field of study")
         if len(ft) > MAX_FIELD_OF_STUDY_LENGTH:
-            raise ValueError(f"Field of study cannot exceed {MAX_FIELD_OF_STUDY_LENGTH} characters")
+            raise ValueError(
+                f"Field of study cannot exceed {MAX_FIELD_OF_STUDY_LENGTH} characters"
+            )
         return ft
 
-    @validator("start_date")
+    @field_validator("start_date")
+    @classmethod
     def validate_edu_start_date(cls, v: str) -> str:
         if not v or not str(v).strip():
             raise ValueError("Start date is required")
@@ -604,14 +653,17 @@ class EducationItem(BaseModel):
             raise ValueError("Start date year must be between 1900 and 2100")
         if not (1 <= month <= 12):
             raise ValueError("Start date month must be between 01 and 12")
-        parsed_date: datetime = datetime.strptime(start_date, "%Y-%m").replace(tzinfo=timezone.utc)
-        current_date: datetime = datetime.now(timezone.utc)
+        parsed_date: datetime = datetime.strptime(start_date, "%Y-%m").replace(
+            tzinfo=UTC
+        )
+        current_date: datetime = datetime.now(UTC)
         if parsed_date > current_date:
             raise ValueError("Start date cannot be in the future")
         return start_date
 
-    @validator("end_date")
-    def validate_edu_end_date(cls, v: Optional[str], values: dict) -> Optional[str]:
+    @field_validator("end_date")
+    @classmethod
+    def validate_edu_end_date(cls, v: str | None, info: ValidationInfo) -> str | None:
         if not v:
             return None
         end_date = v.strip()
@@ -619,16 +671,16 @@ class EducationItem(BaseModel):
             parsed_end_date = datetime.strptime(end_date, "%Y-%m")
         except ValueError:
             raise ValueError("End date must be in YYYY-MM format")
-        current_date = datetime.now(timezone.utc)
-        max_future_date = datetime(current_date.year + 1, 12, 31, tzinfo=timezone.utc)
-        parsed_end_date = parsed_end_date.replace(tzinfo=timezone.utc)
+        current_date = datetime.now(UTC)
+        max_future_date = datetime(current_date.year + 1, 12, 31, tzinfo=UTC)
+        parsed_end_date = parsed_end_date.replace(tzinfo=UTC)
         if parsed_end_date > max_future_date:
             raise ValueError("End date cannot be more than 1 year in the future")
-        start_raw = values.get("start_date")
+        start_raw = info.data.get("start_date")
         if start_raw and isinstance(start_raw, str):
             try:
                 parsed_start = datetime.strptime(start_raw.strip(), "%Y-%m").replace(
-                    tzinfo=timezone.utc
+                    tzinfo=UTC
                 )
                 if parsed_end_date <= parsed_start:
                     raise ValueError("End date must be after start date")
@@ -638,8 +690,21 @@ class EducationItem(BaseModel):
                 pass
         return end_date
 
-    @validator("is_current")
+    @field_validator("is_current")
+    @classmethod
     def validate_edu_is_current(cls, v: bool, values: dict) -> bool:
+        """_summary_
+
+        Args:
+            v (bool): _description_
+            values (dict): _description_
+
+        Raises:
+            ValueError: _description_
+
+        Returns:
+            bool: _description_
+        """
         if v:
             end_date = values.get("end_date")
             if end_date and str(end_date).strip():
@@ -661,7 +726,7 @@ class EducationItem(BaseModel):
 class EducationRequest(BaseModel):
     """Education step request model."""
 
-    education: List[EducationItem] = Field(
+    education: list[EducationItem] = Field(
         default_factory=list,
         max_items=MAX_EDUCATION_ITEMS,
         description="Education history entries",
@@ -671,19 +736,20 @@ class EducationRequest(BaseModel):
 class SkillsQualificationsRequest(BaseModel):
     """Skills and qualifications step request model."""
 
-    skills: List[str] = Field(
+    skills: list[str] = Field(
         default_factory=list,
         min_items=MIN_SKILLS_ITEMS,
         max_items=MAX_SKILLS_ITEMS,
         description="List of professional skills",
     )
 
-    @validator("skills")
-    def validate_skills_list(cls, v: List[str]) -> List[str]:
+    @field_validator("skills")
+    @classmethod
+    def validate_skills_list(cls, v: list[str]) -> list[str]:
         if not v:
             return v
 
-        validated_skills: List[str] = []
+        validated_skills: list[str] = []
         seen_skills: set = set()
 
         for skill in v:
@@ -716,22 +782,23 @@ class SkillsQualificationsRequest(BaseModel):
 class CareerPreferencesRequest(BaseModel):
     """Career preferences step request model."""
 
-    desired_salary_range: Optional[Dict[str, int]] = Field(
-        None, description="Optional minimum and/or maximum salary expectations"
+    desired_salary_range: dict[str, Any] | None = Field(
+        None,
+        description="Optional minimum and/or maximum salary expectations, with an optional ISO currency code",
     )
-    desired_company_sizes: List[CompanySize] = Field(
+    desired_company_sizes: list[CompanySize] = Field(
         default_factory=list,
         min_items=MIN_COMPANY_SIZE_ITEMS,
         max_items=MAX_COMPANY_SIZE_ITEMS,
         description="List of preferred company sizes",
     )
-    job_types: List[JobType] = Field(
+    job_types: list[JobType] = Field(
         default_factory=list,
         min_items=MIN_JOB_TYPE_ITEMS,
         max_items=MAX_JOB_TYPE_ITEMS,
         description="List of preferred employment types",
     )
-    work_arrangements: List[WorkArrangement] = Field(
+    work_arrangements: list[WorkArrangement] = Field(
         default_factory=list,
         min_items=MIN_WORK_ARRANGEMENT_ITEMS,
         max_items=MAX_WORK_ARRANGEMENT_ITEMS,
@@ -743,7 +810,7 @@ class CareerPreferencesRequest(BaseModel):
     requires_visa_sponsorship: bool = Field(
         False, description="Whether user requires visa sponsorship"
     )
-    work_authorization: Optional[str] = Field(
+    work_authorization: str | None = Field(
         default=None,
         description=(
             "no_work_authorization | has_work_authorization | "
@@ -765,6 +832,7 @@ class CareerPreferencesRequest(BaseModel):
         "max_travel_preference",
         mode="before",
     )
+    @classmethod
     def transform_enums(cls, v, info: ValidationInfo):
         if not v:
             return v
@@ -797,11 +865,14 @@ class CareerPreferencesRequest(BaseModel):
             return convert_value(v)
 
     @field_validator("desired_salary_range")
-    def validate_desired_salary_range(cls, v: Optional[Dict[str, int]]) -> Optional[Dict[str, int]]:
+    @classmethod
+    def validate_desired_salary_range(
+        cls, v: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
         if not v:
             return None
 
-        normalized: Dict[str, int] = {}
+        normalized: dict[str, Any] = {}
         for key in ("min", "max"):
             if key not in v:
                 continue
@@ -825,7 +896,20 @@ class CareerPreferencesRequest(BaseModel):
                 )
             normalized[key] = amount
 
-        if "min" in normalized and "max" in normalized and normalized["min"] >= normalized["max"]:
+        currency = v.get("currency")
+        if currency is not None:
+            currency_text = str(currency).strip().upper()
+            if not re.fullmatch(r"[A-Z]{3}|OTHER", currency_text):
+                raise ValueError(
+                    "Salary currency must be a three-letter currency code or Other"
+                )
+            normalized["currency"] = currency_text
+
+        if (
+            "min" in normalized
+            and "max" in normalized
+            and normalized["min"] >= normalized["max"]
+        ):
             raise ValueError("Minimum salary must be less than maximum salary")
 
         return normalized or None
@@ -840,8 +924,8 @@ class CareerPreferencesRequest(BaseModel):
         if wa not in _VALID_WORK_AUTHORIZATION:
             raise ValueError(
                 "work_authorization must be one of: "
-                "no_work_authorization, has_work_authorization, "
-                "us_lawful_permanent_resident, us_citizen"
+                "requires_sponsorship, authorized_to_work, citizen_or_permanent_resident, "
+                "other_work_authorization"
             )
         object.__setattr__(self, "work_authorization", wa)
         return self
@@ -852,19 +936,19 @@ class ProfileStatusResponse(BaseModel):
 
     profile_completed: bool = Field(..., description="Whether profile is completed")
     completion_percentage: int = Field(..., description="Completion percentage")
-    completed_steps: List[str] = Field(..., description="List of completed steps")
-    missing_steps: List[str] = Field(..., description="List of missing steps")
-    next_step: Optional[str] = Field(None, description="Next recommended step")
+    completed_steps: list[str] = Field(..., description="List of completed steps")
+    missing_steps: list[str] = Field(..., description="List of missing steps")
+    next_step: str | None = Field(None, description="Next recommended step")
 
 
 class ProfileDataResponse(BaseModel):
     """Complete profile data response."""
 
-    user_info: Dict[str, Any] = Field(
+    user_info: dict[str, Any] = Field(
         ...,
         description="Authentication data (id, email, full_name, created_at, auth_method)",
     )
-    profile_data: Dict[str, Any] = Field(
+    profile_data: dict[str, Any] = Field(
         ..., description="Complete profile data from user_profiles table"
     )
     completion_status: ProfileStatusResponse = Field(
@@ -881,19 +965,19 @@ class ResumeParseResponse(BaseModel):
     """Response model for resume parsing endpoint."""
 
     success: bool = Field(..., description="Whether parsing was successful")
-    data: Optional[Dict[str, Any]] = Field(
+    data: dict[str, Any] | None = Field(
         None, description="Parsed profile data from resume"
     )
     message: str = Field(..., description="Status message")
-    confidence: Optional[str] = Field(
+    confidence: str | None = Field(
         None, description="Parsing confidence: HIGH, MEDIUM, or LOW"
     )
-    processing_time: Optional[float] = Field(
+    processing_time: float | None = Field(
         None, description="Time taken to parse in seconds"
     )
 
 
-_MIME_BY_RESUME_EXT: Dict[str, str] = {
+_MIME_BY_RESUME_EXT: dict[str, str] = {
     "pdf": "application/pdf",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "txt": "text/plain; charset=utf-8",
@@ -902,11 +986,15 @@ _MIME_BY_RESUME_EXT: Dict[str, str] = {
 
 def _merge_resume_contact_into_profile_if_empty(
     prof: UserProfileModel,
-    parsed: Dict[str, Any],
+    parsed: dict[str, Any],
 ) -> None:
     """Fill phone / profile URLs from resume parse only when DB fields are empty."""
     p_phone = parsed.get("phone")
-    if isinstance(p_phone, str) and p_phone.strip() and not (prof.phone and prof.phone.strip()):
+    if (
+        isinstance(p_phone, str)
+        and p_phone.strip()
+        and not (prof.phone and prof.phone.strip())
+    ):
         prof.phone = p_phone.strip()[:MAX_PHONE_LENGTH]
 
     for fld in ("linkedin_url", "github_url", "portfolio_url"):
@@ -937,7 +1025,9 @@ async def _upsert_user_resume_asset(
     UserResumeAsset = _get_user_resume_asset_model()
     row = None
     if UserResumeAsset is not None:
-        res = await db.execute(select(UserResumeAsset).where(UserResumeAsset.user_id == user_id))
+        res = await db.execute(
+            select(UserResumeAsset).where(UserResumeAsset.user_id == user_id)
+        )
         row = res.scalar_one_or_none()
     safe_name = (filename or "resume")[:255]
     if row:
@@ -947,7 +1037,7 @@ async def _upsert_user_resume_asset(
         row.mime_type = mime[:100]
         row.byte_size = len(content)
         row.sha256_hex = sha_hex
-        row.updated_at = datetime.now(timezone.utc)
+        row.updated_at = datetime.now(UTC)
     else:
         if UserResumeAsset is None:
             logger.warning(
@@ -971,10 +1061,16 @@ async def _upsert_user_resume_asset(
 @router.post("/parse-resume", response_model=ResumeParseResponse)
 async def parse_resume_endpoint(
     resume: UploadFile = File(..., description="Resume file (PDF, DOCX, or TXT)"),
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    api_key: str | None = Form(
+        None, description="One-time Gemini API key for this resume parse"
+    ),
+    use_gemini: bool = Form(
+        False, description="Use Gemini first; otherwise use the local LLM"
+    ),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
-    """Parse a resume file and extract structured profile data."""
+    """Parse a resume locally by default, or with opt-in Gemini then local fallback."""
     try:
         user_id = get_user_id_from_token(current_user)
 
@@ -985,7 +1081,10 @@ async def parse_resume_endpoint(
             window_seconds=3600,
         )
         if not is_allowed:
-            raise rate_limit_error("Too many resume parse attempts. Please try again later.", retry_after=3600)
+            raise rate_limit_error(
+                "Too many resume parse attempts. Please try again later.",
+                retry_after=3600,
+            )
 
         # Validate file shape before API key — users should see format errors even when BYOK/server key is missing.
         if not resume.filename:
@@ -995,7 +1094,9 @@ async def parse_resume_endpoint(
         if file_extension == "doc":
             raise validation_error(_LEGACY_DOC_USER_MSG)
         if file_extension not in SUPPORTED_EXTENSIONS:
-            raise validation_error(f"Unsupported file format. Supported formats: {', '.join(SUPPORTED_EXTENSIONS)}")
+            raise validation_error(
+                f"Unsupported file format. Supported formats: {', '.join(SUPPORTED_EXTENSIONS)}"
+            )
 
         content = await resume.read()
 
@@ -1003,7 +1104,11 @@ async def parse_resume_endpoint(
             raise validation_error("Uploaded file is empty")
 
         if len(content) > MAX_RESUME_SIZE_BYTES:
-            raise APIError(ErrorCode.VALIDATION_ERROR, f"File is too large. Maximum size is {MAX_RESUME_SIZE_BYTES // (1024 * 1024)} MB.", status_code=413)
+            raise APIError(
+                ErrorCode.VALIDATION_ERROR,
+                f"File is too large. Maximum size is {MAX_RESUME_SIZE_BYTES // (1024 * 1024)} MB.",
+                status_code=413,
+            )
 
         # Validate actual file content matches the declared extension (prevents spoofing)
         expected_magic = _RESUME_MAGIC.get(file_extension)
@@ -1020,26 +1125,63 @@ async def parse_resume_endpoint(
             except UnicodeDecodeError:
                 raise validation_error("TXT files must be UTF-8 encoded.")
 
-        # Resolve the user's BYOK key (if any) so the LLM call uses it.
-        user_api_key = None
-        user_result = await db.execute(select(User).where(User.id == user_id))
-        user_record = user_result.scalar_one_or_none()
-        if user_record and user_record.gemini_api_key_encrypted:
+        # A setup key is request-scoped: it is used for this parse only and is
+        # never written to the user record or logs.
+        user_api_key = api_key.strip() if use_gemini and api_key else None
+        if user_api_key and not validate_gemini_api_key(user_api_key):
+            raise validation_error(
+                "Invalid API key format. Please check your Gemini API key."
+            )
+
+        # A deliberately saved Settings key remains an opt-in fallback for
+        # ongoing AI features outside the one-time setup flow.
+        user_record = None
+        if use_gemini:
+            user_result = await db.execute(select(User).where(User.id == user_id))
+            user_record = user_result.scalar_one_or_none()
+        if (
+            use_gemini
+            and not user_api_key
+            and user_record
+            and user_record.gemini_api_key_encrypted
+        ):
             try:
                 user_api_key = decrypt_api_key(user_record.gemini_api_key_encrypted)
             except Exception as e:
                 logger.warning(f"Failed to decrypt user API key for resume parse: {e}")
 
-        server_has_key = bool(getattr(settings, 'gemini_api_key', None)) or settings.use_vertex_ai
-        if not user_api_key and not server_has_key:
+        server_has_key = (
+            bool(getattr(settings, "gemini_api_key", None)) or settings.use_vertex_ai
+        )
+        local_llm_available = bool(settings.local_llm_url and settings.local_llm_model)
+        if (
+            use_gemini
+            and not user_api_key
+            and not server_has_key
+            and not local_llm_available
+        ):
             raise no_api_key_error()
+        if not use_gemini and not local_llm_available:
+            raise validation_error(
+                "Local resume parsing is not configured. Enable Gemini for this resume or configure a local LLM."
+            )
+
+        # The preceding key lookup opens a transaction. Release its connection
+        # before the potentially long LLM request so PostgreSQL cannot close an
+        # idle connection and turn an otherwise successful parse into a 500.
+        await db.rollback()
 
         logger.info(
             f"Parsing resume for user {current_user.get('id')}: "
             f"{resume.filename} ({len(content)} bytes)"
         )
 
-        parsed_data = await parse_resume_from_file(content, resume.filename, user_api_key=user_api_key)
+        parsed_data = await parse_resume_from_file(
+            content,
+            resume.filename,
+            user_api_key=user_api_key,
+            prefer_local=not use_gemini,
+        )
 
         try:
             await _upsert_user_resume_asset(
@@ -1049,15 +1191,25 @@ async def parse_resume_endpoint(
                 resume.filename or "resume.dat",
                 file_extension,
             )
-            prof_r = await db.execute(select(UserProfileModel).where(UserProfileModel.user_id == user_id))
+            prof_r = await db.execute(
+                select(UserProfileModel).where(UserProfileModel.user_id == user_id)
+            )
             prof = prof_r.scalar_one_or_none()
             if prof:
                 _merge_resume_contact_into_profile_if_empty(prof, parsed_data)
-                prof.updated_at = datetime.now(timezone.utc)
+                prof.updated_at = datetime.now(UTC)
             await db.commit()
             await invalidate_user_profile(str(user_id))
         except Exception as merge_err:
-            await db.rollback()
+            # Resume parsing already succeeded. Persistence is best-effort, and
+            # a closed DB connection must not hide the parsed result from the user.
+            try:
+                await db.rollback()
+            except Exception as rollback_err:
+                logger.warning(
+                    "Resume persistence rollback failed after parse success: %s",
+                    rollback_err,
+                )
             logger.warning(
                 "Resume parse succeeded but persist/merge failed: %s",
                 merge_err,
@@ -1081,26 +1233,32 @@ async def parse_resume_endpoint(
 
     except Exception as e:
         logger.error(f"Resume parsing failed: {e}", exc_info=True)
-        raise internal_error("Failed to parse resume. Please try again or enter your information manually.")
+        raise internal_error(
+            "Failed to parse resume. Please try again or enter your information manually."
+        )
 
 
 @router.get("/resume")
 async def download_stored_resume(
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """Download the user's stored resume file (from parse-resume or future uploads)."""
     user_id = get_user_id_from_token(current_user)
-    UserResumeAsset = _get_user_resume_asset_model()
-    if UserResumeAsset is None:
+    user_resume_asset = _get_user_resume_asset_model()
+    if user_resume_asset is None:
         # Model not available (migration/runtime); behave as if no stored resume
         raise not_found_error(resource_type="Stored resume")
-    res = await db.execute(select(UserResumeAsset).where(UserResumeAsset.user_id == user_id))
+    res = await db.execute(
+        select(user_resume_asset).where(user_resume_asset.user_id == user_id)
+    )
     row = res.scalar_one_or_none()
     if not row:
         raise not_found_error(resource_type="Stored resume")
     try:
-        path = resume_absolute_path(settings.user_resume_storage_dir, row.storage_relative_path)
+        path = resume_absolute_path(
+            settings.user_resume_storage_dir, row.storage_relative_path
+        )
     except ValueError as e:
         logger.warning("Invalid resume storage path for user %s: %s", user_id, e)
         raise not_found_error(resource_type="Stored resume")
@@ -1115,21 +1273,25 @@ async def download_stored_resume(
 
 @router.delete("/resume")
 async def delete_stored_resume(
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """Remove stored resume file metadata and on-disk bytes."""
     user_id = get_user_id_from_token(current_user)
-    UserResumeAsset = _get_user_resume_asset_model()
-    if UserResumeAsset is None:
+    user_resume_asset = _get_user_resume_asset_model()
+    if user_resume_asset is None:
         # Model not available; cannot delete DB metadata
         raise not_found_error(resource_type="Stored resume")
-    res = await db.execute(select(UserResumeAsset).where(UserResumeAsset.user_id == user_id))
+    res = await db.execute(
+        select(user_resume_asset).where(user_resume_asset.user_id == user_id)
+    )
     row = res.scalar_one_or_none()
     if not row:
         raise not_found_error(resource_type="Stored resume")
     delete_resume_file(settings.user_resume_storage_dir, row.storage_relative_path)
-    await db.execute(sa_delete(UserResumeAsset).where(UserResumeAsset.user_id == user_id))
+    await db.execute(
+        sa_delete(user_resume_asset).where(user_resume_asset.user_id == user_id)
+    )
     await db.commit()
     await invalidate_user_profile(str(user_id))
     return {"message": "Resume file deleted"}
@@ -1142,7 +1304,7 @@ async def delete_stored_resume(
 
 @router.get("/")
 async def get_profile_data(
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """Get complete user profile data with Redis caching."""
@@ -1197,7 +1359,9 @@ async def get_profile_data(
         UserResumeAsset = _get_user_resume_asset_model()
         resume_row = None
         if UserResumeAsset is not None:
-            resume_q = await db.execute(select(UserResumeAsset).where(UserResumeAsset.user_id == user_id))
+            resume_q = await db.execute(
+                select(UserResumeAsset).where(UserResumeAsset.user_id == user_id)
+            )
             resume_row = resume_q.scalar_one_or_none()
         if resume_row:
             profile_data["resume_file"] = {"has_file": True, **resume_row.to_dict()}
@@ -1226,7 +1390,7 @@ async def get_profile_data(
 @router.put("/basic-info")
 async def update_basic_info(
     basic_info: BasicInfoRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """Update basic user information (Step 1 of profile setup)."""
@@ -1252,7 +1416,7 @@ async def update_basic_info(
             user_profile.linkedin_url = _blank_to_none(basic_info.linkedin_url)
             user_profile.github_url = _blank_to_none(basic_info.github_url)
             user_profile.portfolio_url = _blank_to_none(basic_info.portfolio_url)
-            user_profile.updated_at = datetime.now(timezone.utc)
+            user_profile.updated_at = datetime.now(UTC)
         else:
             # Create new profile
             user_profile = UserProfileModel(
@@ -1273,10 +1437,10 @@ async def update_basic_info(
             db.add(user_profile)
 
         await db.commit()
-        
+
         # Invalidate profile cache
         await invalidate_user_profile(str(user_id))
-        
+
         logger.info(f"Updated basic info for user: {mask_email(current_user['email'])}")
 
         return {"message": "Basic information updated successfully"}
@@ -1290,7 +1454,7 @@ async def update_basic_info(
 @router.put("/work-experience")
 async def update_work_experience(
     work_data: WorkExperienceRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """Update work experience (Step 2 of profile setup)."""
@@ -1309,7 +1473,7 @@ async def update_work_experience(
         if user_profile:
             user_profile.work_experience = work_experience
             flag_modified(user_profile, "work_experience")
-            user_profile.updated_at = datetime.now(timezone.utc)
+            user_profile.updated_at = datetime.now(UTC)
         else:
             user_profile = UserProfileModel(
                 id=uuid.uuid4(),
@@ -1319,7 +1483,7 @@ async def update_work_experience(
             db.add(user_profile)
 
         await db.commit()
-        
+
         # Invalidate profile cache
         await invalidate_user_profile(str(user_id))
 
@@ -1354,7 +1518,7 @@ async def update_work_experience(
 @router.put("/education")
 async def update_education(
     edu_data: EducationRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """Update education history (Step 3 of profile setup)."""
@@ -1370,7 +1534,7 @@ async def update_education(
         if user_profile:
             user_profile.education = education
             flag_modified(user_profile, "education")
-            user_profile.updated_at = datetime.now(timezone.utc)
+            user_profile.updated_at = datetime.now(UTC)
         else:
             user_profile = UserProfileModel(
                 id=uuid.uuid4(),
@@ -1409,7 +1573,7 @@ async def update_education(
 @router.put("/skills-qualifications")
 async def update_skills_qualifications(
     skills_data: SkillsQualificationsRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """Update skills and qualifications (Step 4 of profile setup)."""
@@ -1425,7 +1589,7 @@ async def update_skills_qualifications(
         if user_profile:
             user_profile.skills = skills_data.skills
             flag_modified(user_profile, "skills")
-            user_profile.updated_at = datetime.now(timezone.utc)
+            user_profile.updated_at = datetime.now(UTC)
         else:
             user_profile = UserProfileModel(
                 id=uuid.uuid4(),
@@ -1435,7 +1599,7 @@ async def update_skills_qualifications(
             db.add(user_profile)
 
         await db.commit()
-        
+
         # Invalidate profile cache
         await invalidate_user_profile(str(user_id))
 
@@ -1454,7 +1618,7 @@ async def update_skills_qualifications(
 @router.put("/career-preferences")
 async def update_career_preferences(
     preferences: CareerPreferencesRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """Update career preferences (Step 5 of profile setup)."""
@@ -1468,10 +1632,24 @@ async def update_career_preferences(
         user_profile = result.scalar_one_or_none()
 
         # Convert enums to values
-        job_types = [jt.value for jt in preferences.job_types] if preferences.job_types else []
-        work_arrangements = [wa.value for wa in preferences.work_arrangements] if preferences.work_arrangements else []
-        company_sizes = [cs.value for cs in preferences.desired_company_sizes] if preferences.desired_company_sizes else []
-        max_travel = preferences.max_travel_preference.value if preferences.max_travel_preference else None
+        job_types = (
+            [jt.value for jt in preferences.job_types] if preferences.job_types else []
+        )
+        work_arrangements = (
+            [wa.value for wa in preferences.work_arrangements]
+            if preferences.work_arrangements
+            else []
+        )
+        company_sizes = (
+            [cs.value for cs in preferences.desired_company_sizes]
+            if preferences.desired_company_sizes
+            else []
+        )
+        max_travel = (
+            preferences.max_travel_preference.value
+            if preferences.max_travel_preference
+            else None
+        )
 
         if user_profile:
             user_profile.desired_salary_range = preferences.desired_salary_range
@@ -1479,12 +1657,19 @@ async def update_career_preferences(
             user_profile.work_arrangements = work_arrangements
             user_profile.desired_company_sizes = company_sizes
             user_profile.willing_to_relocate = preferences.willing_to_relocate
-            user_profile.requires_visa_sponsorship = preferences.requires_visa_sponsorship
+            user_profile.requires_visa_sponsorship = (
+                preferences.requires_visa_sponsorship
+            )
             user_profile.work_authorization = preferences.work_authorization
             user_profile.has_security_clearance = preferences.has_security_clearance
             user_profile.max_travel_preference = max_travel
-            user_profile.updated_at = datetime.now(timezone.utc)
-            for _f in ("desired_salary_range", "job_types", "work_arrangements", "desired_company_sizes"):
+            user_profile.updated_at = datetime.now(UTC)
+            for _f in (
+                "desired_salary_range",
+                "job_types",
+                "work_arrangements",
+                "desired_company_sizes",
+            ):
                 flag_modified(user_profile, _f)
         else:
             user_profile = UserProfileModel(
@@ -1503,11 +1688,13 @@ async def update_career_preferences(
             db.add(user_profile)
 
         await db.commit()
-        
+
         # Invalidate profile cache
         await invalidate_user_profile(str(user_id))
 
-        logger.info(f"Updated career preferences for user: {mask_email(current_user['email'])}")
+        logger.info(
+            f"Updated career preferences for user: {mask_email(current_user['email'])}"
+        )
 
         return {"message": "Career preferences updated successfully"}
 
@@ -1524,12 +1711,12 @@ async def update_career_preferences(
 
 @router.post("/complete")
 async def complete_profile(
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """
     Mark user profile as complete after all sections are filled.
-    
+
     This endpoint validates that all required sections are complete
     and updates the user's profile_completed flag.
     """
@@ -1543,7 +1730,9 @@ async def complete_profile(
         user_profile = result.scalar_one_or_none()
 
         if not user_profile:
-            raise validation_error("Profile data not found. Please complete all profile sections first.")
+            raise validation_error(
+                "Profile data not found. Please complete all profile sections first."
+            )
 
         # Check all required sections are complete
         basic_complete = _check_basic_info_completion(user_profile)
@@ -1572,8 +1761,10 @@ async def complete_profile(
                 missing.append("Skills")
             if not preferences_complete:
                 missing.append("Career Preferences")
-            
-            raise validation_error(f"Please complete the following sections: {', '.join(missing)}")
+
+            raise validation_error(
+                f"Please complete the following sections: {', '.join(missing)}"
+            )
 
         # Update user's profile_completed flag
         await db.execute(
@@ -1582,7 +1773,7 @@ async def complete_profile(
             .values(
                 profile_completed=True,
                 profile_completion_percentage=100,
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
             )
         )
         await db.commit()
@@ -1590,7 +1781,9 @@ async def complete_profile(
         # Invalidate profile cache
         await invalidate_user_profile(str(user_id))
 
-        logger.info(f"Profile marked as complete for user: {mask_email(current_user['email'])}")
+        logger.info(
+            f"Profile marked as complete for user: {mask_email(current_user['email'])}"
+        )
 
         return {
             "success": True,
@@ -1625,23 +1818,39 @@ class ApiKeyRequest(BaseModel):
 class ApiKeyStatusResponse(BaseModel):
     """Response model for API key status."""
 
-    has_user_key: bool = Field(..., description="Whether user has their own API key configured")
-    has_api_key: bool = Field(..., description="Whether user has an API key configured (alias for has_user_key)")
-    server_has_key: bool = Field(..., description="Whether server has a default API key configured")
-    use_vertex_ai: bool = Field(False, description="Whether the server is using Vertex AI (model choice locked)")
-    key_preview: Optional[str] = Field(
+    has_user_key: bool = Field(
+        ..., description="Whether user has their own API key configured"
+    )
+    has_api_key: bool = Field(
+        ...,
+        description="Whether user has an API key configured (alias for has_user_key)",
+    )
+    server_has_key: bool = Field(
+        ..., description="Whether server has a default API key configured"
+    )
+    use_vertex_ai: bool = Field(
+        False, description="Whether the server is using Vertex AI (model choice locked)"
+    )
+    local_llm_available: bool = Field(
+        False, description="Whether a local LLM is configured for resume parsing"
+    )
+    local_llm_models: dict[str, str] = Field(
+        default_factory=dict,
+        description="Approved local models from LOCAL_LLM_MODELS, safe to render in the dashboard.",
+    )
+    key_preview: str | None = Field(
         None, description="Masked preview of the key (first 4 and last 4 chars)"
     )
 
 
 @router.get("/api-key/status", response_model=ApiKeyStatusResponse)
 async def get_api_key_status(
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ) -> ApiKeyStatusResponse:
     """
     Check if user has a Gemini API key configured.
-    
+
     Returns status and a masked preview of the key if set.
     """
     try:
@@ -1670,16 +1879,26 @@ async def get_api_key_status(
 
         # Check if server has a default API key configured
         from config.settings import get_settings
+
         settings = get_settings()
         use_vertex_ai = bool(getattr(settings, "use_vertex_ai", False))
         # Vertex AI also means the server provides AI — no user key needed
         server_has_key = bool(settings.gemini_api_key) or use_vertex_ai
+        local_llm_available = bool(settings.local_llm_url and settings.local_llm_model)
+        local_llm_models = dict(settings.local_llm_models)
+        if (
+            settings.local_llm_model
+            and settings.local_llm_model not in local_llm_models
+        ):
+            local_llm_models[settings.local_llm_model] = settings.local_llm_model
 
         return ApiKeyStatusResponse(
             has_user_key=has_user_key,
             has_api_key=has_user_key,  # Alias for backward compatibility
             server_has_key=server_has_key,
             use_vertex_ai=use_vertex_ai,
+            local_llm_available=local_llm_available,
+            local_llm_models=local_llm_models,
             key_preview=key_preview,
         )
 
@@ -1693,12 +1912,12 @@ async def get_api_key_status(
 @router.post("/api-key")
 async def set_api_key(
     request: ApiKeyRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """
     Set or update the user's Gemini API key.
-    
+
     The key is encrypted before storage and never logged.
     """
     try:
@@ -1706,7 +1925,9 @@ async def set_api_key(
 
         # Validate the API key format
         if not validate_gemini_api_key(request.api_key):
-            raise validation_error("Invalid API key format. Please check your Gemini API key.")
+            raise validation_error(
+                "Invalid API key format. Please check your Gemini API key."
+            )
 
         # Encrypt the API key
         encrypted_key = encrypt_api_key(request.api_key.strip())
@@ -1717,7 +1938,7 @@ async def set_api_key(
             .where(User.id == user_id)
             .values(
                 gemini_api_key_encrypted=encrypted_key,
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
             )
         )
         await db.commit()
@@ -1743,7 +1964,7 @@ async def set_api_key(
 
 @router.delete("/api-key")
 async def delete_api_key(
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """
@@ -1758,7 +1979,7 @@ async def delete_api_key(
             .where(User.id == user_id)
             .values(
                 gemini_api_key_encrypted=None,
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
             )
         )
         await db.commit()
@@ -1781,11 +2002,11 @@ async def delete_api_key(
 @router.post("/api-key/validate")
 async def validate_api_key_endpoint(
     request: ApiKeyRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
 ):
     """
     Validate a Gemini API key by making a test API call.
-    
+
     This endpoint tests if the key works without saving it.
     """
     try:
@@ -1798,7 +2019,10 @@ async def validate_api_key_endpoint(
             window_seconds=3600,
         )
         if not is_allowed:
-            raise rate_limit_error("Too many API key validation attempts. Please try again later.", retry_after=3600)
+            raise rate_limit_error(
+                "Too many API key validation attempts. Please try again later.",
+                retry_after=3600,
+            )
 
         if not validate_gemini_api_key(request.api_key):
             raise validation_error("Invalid API key format")
@@ -1814,7 +2038,9 @@ async def validate_api_key_endpoint(
                 raise validation_error("API key appears valid but returned no models")
         except Exception as api_error:
             logger.warning(f"API key validation failed: {api_error}")
-            raise validation_error("API key validation failed. Please check your key is correct and has proper permissions.")
+            raise validation_error(
+                "API key validation failed. Please check your key is correct and has proper permissions."
+            )
 
         return {
             "valid": True,
@@ -1831,7 +2057,7 @@ async def validate_api_key_endpoint(
 
 @router.get("/status", response_model=ProfileStatusResponse)
 async def get_profile_status(
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ) -> ProfileStatusResponse:
     """Get profile completion status for the authenticated user."""
@@ -1843,19 +2069,25 @@ async def get_profile_status(
         )
         user_profile = result.scalar_one_or_none()
 
-        steps: Dict[str, bool] = {
+        steps: dict[str, bool] = {
             "basic_info": _check_basic_info_completion(user_profile),
             "work_experience": _check_work_experience_completion(user_profile),
             "education": _check_education_completion(user_profile),
-            "skills_qualifications": _check_skills_qualifications_completion(user_profile),
+            "skills_qualifications": _check_skills_qualifications_completion(
+                user_profile
+            ),
             "career_preferences": _check_career_preferences_completion(user_profile),
         }
 
-        completed_steps: List[str] = [step for step, completed in steps.items() if completed]
-        missing_steps: List[str] = [step for step, completed in steps.items() if not completed]
+        completed_steps: list[str] = [
+            step for step, completed in steps.items() if completed
+        ]
+        missing_steps: list[str] = [
+            step for step, completed in steps.items() if not completed
+        ]
 
         completion_percentage: int = int((len(completed_steps) / len(steps)) * 100)
-        next_step: Optional[str] = missing_steps[0] if missing_steps else None
+        next_step: str | None = missing_steps[0] if missing_steps else None
         profile_completed: bool = len(missing_steps) == 0
 
         return ProfileStatusResponse(
@@ -1877,22 +2109,26 @@ async def get_profile_status(
 
 
 async def get_profile_completion_status(
-    user_id: uuid.UUID, user_profile: Optional[UserProfileModel], db: AsyncSession
-) -> Dict[str, Any]:
+    user_id: uuid.UUID, user_profile: UserProfileModel | None, db: AsyncSession
+) -> dict[str, Any]:
     """Get profile completion status for a user."""
     basic_info_complete = _check_basic_info_completion(user_profile)
     work_experience_complete = _check_work_experience_completion(user_profile)
     education_complete = _check_education_completion(user_profile)
-    skills_qualifications_complete = _check_skills_qualifications_completion(user_profile)
+    skills_qualifications_complete = _check_skills_qualifications_completion(
+        user_profile
+    )
     career_preferences_complete = _check_career_preferences_completion(user_profile)
 
-    completed_sections = sum([
-        1 if basic_info_complete else 0,
-        1 if work_experience_complete else 0,
-        1 if education_complete else 0,
-        1 if skills_qualifications_complete else 0,
-        1 if career_preferences_complete else 0,
-    ])
+    completed_sections = sum(
+        [
+            1 if basic_info_complete else 0,
+            1 if work_experience_complete else 0,
+            1 if education_complete else 0,
+            1 if skills_qualifications_complete else 0,
+            1 if career_preferences_complete else 0,
+        ]
+    )
     total_sections = 5
     completion_percentage = int((completed_sections / total_sections) * 100)
 
@@ -1903,7 +2139,7 @@ async def get_profile_completion_status(
         .values(
             profile_completed=completion_percentage == 100,
             profile_completion_percentage=completion_percentage,
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
         )
     )
     await db.commit()
@@ -1919,7 +2155,7 @@ async def get_profile_completion_status(
     }
 
 
-def _check_basic_info_completion(user_profile: Optional[UserProfileModel]) -> bool:
+def _check_basic_info_completion(user_profile: UserProfileModel | None) -> bool:
     """Check if basic info step is completed."""
     if not user_profile:
         return False
@@ -1936,7 +2172,7 @@ def _check_basic_info_completion(user_profile: Optional[UserProfileModel]) -> bo
     return all(field is not None for field in all_fields)
 
 
-def _check_work_experience_completion(user_profile: Optional[UserProfileModel]) -> bool:
+def _check_work_experience_completion(user_profile: UserProfileModel | None) -> bool:
     """Check if work experience step is completed."""
     if not user_profile:
         return False
@@ -1949,7 +2185,7 @@ def _check_work_experience_completion(user_profile: Optional[UserProfileModel]) 
     return True
 
 
-def _check_education_completion(user_profile: Optional[UserProfileModel]) -> bool:
+def _check_education_completion(user_profile: UserProfileModel | None) -> bool:
     """Check if education step is completed (saved rows or explicit empty list)."""
     if not user_profile:
         return False
@@ -1960,7 +2196,9 @@ def _check_education_completion(user_profile: Optional[UserProfileModel]) -> boo
     return True
 
 
-def _check_skills_qualifications_completion(user_profile: Optional[UserProfileModel]) -> bool:
+def _check_skills_qualifications_completion(
+    user_profile: UserProfileModel | None,
+) -> bool:
     """Check if skills and qualifications step is completed."""
     if not user_profile:
         return False
@@ -1969,7 +2207,7 @@ def _check_skills_qualifications_completion(user_profile: Optional[UserProfileMo
     return len(skills) > 0
 
 
-def _check_career_preferences_completion(user_profile: Optional[UserProfileModel]) -> bool:
+def _check_career_preferences_completion(user_profile: UserProfileModel | None) -> bool:
     """Check if career preferences step is completed."""
     if not user_profile:
         return False
@@ -2004,12 +2242,15 @@ def _check_career_preferences_completion(user_profile: Optional[UserProfileModel
 # =============================================================================
 
 # Column-level defaults — must match UserWorkflowPreferences model defaults
-_PREFERENCE_DEFAULTS: Dict[str, Any] = {
+_PREFERENCE_DEFAULTS: dict[str, Any] = {
     "workflow_gate_threshold": 0.5,
     "auto_generate_documents": False,
     "cover_letter_tone": "professional",
     "resume_length": "concise",
+    "ai_provider": "cloud",
     "preferred_model": None,
+    "local_model": None,
+    "local_reasoning_effort": "medium",
 }
 
 _VALID_COVER_LETTER_TONES = {"professional", "conversational", "enthusiastic"}
@@ -2021,12 +2262,15 @@ _VALID_MODELS = {
     "gemini-2.5-flash",
     "gemini-2.5-pro",
 }
+_VALID_AI_PROVIDERS = {"cloud", "local"}
+_VALID_REASONING_EFFORTS = {"low", "medium", "high"}
+_LOCAL_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
 
 class ApplicationPreferencesRequest(BaseModel):
     """Request model for updating workflow application preferences."""
 
-    workflow_gate_threshold: Optional[float] = Field(
+    workflow_gate_threshold: float | None = Field(
         None,
         ge=0.0,
         le=1.0,
@@ -2035,28 +2279,40 @@ class ApplicationPreferencesRequest(BaseModel):
             "Default: 0.5 (50%)"
         ),
     )
-    auto_generate_documents: Optional[bool] = Field(
+    auto_generate_documents: bool | None = Field(
         None,
         description=(
             "When true, resume advice and cover letter are generated automatically "
             "after company research. When false (default), they are generated on demand."
         ),
     )
-    cover_letter_tone: Optional[str] = Field(
+    cover_letter_tone: str | None = Field(
         None,
         description="Writing tone for cover letters. One of: professional, conversational, enthusiastic.",
     )
-    resume_length: Optional[str] = Field(
+    resume_length: str | None = Field(
         None,
         description="Verbosity of resume advice. One of: concise, detailed.",
     )
-    preferred_model: Optional[str] = Field(
+    preferred_model: str | None = Field(
         None,
         description=(
             "Preferred Gemini model for BYOK users. "
             f"Allowed values: {', '.join(sorted(_VALID_MODELS))}. "
             "Set to null to revert to the system default."
         ),
+    )
+    ai_provider: str | None = Field(
+        None, description="AI provider for document generation: cloud or local."
+    )
+    local_model: str | None = Field(
+        None,
+        max_length=128,
+        description="Model name available from this instance's configured local LLM endpoint.",
+    )
+    local_reasoning_effort: str | None = Field(
+        None,
+        description="Ollama reasoning level for gpt-oss models: low, medium, or high.",
     )
 
 
@@ -2067,12 +2323,15 @@ class ApplicationPreferencesResponse(BaseModel):
     auto_generate_documents: bool
     cover_letter_tone: str
     resume_length: str
-    preferred_model: Optional[str] = None
+    preferred_model: str | None = None
+    ai_provider: str = "cloud"
+    local_model: str | None = None
+    local_reasoning_effort: str = "medium"
 
 
 @router.get("/preferences", response_model=ApplicationPreferencesResponse)
 async def get_application_preferences(
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ) -> ApplicationPreferencesResponse:
     """Return the current user's workflow preferences (with defaults if no row exists yet)."""
@@ -2092,7 +2351,10 @@ async def get_application_preferences(
                 auto_generate_documents=prefs_row.auto_generate_documents,
                 cover_letter_tone=prefs_row.cover_letter_tone,
                 resume_length=prefs_row.resume_length,
+                ai_provider=prefs_row.ai_provider,
                 preferred_model=prefs_row.preferred_model,
+                local_model=prefs_row.local_model,
+                local_reasoning_effort=prefs_row.local_reasoning_effort,
             )
 
         # No row yet — return defaults without writing anything
@@ -2108,7 +2370,7 @@ async def get_application_preferences(
 @router.patch("/preferences", response_model=ApplicationPreferencesResponse)
 async def update_application_preferences(
     request: ApplicationPreferencesRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ) -> ApplicationPreferencesResponse:
     """Partially update the user's workflow preferences.
@@ -2137,11 +2399,20 @@ async def update_application_preferences(
                     prefs_row = UserWorkflowPreferences(
                         id=uuid.uuid4(),
                         user_id=user_id,
-                        workflow_gate_threshold=_PREFERENCE_DEFAULTS["workflow_gate_threshold"],
-                        auto_generate_documents=_PREFERENCE_DEFAULTS["auto_generate_documents"],
+                        workflow_gate_threshold=_PREFERENCE_DEFAULTS[
+                            "workflow_gate_threshold"
+                        ],
+                        auto_generate_documents=_PREFERENCE_DEFAULTS[
+                            "auto_generate_documents"
+                        ],
                         cover_letter_tone=_PREFERENCE_DEFAULTS["cover_letter_tone"],
                         resume_length=_PREFERENCE_DEFAULTS["resume_length"],
+                        ai_provider=_PREFERENCE_DEFAULTS["ai_provider"],
                         preferred_model=_PREFERENCE_DEFAULTS["preferred_model"],
+                        local_model=_PREFERENCE_DEFAULTS["local_model"],
+                        local_reasoning_effort=_PREFERENCE_DEFAULTS[
+                            "local_reasoning_effort"
+                        ],
                     )
                     db.add(prefs_row)
             except IntegrityError:
@@ -2164,17 +2435,52 @@ async def update_application_preferences(
         if request.cover_letter_tone is not None:
             tone = request.cover_letter_tone.lower()
             if tone not in _VALID_COVER_LETTER_TONES:
-                raise validation_error(f"cover_letter_tone must be one of: {', '.join(_VALID_COVER_LETTER_TONES)}")
+                raise validation_error(
+                    f"cover_letter_tone must be one of: {', '.join(_VALID_COVER_LETTER_TONES)}"
+                )
             prefs_row.cover_letter_tone = tone
         if request.resume_length is not None:
             length = request.resume_length.lower()
             if length not in _VALID_RESUME_LENGTHS:
-                raise validation_error(f"resume_length must be one of: {', '.join(_VALID_RESUME_LENGTHS)}")
+                raise validation_error(
+                    f"resume_length must be one of: {', '.join(_VALID_RESUME_LENGTHS)}"
+                )
             prefs_row.resume_length = length
         if "preferred_model" in request.model_fields_set:
-            if request.preferred_model is not None and request.preferred_model not in _VALID_MODELS:
-                raise validation_error(f"preferred_model must be one of: {', '.join(sorted(_VALID_MODELS))}")
+            if (
+                request.preferred_model is not None
+                and request.preferred_model not in _VALID_MODELS
+            ):
+                raise validation_error(
+                    f"preferred_model must be one of: {', '.join(sorted(_VALID_MODELS))}"
+                )
             prefs_row.preferred_model = request.preferred_model
+        if "ai_provider" in request.model_fields_set:
+            provider = (request.ai_provider or "").lower()
+            if provider not in _VALID_AI_PROVIDERS:
+                raise validation_error("ai_provider must be cloud or local")
+            prefs_row.ai_provider = provider
+        if "local_model" in request.model_fields_set:
+            local_model = (request.local_model or "").strip() or None
+            if local_model is not None and not _LOCAL_MODEL_PATTERN.fullmatch(
+                local_model
+            ):
+                raise validation_error("local_model contains unsupported characters")
+            approved_local_models = set(settings.local_llm_models)
+            if settings.local_llm_model:
+                approved_local_models.add(settings.local_llm_model)
+            if local_model is not None and local_model not in approved_local_models:
+                raise validation_error(
+                    "local_model must be one of the models configured by this instance"
+                )
+            prefs_row.local_model = local_model
+        if "local_reasoning_effort" in request.model_fields_set:
+            effort = (request.local_reasoning_effort or "").lower()
+            if effort not in _VALID_REASONING_EFFORTS:
+                raise validation_error(
+                    "local_reasoning_effort must be low, medium, or high"
+                )
+            prefs_row.local_reasoning_effort = effort
 
         await db.commit()
 
@@ -2184,6 +2490,7 @@ async def update_application_preferences(
             f"auto_docs={prefs_row.auto_generate_documents} "
             f"tone={prefs_row.cover_letter_tone} "
             f"resume_length={prefs_row.resume_length} "
+            f"provider={prefs_row.ai_provider} "
             f"model={prefs_row.preferred_model}"
         )
 
@@ -2192,7 +2499,10 @@ async def update_application_preferences(
             auto_generate_documents=prefs_row.auto_generate_documents,
             cover_letter_tone=prefs_row.cover_letter_tone,
             resume_length=prefs_row.resume_length,
+            ai_provider=prefs_row.ai_provider,
             preferred_model=prefs_row.preferred_model,
+            local_model=prefs_row.local_model,
+            local_reasoning_effort=prefs_row.local_reasoning_effort,
         )
 
     except HTTPException:
@@ -2214,44 +2524,54 @@ class DeleteAccountRequest(BaseModel):
     For Google-only accounts (no password), pass an empty string to confirm.
     """
 
-    password: str = Field(..., max_length=128, description="Current password to confirm deletion. Pass empty string for Google-only accounts.")
+    password: str = Field(
+        ...,
+        max_length=128,
+        description="Current password to confirm deletion. Pass empty string for Google-only accounts.",
+    )
 
 
 class NotificationSettingsRequest(BaseModel):
     """Request model for notification settings update."""
 
     email_notifications: bool = Field(True, description="Enable email notifications")
-    application_updates: bool = Field(True, description="Receive application status updates")
+    application_updates: bool = Field(
+        True, description="Receive application status updates"
+    )
     weekly_summary: bool = Field(True, description="Receive weekly application summary")
     tips_and_suggestions: bool = Field(True, description="Receive tips and suggestions")
 
 
 @router.get("/export")
 async def export_user_data(
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """
     Export all user data in JSON format for GDPR compliance (Right to Data Portability).
-    
+
     Returns a JSON file containing:
     - Account information
     - Profile data
     - Job applications
     - Workflow sessions and results
-    
+
     This endpoint supports the GDPR right to data portability.
     """
-    from fastapi.responses import StreamingResponse
-    from models.database import (
-        User,
-        UserProfile as UserProfileModel,
-        JobApplication,
-        WorkflowSession,
-    )
     import io
     import json
-    
+
+    from fastapi.responses import StreamingResponse
+
+    from models.database import (
+        JobApplication,
+        User,
+        WorkflowSession,
+    )
+    from models.database import (
+        UserProfile as UserProfileModel,
+    )
+
     try:
         user_id = get_user_id_from_token(current_user)
 
@@ -2262,7 +2582,9 @@ async def export_user_data(
             window_seconds=3600,
         )
         if not is_allowed:
-            raise rate_limit_error("Too many export requests. Please try again later.", retry_after=3600)
+            raise rate_limit_error(
+                "Too many export requests. Please try again later.", retry_after=3600
+            )
 
         # Get user data
         result = await db.execute(select(User).where(User.id == user_id))
@@ -2292,7 +2614,7 @@ async def export_user_data(
         # Compile export data
         export_data = {
             "export_info": {
-                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "exported_at": datetime.now(UTC).isoformat(),
                 "export_version": "1.0",
                 "user_id": str(user_id),
             },
@@ -2318,15 +2640,15 @@ async def export_user_data(
 
         # Create JSON file
         json_content = json.dumps(export_data, indent=2, default=str)
-        
+
         # Create streaming response
-        buffer = io.BytesIO(json_content.encode('utf-8'))
+        buffer = io.BytesIO(json_content.encode("utf-8"))
         buffer.seek(0)
-        
-        filename = f"job-assistant-export-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.json"
-        
+
+        filename = f"job-assistant-export-{datetime.now(UTC).strftime('%Y-%m-%d')}.json"
+
         logger.info(f"User data exported for: {mask_email(user.email)}")
-        
+
         return StreamingResponse(
             buffer,
             media_type="application/json",
@@ -2346,7 +2668,7 @@ async def export_user_data(
 @router.delete("/delete-account")
 async def delete_user_account(
     request_data: DeleteAccountRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """
@@ -2362,14 +2684,16 @@ async def delete_user_account(
 
     THIS ACTION CANNOT BE UNDONE. Recommend users export their data first.
     """
+    from api.auth import _bcrypt_safe, pwd_context
     from models.database import (
-        User,
-        UserProfile as UserProfileModel,
         JobApplication,
-        WorkflowSession,
+        User,
         UserResumeAsset,
+        WorkflowSession,
     )
-    from api.auth import pwd_context, _bcrypt_safe
+    from models.database import (
+        UserProfile as UserProfileModel,
+    )
 
     try:
         user_id = get_user_id_from_token(current_user)
@@ -2382,7 +2706,10 @@ async def delete_user_account(
             window_seconds=3600,
         )
         if not is_allowed:
-            raise rate_limit_error("Too many account deletion attempts. Please try again later.", retry_after=3600)
+            raise rate_limit_error(
+                "Too many account deletion attempts. Please try again later.",
+                retry_after=3600,
+            )
 
         # Confirm identity: verify the provided password before deleting
         user_check = await db.execute(select(User).where(User.id == user_id))
@@ -2400,31 +2727,41 @@ async def delete_user_account(
                     "This account uses Google Sign-In and has no password. "
                     "Pass an empty string for the password field to confirm deletion."
                 )
-        elif not pwd_context.verify(_bcrypt_safe(request_data.password), user_obj.password_hash):
+        elif not pwd_context.verify(
+            _bcrypt_safe(request_data.password), user_obj.password_hash
+        ):
             raise validation_error("Incorrect password. Account deletion cancelled.")
 
         # Revoke all active tokens before deletion
         try:
             await invalidate_all_user_tokens(user_id)
         except Exception as revoke_error:
-            logger.warning(f"Failed to revoke tokens during account deletion: {revoke_error}")
+            logger.warning(
+                f"Failed to revoke tokens during account deletion: {revoke_error}"
+            )
 
         # Use bulk DELETE statements instead of ORM-level per-object deletes.
         # All statements execute in the same implicit transaction; if any
         # statement raises, the session context manager rolls the whole thing back.
         # Count before deleting so we can report accurate numbers.
         app_count_result = await db.execute(
-            select(func.count()).select_from(JobApplication).where(JobApplication.user_id == user_id)
+            select(count())
+            .select_from(JobApplication)
+            .where(JobApplication.user_id == user_id)
         )
         application_count: int = app_count_result.scalar_one() or 0
 
         session_count_result = await db.execute(
-            select(func.count()).select_from(WorkflowSession).where(WorkflowSession.user_id == user_id)
+            select(count())
+            .select_from(WorkflowSession)
+            .where(WorkflowSession.user_id == user_id)
         )
         session_count: int = session_count_result.scalar_one() or 0
 
         profile_result = await db.execute(
-            select(func.count()).select_from(UserProfileModel).where(UserProfileModel.user_id == user_id)
+            select(count())
+            .select_from(UserProfileModel)
+            .where(UserProfileModel.user_id == user_id)
         )
         has_profile: bool = (profile_result.scalar_one() or 0) > 0
 
@@ -2433,13 +2770,25 @@ async def delete_user_account(
         )
         resume_asset = resume_row_result.scalar_one_or_none()
         if resume_asset:
-            delete_resume_file(settings.user_resume_storage_dir, resume_asset.storage_relative_path)
+            delete_resume_file(
+                settings.user_resume_storage_dir, resume_asset.storage_relative_path
+            )
 
         # Bulk-delete in child-to-parent order to respect FK constraints
-        await db.execute(sa_delete(JobApplication).where(JobApplication.user_id == user_id))
-        await db.execute(sa_delete(WorkflowSession).where(WorkflowSession.user_id == user_id))
-        await db.execute(sa_delete(UserWorkflowPreferences).where(UserWorkflowPreferences.user_id == user_id))
-        await db.execute(sa_delete(UserProfileModel).where(UserProfileModel.user_id == user_id))
+        await db.execute(
+            sa_delete(JobApplication).where(JobApplication.user_id == user_id)
+        )
+        await db.execute(
+            sa_delete(WorkflowSession).where(WorkflowSession.user_id == user_id)
+        )
+        await db.execute(
+            sa_delete(UserWorkflowPreferences).where(
+                UserWorkflowPreferences.user_id == user_id
+            )
+        )
+        await db.execute(
+            sa_delete(UserProfileModel).where(UserProfileModel.user_id == user_id)
+        )
         await db.execute(sa_delete(User).where(User.id == user_id))
 
         await db.commit()
@@ -2449,7 +2798,9 @@ async def delete_user_account(
             await invalidate_user_profile(str(user_id))
             await invalidate_user_llm_cache(str(user_id))
         except Exception as cache_error:
-            logger.warning(f"Failed to invalidate cache during account deletion: {cache_error}")
+            logger.warning(
+                f"Failed to invalidate cache during account deletion: {cache_error}"
+            )
 
         logger.info(
             f"Account deleted for user: {mask_email(user_email)} - "
@@ -2470,18 +2821,21 @@ async def delete_user_account(
     except Exception as e:
         await db.rollback()
         logger.error(f"Failed to delete user account: {e}", exc_info=True)
-        raise internal_error("Failed to delete account. Please try again or contact support.")
+        raise internal_error(
+            "Failed to delete account. Please try again or contact support."
+        )
 
 
 class ClearDataRequest(BaseModel):
     """Confirmation payload required to clear all application data."""
+
     confirm: bool = Field(..., description="Must be true to confirm data deletion")
 
 
 @router.delete("/clear-data")
 async def clear_user_data(
     request_data: ClearDataRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """
@@ -2520,17 +2874,25 @@ async def clear_user_data(
 
         # Bulk deletes for efficiency and atomicity
         app_count_result = await db.execute(
-            select(func.count()).select_from(JobApplication).where(JobApplication.user_id == user_id)
+            select(count())
+            .select_from(JobApplication)
+            .where(JobApplication.user_id == user_id)
         )
         application_count: int = app_count_result.scalar_one() or 0
 
         session_count_result = await db.execute(
-            select(func.count()).select_from(WorkflowSession).where(WorkflowSession.user_id == user_id)
+            select(count())
+            .select_from(WorkflowSession)
+            .where(WorkflowSession.user_id == user_id)
         )
         session_count: int = session_count_result.scalar_one() or 0
 
-        await db.execute(sa_delete(JobApplication).where(JobApplication.user_id == user_id))
-        await db.execute(sa_delete(WorkflowSession).where(WorkflowSession.user_id == user_id))
+        await db.execute(
+            sa_delete(JobApplication).where(JobApplication.user_id == user_id)
+        )
+        await db.execute(
+            sa_delete(WorkflowSession).where(WorkflowSession.user_id == user_id)
+        )
         await db.commit()
 
         logger.info(
@@ -2557,7 +2919,7 @@ async def clear_user_data(
 @router.put("/notifications")
 async def update_notification_settings(
     settings_data: NotificationSettingsRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ):
     """

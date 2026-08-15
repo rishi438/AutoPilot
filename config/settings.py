@@ -3,11 +3,11 @@ Configuration settings for the ApplyPilot.
 Manages environment variables, database connections, and application settings.
 """
 
-from typing import List, Optional, Union, Dict, Any
+from typing import Any
 from urllib.parse import urlsplit
 
-from pydantic_settings import BaseSettings
 from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings
 
 from utils import gemini_api_key_format
 
@@ -33,10 +33,10 @@ class Settings(BaseSettings):
     bcrypt_rounds: int = 12
 
     # Google OAuth Configuration
-    google_client_id: Optional[str] = Field(
+    google_client_id: str | None = Field(
         default=None, description="Google OAuth Client ID (from Google Cloud Console)"
     )
-    google_client_secret: Optional[str] = Field(
+    google_client_secret: str | None = Field(
         default=None,
         description="Google OAuth Client Secret (from Google Cloud Console)",
     )
@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # Encryption key for API key storage (separate from JWT secret)
     # If not set, falls back to deriving from jwt_secret for backward compatibility.
     # Set a dedicated ENCRYPTION_KEY in production to allow safe JWT secret rotation.
-    encryption_key: Optional[str] = Field(
+    encryption_key: str | None = Field(
         default=None,
         description="Fernet encryption key for stored API keys (base64url, 32 bytes). "
         'Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"',
@@ -66,20 +66,24 @@ class Settings(BaseSettings):
 
     # Gemini Configuration
     # API key is optional - users can provide their own via BYOK (Bring Your Own Key)
-    gemini_api_key: Optional[str] = Field(
+    gemini_api_key: str | None = Field(
         default=None,
         description="Google Gemini API key (optional - users can provide their own in Settings)",
     )
-    gemini_model: str = "gemini-3.5-flash"
+    gemini_model: str = "gemini-3.1-pro-preview"
 
     # Local LLM Configuration
-    local_llm_url: Optional[str] = Field(
+    local_llm_url: str | None = Field(
         default=None,
         description="URL of the local LLM endpoint for self-hosted generation fallback.",
     )
-    local_llm_model: Optional[str] = Field(
+    local_llm_model: str | None = Field(
         default=None,
         description="Local LLM model name to use when the request does not explicitly specify a local model.",
+    )
+    local_llm_models: dict[str, str] = Field(
+        default_factory=dict,
+        description="Approved local model names mapped to their dashboard labels.",
     )
     local_llm_timeout: int = Field(
         default=180,
@@ -94,7 +98,7 @@ class Settings(BaseSettings):
         default=False,
         description="Use Vertex AI instead of Google AI Studio (requires ADC authentication)",
     )
-    vertex_ai_project: Optional[str] = Field(
+    vertex_ai_project: str | None = Field(
         default=None, description="Google Cloud Project ID for Vertex AI"
     )
     vertex_ai_location: str = Field(
@@ -103,7 +107,7 @@ class Settings(BaseSettings):
     )
 
     base_url: str = "http://localhost:8000"
-    security_contact_email: Optional[str] = Field(
+    security_contact_email: str | None = Field(
         default=None,
         description="Email shown in /.well-known/security.txt for responsible disclosure reports. Defaults to security@<base_url domain> if not set.",
     )
@@ -111,21 +115,21 @@ class Settings(BaseSettings):
     # Email/SMTP Configuration (Gmail SMTP for GCP deployments)
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587
-    smtp_username: Optional[str] = Field(
+    smtp_username: str | None = Field(
         default=None, description="SMTP username (Gmail address for Gmail SMTP)"
     )
-    smtp_password: Optional[SecretStr] = Field(
+    smtp_password: SecretStr | None = Field(
         default=None,
         description="SMTP password (Gmail App Password - generate at https://myaccount.google.com/apppasswords)",
     )
-    smtp_from_email: Optional[str] = Field(
+    smtp_from_email: str | None = Field(
         default=None,
         description="From email address (defaults to smtp_username if not set)",
     )
     smtp_from_name: str = "ApplyPilot"
 
     # Analytics Configuration (PostHog)
-    posthog_api_key: Optional[str] = Field(
+    posthog_api_key: str | None = Field(
         default=None,
         description="PostHog API key for product analytics (get from PostHog dashboard)",
     )
@@ -149,24 +153,24 @@ class Settings(BaseSettings):
         default="us-central1",
         description="GCP region where the Cloud Tasks queue lives",
     )
-    cloud_tasks_service_url: Optional[str] = Field(
+    cloud_tasks_service_url: str | None = Field(
         default=None,
         description="Cloud Run service URL (e.g. https://job-assistant-prod-xxx.run.app). "
         "When set, workflows are dispatched via Cloud Tasks instead of BackgroundTasks.",
     )
-    cloud_tasks_service_account: Optional[str] = Field(
+    cloud_tasks_service_account: str | None = Field(
         default=None,
         description="Service account email that Cloud Tasks uses to sign OIDC tokens "
         "(e.g. job-assistant-tasks-sa@project.iam.gserviceaccount.com)",
     )
-    cloud_tasks_secret: Optional[str] = Field(
+    cloud_tasks_secret: str | None = Field(
         default=None,
         description="Shared secret sent as X-CloudTasks-Secret header to authenticate "
         "Cloud Tasks callbacks on the internal execute endpoint.",
     )
 
     # Cloud Scheduler secret for authenticated internal cron endpoints
-    cloud_scheduler_secret: Optional[str] = Field(
+    cloud_scheduler_secret: str | None = Field(
         default=None,
         description="Shared secret sent as X-Scheduler-Secret header by Cloud Scheduler "
         "to authenticate periodic maintenance calls (e.g. orphaned session cleanup).",
@@ -216,11 +220,11 @@ class Settings(BaseSettings):
     cache_version: str = "v1"
 
     # CORS Configuration
-    cors_origins: Union[str, List[str]] = "http://localhost:3000,http://localhost:8000"
+    cors_origins: str | list[str] = "http://localhost:3000,http://localhost:8000"
     cors_credentials: bool = True
 
     # Host Configuration
-    allowed_hosts: Union[str, List[str]] = Field(
+    allowed_hosts: str | list[str] = Field(
         default_factory=lambda: ["localhost", "127.0.0.1"]
     )
 
@@ -433,7 +437,7 @@ class DatabaseSettings:
         return url
 
     @property
-    def connection_pool_params(self) -> Dict[str, Any]:
+    def connection_pool_params(self) -> dict[str, Any]:
         """Get connection pool parameters for SQLAlchemy.
 
         When PgBouncer is deployed as a sidecar (DATABASE_URL points to 127.0.0.1:5432),
@@ -465,7 +469,7 @@ class DatabaseSettings:
         }
 
     @property
-    def redis_connection_params(self) -> Dict[str, Any]:
+    def redis_connection_params(self) -> dict[str, Any]:
         """Get Redis connection parameters."""
         return {
             "decode_responses": True,
@@ -483,7 +487,7 @@ class SecuritySettings:
         self.settings = settings
 
     @property
-    def jwt_config(self) -> Dict[str, Any]:
+    def jwt_config(self) -> dict[str, Any]:
         """Get JWT configuration."""
         return {
             "secret_key": self.settings.jwt_secret,
@@ -495,7 +499,7 @@ class SecuritySettings:
 from functools import lru_cache
 
 
-@lru_cache()
+@lru_cache
 def get_settings() -> Settings:
     """
     Get cached application settings.
@@ -506,13 +510,13 @@ def get_settings() -> Settings:
     return Settings()
 
 
-@lru_cache()
+@lru_cache
 def get_database_settings() -> DatabaseSettings:
     """Get cached database settings."""
     return DatabaseSettings(get_settings())
 
 
-@lru_cache()
+@lru_cache
 def get_security_settings() -> SecuritySettings:
     """Get cached security settings."""
     return SecuritySettings(get_settings())

@@ -4,37 +4,35 @@ Provides AI-powered generation of thank you notes, rejection analysis, reference
 job comparison, follow-up emails, and salary negotiation coaching.
 """
 
-import uuid
 import logging
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
-
-from fastapi import APIRouter, Depends, HTTPException, status, Response
-from pydantic import BaseModel, Field, field_validator
+import uuid
+from datetime import UTC, datetime
 from enum import Enum
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from typing import Any
 
-from utils.auth import get_current_user
-from utils.database import get_database
-from utils.cache import (
-    check_rate_limit,
-    check_rate_limit_with_headers,
-    RateLimitResult,
-    get_cached_tool_result,
-    cache_tool_result,
-)
-from utils.encryption import decrypt_api_key
-from utils.security import sanitize_text
-from utils.error_responses import internal_error, rate_limit_error, validation_error
-from models.database import User, JobApplication
-from agents.thank_you_writer import ThankYouWriterAgent
-from agents.rejection_analyzer import RejectionAnalyzerAgent
-from agents.reference_request_writer import ReferenceRequestWriterAgent
-from agents.job_comparison import JobComparisonAgent
+from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import BaseModel, Field
+from sqlalchemy import and_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from agents.followup_generator import FollowUpGeneratorAgent
+from agents.job_comparison import JobComparisonAgent
+from agents.reference_request_writer import ReferenceRequestWriterAgent
+from agents.rejection_analyzer import RejectionAnalyzerAgent
 from agents.salary_coach import SalaryCoachAgent
+from agents.thank_you_writer import ThankYouWriterAgent
 from config.settings import get_settings
+from models.database import JobApplication, User
+from utils.auth import get_current_user
+from utils.cache import (
+    cache_tool_result,
+    check_rate_limit_with_headers,
+    get_cached_tool_result,
+)
+from utils.database import get_database
+from utils.encryption import decrypt_api_key
+from utils.error_responses import internal_error, rate_limit_error, validation_error
+from utils.security import sanitize_text
 
 # =============================================================================
 # CONSTANTS AND CONFIGURATION
@@ -58,7 +56,7 @@ async def _check_rate_limit_and_get_headers(
     user_id: uuid.UUID,
     tool_name: str,
     limit: int = RATE_LIMIT,
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """
     Check rate limit and return headers dict.
 
@@ -95,13 +93,13 @@ async def _check_rate_limit_and_get_headers(
 class ThankYouNoteRequest(BaseModel):
     """Request model for generating thank you notes."""
 
-    application_id: Optional[str] = Field(
+    application_id: str | None = Field(
         None, description="Optional application ID to use job context"
     )
     interviewer_name: str = Field(
         ..., min_length=1, max_length=100, description="Name of the interviewer"
     )
-    interviewer_role: Optional[str] = Field(
+    interviewer_role: str | None = Field(
         None, max_length=100, description="Role/title of the interviewer"
     )
     interview_type: str = Field(
@@ -109,16 +107,16 @@ class ThankYouNoteRequest(BaseModel):
         max_length=50,
         description="Type of interview (phone, video, onsite, technical, etc.)",
     )
-    key_discussion_points: Optional[List[str]] = Field(
+    key_discussion_points: list[str] | None = Field(
         None, max_length=20, description="Key topics discussed during the interview"
     )
-    company_name: Optional[str] = Field(
+    company_name: str | None = Field(
         None, max_length=200, description="Company name (if no application_id)"
     )
-    job_title: Optional[str] = Field(
+    job_title: str | None = Field(
         None, max_length=200, description="Job title (if no application_id)"
     )
-    additional_notes: Optional[str] = Field(
+    additional_notes: str | None = Field(
         None, max_length=1000, description="Any additional context"
     )
 
@@ -128,7 +126,7 @@ class ThankYouNoteResponse(BaseModel):
 
     subject_line: str = Field(..., description="Email subject line")
     email_body: str = Field(..., description="Full email body")
-    key_points_referenced: List[str] = Field(
+    key_points_referenced: list[str] = Field(
         default_factory=list, description="Discussion points referenced in the note"
     )
     tone: str = Field(..., description="Tone of the email (professional, warm, etc.)")
@@ -146,16 +144,14 @@ class RejectionAnalysisRequest(BaseModel):
     rejection_email: str = Field(
         ..., min_length=10, max_length=5000, description="The rejection email text"
     )
-    application_id: Optional[str] = Field(
+    application_id: str | None = Field(
         None, description="Optional application ID for context"
     )
-    job_title: Optional[str] = Field(
+    job_title: str | None = Field(
         None, max_length=200, description="Job title applied for"
     )
-    company_name: Optional[str] = Field(
-        None, max_length=200, description="Company name"
-    )
-    interview_stage: Optional[str] = Field(
+    company_name: str | None = Field(None, max_length=200, description="Company name")
+    interview_stage: str | None = Field(
         None, max_length=100, description="Stage at which rejection occurred"
     )
 
@@ -164,19 +160,19 @@ class RejectionAnalysisResponse(BaseModel):
     """Response model for rejection analysis."""
 
     analysis_summary: str = Field(..., description="Overall analysis summary")
-    likely_reasons: List[str] = Field(
+    likely_reasons: list[str] = Field(
         default_factory=list, description="Potential reasons for rejection"
     )
-    improvement_suggestions: List[str] = Field(
+    improvement_suggestions: list[str] = Field(
         default_factory=list, description="Actionable improvement suggestions"
     )
-    positive_signals: List[str] = Field(
+    positive_signals: list[str] = Field(
         default_factory=list, description="Any positive signs in the rejection"
     )
     follow_up_recommended: bool = Field(
         ..., description="Whether follow-up is recommended"
     )
-    follow_up_template: Optional[str] = Field(
+    follow_up_template: str | None = Field(
         None, description="Optional follow-up email template"
     )
     encouragement: str = Field(..., description="Encouraging message")
@@ -199,25 +195,25 @@ class ReferenceRequestRequest(BaseModel):
         max_length=100,
         description="Relationship (former manager, colleague, mentor, etc.)",
     )
-    reference_company: Optional[str] = Field(
+    reference_company: str | None = Field(
         None, max_length=200, description="Company where you worked together"
     )
-    years_worked_together: Optional[int] = Field(
+    years_worked_together: int | None = Field(
         None, ge=0, le=50, description="Years you worked together"
     )
-    target_job_title: Optional[str] = Field(
+    target_job_title: str | None = Field(
         None, max_length=200, description="Job you're applying for"
     )
-    target_company: Optional[str] = Field(
+    target_company: str | None = Field(
         None, max_length=200, description="Company you're applying to"
     )
-    key_accomplishments: Optional[List[str]] = Field(
+    key_accomplishments: list[str] | None = Field(
         None, max_length=20, description="Key accomplishments to highlight"
     )
-    time_since_contact: Optional[str] = Field(
+    time_since_contact: str | None = Field(
         None, max_length=100, description="How long since you last contacted them"
     )
-    user_name: Optional[str] = Field(
+    user_name: str | None = Field(
         None, max_length=100, description="Your name for the email"
     )
 
@@ -227,11 +223,11 @@ class ReferenceRequestResponse(BaseModel):
 
     subject_line: str = Field(..., description="Email subject line")
     email_body: str = Field(..., description="Full email body")
-    talking_points: List[str] = Field(
+    talking_points: list[str] = Field(
         default_factory=list, description="Points to mention if they need context"
     )
     follow_up_timeline: str = Field(..., description="Suggested follow-up timeline")
-    tips: List[str] = Field(
+    tips: list[str] = Field(
         default_factory=list, description="Tips for the reference request"
     )
     generated_at: str = Field(..., description="Generation timestamp")
@@ -242,7 +238,7 @@ class ReferenceRequestResponse(BaseModel):
 # =============================================================================
 
 
-def _get_user_uuid(current_user: Dict[str, Any]) -> uuid.UUID:
+def _get_user_uuid(current_user: dict[str, Any]) -> uuid.UUID:
     """Extract and convert user ID to UUID."""
     user_id = current_user.get("id") or current_user.get("_id")
     if isinstance(user_id, str):
@@ -250,7 +246,7 @@ def _get_user_uuid(current_user: Dict[str, Any]) -> uuid.UUID:
     return user_id
 
 
-async def _get_user_api_key(db: AsyncSession, user_id: uuid.UUID) -> Optional[str]:
+async def _get_user_api_key(db: AsyncSession, user_id: uuid.UUID) -> str | None:
     """Get decrypted user API key for BYOK mode."""
     try:
         result = await db.execute(select(User).where(User.id == user_id))
@@ -276,7 +272,7 @@ async def _check_api_key_available(db: AsyncSession, user_id: uuid.UUID) -> bool
 
 async def _get_application_context(
     db: AsyncSession, user_id: uuid.UUID, application_id: str
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Get job application context for enriching requests."""
     try:
         app_uuid = uuid.UUID(application_id)
@@ -313,7 +309,7 @@ async def _get_application_context(
 async def generate_thank_you_note(
     request: ThankYouNoteRequest,
     response: Response,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ) -> ThankYouNoteResponse:
     """
@@ -409,9 +405,7 @@ async def generate_thank_you_note(
             email_body=result.get("email_body", ""),
             key_points_referenced=result.get("key_points_referenced", []),
             tone=result.get("tone", "professional"),
-            generated_at=result.get(
-                "generated_at", datetime.now(timezone.utc).isoformat()
-            ),
+            generated_at=result.get("generated_at", datetime.now(UTC).isoformat()),
         )
 
     except HTTPException:
@@ -430,7 +424,7 @@ async def generate_thank_you_note(
 async def analyze_rejection(
     request: RejectionAnalysisRequest,
     response: Response,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ) -> RejectionAnalysisResponse:
     """
@@ -524,9 +518,7 @@ async def analyze_rejection(
             follow_up_recommended=result.get("follow_up_recommended", False),
             follow_up_template=follow_up_template,
             encouragement=result.get("encouragement", "Keep going!"),
-            generated_at=result.get(
-                "generated_at", datetime.now(timezone.utc).isoformat()
-            ),
+            generated_at=result.get("generated_at", datetime.now(UTC).isoformat()),
         )
 
     except HTTPException:
@@ -545,7 +537,7 @@ async def analyze_rejection(
 async def generate_reference_request(
     request: ReferenceRequestRequest,
     response: Response,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ) -> ReferenceRequestResponse:
     """
@@ -638,9 +630,7 @@ async def generate_reference_request(
             talking_points=result.get("talking_points", []),
             follow_up_timeline=result.get("follow_up_timeline", "Follow up in 1 week"),
             tips=result.get("tips", []),
-            generated_at=result.get(
-                "generated_at", datetime.now(timezone.utc).isoformat()
-            ),
+            generated_at=result.get("generated_at", datetime.now(UTC).isoformat()),
         )
 
     except HTTPException:
@@ -660,11 +650,11 @@ class JobInput(BaseModel):
 
     title: str = Field(..., min_length=1, max_length=200, description="Job title")
     company: str = Field(..., min_length=1, max_length=200, description="Company name")
-    location: Optional[str] = Field(None, max_length=200, description="Job location")
-    salary: Optional[str] = Field(None, max_length=100, description="Salary range")
-    job_type: Optional[str] = Field("Full-time", description="Job type")
-    remote_policy: Optional[str] = Field(None, description="Remote work policy")
-    description: Optional[str] = Field(
+    location: str | None = Field(None, max_length=200, description="Job location")
+    salary: str | None = Field(None, max_length=100, description="Salary range")
+    job_type: str | None = Field("Full-time", description="Job type")
+    remote_policy: str | None = Field(None, description="Remote work policy")
+    description: str | None = Field(
         None, max_length=5000, description="Job description"
     )
 
@@ -672,27 +662,23 @@ class JobInput(BaseModel):
 class UserContext(BaseModel):
     """User context for job comparison."""
 
-    career_goals: Optional[str] = Field(
-        None, max_length=500, description="Career goals"
-    )
-    priorities: Optional[str] = Field(
-        None, max_length=500, description="Top priorities"
-    )
-    experience_years: Optional[int] = Field(
+    career_goals: str | None = Field(None, max_length=500, description="Career goals")
+    priorities: str | None = Field(None, max_length=500, description="Top priorities")
+    experience_years: int | None = Field(
         None, ge=0, le=50, description="Years of experience"
     )
-    work_style: Optional[str] = Field(None, description="Preferred work style")
-    location_preference: Optional[str] = Field(None, description="Location preference")
-    salary_expectations: Optional[str] = Field(None, description="Salary expectations")
+    work_style: str | None = Field(None, description="Preferred work style")
+    location_preference: str | None = Field(None, description="Location preference")
+    salary_expectations: str | None = Field(None, description="Salary expectations")
 
 
 class JobComparisonRequest(BaseModel):
     """Request model for job comparison."""
 
-    jobs: List[JobInput] = Field(
+    jobs: list[JobInput] = Field(
         ..., min_length=2, max_length=3, description="2-3 jobs to compare"
     )
-    user_context: Optional[UserContext] = Field(
+    user_context: UserContext | None = Field(
         None, description="User context for personalized comparison"
     )
 
@@ -704,11 +690,11 @@ class JobAnalysis(BaseModel):
     title: str
     company: str
     overall_score: int = Field(..., ge=0, le=100)
-    scores: Dict[str, int]
-    pros: List[str]
-    cons: List[str]
+    scores: dict[str, int]
+    pros: list[str]
+    cons: list[str]
     ideal_for: str
-    concerns: List[str]
+    concerns: list[str]
 
 
 class DecisionFactor(BaseModel):
@@ -731,10 +717,10 @@ class JobComparisonResponse(BaseModel):
     recommendation_reasoning: str = Field(
         ..., description="Why this job is recommended"
     )
-    jobs_analysis: List[JobAnalysis] = Field(default_factory=list)
-    comparison_matrix: Dict[str, str] = Field(default_factory=dict)
-    decision_factors: List[DecisionFactor] = Field(default_factory=list)
-    questions_to_ask: List[str] = Field(default_factory=list)
+    jobs_analysis: list[JobAnalysis] = Field(default_factory=list)
+    comparison_matrix: dict[str, str] = Field(default_factory=dict)
+    decision_factors: list[DecisionFactor] = Field(default_factory=list)
+    questions_to_ask: list[str] = Field(default_factory=list)
     final_advice: str = Field(..., description="Final advice")
     jobs_compared: int = Field(..., description="Number of jobs compared")
     generated_at: str = Field(..., description="Generation timestamp")
@@ -768,20 +754,20 @@ class FollowUpRequest(BaseModel):
         ..., min_length=1, max_length=200, description="Company name"
     )
     job_title: str = Field(..., min_length=1, max_length=200, description="Job title")
-    contact_name: Optional[str] = Field(
+    contact_name: str | None = Field(
         None, max_length=100, description="Contact person's name"
     )
-    contact_role: Optional[str] = Field(
+    contact_role: str | None = Field(
         None, max_length=100, description="Contact person's role"
     )
-    days_since_contact: Optional[int] = Field(
+    days_since_contact: int | None = Field(
         None, ge=0, le=365, description="Days since last contact"
     )
-    previous_interactions: Optional[str] = Field(
+    previous_interactions: str | None = Field(
         None, max_length=500, description="Previous interactions"
     )
-    key_points: Optional[List[str]] = Field(None, description="Key points to mention")
-    user_name: Optional[str] = Field(None, max_length=100, description="Your name")
+    key_points: list[str] | None = Field(None, description="Key points to mention")
+    user_name: str | None = Field(None, max_length=100, description="Your name")
 
 
 class FollowUpResponse(BaseModel):
@@ -789,7 +775,7 @@ class FollowUpResponse(BaseModel):
 
     subject_line: str = Field(..., description="Email subject line")
     email_body: str = Field(..., description="Full email body")
-    key_elements: List[str] = Field(
+    key_elements: list[str] = Field(
         default_factory=list, description="Key elements of the email"
     )
     tone: str = Field(..., description="Tone of the email")
@@ -803,7 +789,7 @@ class FollowUpResponse(BaseModel):
 class FollowUpStagesResponse(BaseModel):
     """Response model for available follow-up stages."""
 
-    stages: List[Dict[str, str]] = Field(
+    stages: list[dict[str, str]] = Field(
         ..., description="Available stages with descriptions"
     )
 
@@ -823,50 +809,50 @@ class SalaryCoachRequest(BaseModel):
     offered_salary: str = Field(
         ..., min_length=1, max_length=100, description="Offered salary"
     )
-    years_experience: Optional[int] = Field(
+    years_experience: int | None = Field(
         None,
         ge=0,
         le=50,
         description="Years of experience (auto-filled from profile if not provided)",
     )
-    additional_context: Optional[str] = Field(
+    additional_context: str | None = Field(
         None,
         max_length=2000,
         description="Additional context (target salary, achievements, other offers, etc.)",
     )
-    location: Optional[str] = Field(None, max_length=200, description="Job location")
-    company_size: Optional[str] = Field(
+    location: str | None = Field(None, max_length=200, description="Job location")
+    company_size: str | None = Field(
         None, description="Company size (startup, mid-size, enterprise)"
     )
-    industry: Optional[str] = Field(None, max_length=100, description="Industry")
-    offered_benefits: Optional[str] = Field(
+    industry: str | None = Field(None, max_length=100, description="Industry")
+    offered_benefits: str | None = Field(
         None, max_length=500, description="Offered benefits"
     )
-    current_salary: Optional[str] = Field(
+    current_salary: str | None = Field(
         None, max_length=100, description="Current/previous salary"
     )
-    achievements: Optional[List[str]] = Field(None, description="Key achievements")
-    unique_value: Optional[List[str]] = Field(
+    achievements: list[str] | None = Field(None, description="Key achievements")
+    unique_value: list[str] | None = Field(
         None, description="Unique value propositions"
     )
-    other_offers: Optional[str] = Field(
+    other_offers: str | None = Field(
         None, max_length=500, description="Other offers/leverage"
     )
-    urgency: Optional[str] = Field(None, description="Timeline urgency")
-    target_range: Optional[str] = Field(
+    urgency: str | None = Field(None, description="Timeline urgency")
+    target_range: str | None = Field(
         None, max_length=100, description="Target salary range"
     )
-    market_info: Optional[str] = Field(
+    market_info: str | None = Field(
         None, max_length=500, description="Market rate information"
     )
-    priority_areas: Optional[List[str]] = Field(
+    priority_areas: list[str] | None = Field(
         None, description="Priority negotiation areas"
     )
-    flexibility_areas: Optional[List[str]] = Field(
+    flexibility_areas: list[str] | None = Field(
         None, description="Areas of flexibility"
     )
-    non_negotiables: Optional[List[str]] = Field(None, description="Non-negotiables")
-    style_preference: Optional[str] = Field(
+    non_negotiables: list[str] | None = Field(None, description="Non-negotiables")
+    style_preference: str | None = Field(
         None, description="Negotiation style preference"
     )
 
@@ -885,7 +871,7 @@ class StrategyOverview(BaseModel):
     """Strategy overview section."""
 
     approach: str
-    key_messages: List[str]
+    key_messages: list[str]
     timing_recommendation: str
     confidence_level: str
 
@@ -904,7 +890,7 @@ class PushbackResponse(BaseModel):
 
     scenario: str
     response_script: str
-    key_points: List[str]
+    key_points: list[str]
 
 
 class AlternativeAsk(BaseModel):
@@ -926,8 +912,8 @@ class EmailTemplate(BaseModel):
 class DosAndDonts(BaseModel):
     """Dos and don'ts for negotiation."""
 
-    dos: List[str]
-    donts: List[str]
+    dos: list[str]
+    donts: list[str]
 
 
 class SalaryCoachResponse(BaseModel):
@@ -936,13 +922,13 @@ class SalaryCoachResponse(BaseModel):
     market_analysis: MarketAnalysis
     strategy_overview: StrategyOverview
     main_script: MainScript
-    pushback_responses: List[PushbackResponse] = Field(default_factory=list)
-    alternative_asks: List[AlternativeAsk] = Field(default_factory=list)
+    pushback_responses: list[PushbackResponse] = Field(default_factory=list)
+    alternative_asks: list[AlternativeAsk] = Field(default_factory=list)
     email_template: EmailTemplate
     dos_and_donts: DosAndDonts
-    red_flags: List[str] = Field(default_factory=list)
+    red_flags: list[str] = Field(default_factory=list)
     walk_away_point: str = Field(..., description="When to walk away")
-    final_tips: List[str] = Field(default_factory=list)
+    final_tips: list[str] = Field(default_factory=list)
     job_title: str
     company_name: str
     offered_salary: str
@@ -958,7 +944,7 @@ class SalaryCoachResponse(BaseModel):
 async def compare_jobs(
     request: JobComparisonRequest,
     response: Response,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ) -> JobComparisonResponse:
     """
@@ -1098,9 +1084,7 @@ async def compare_jobs(
             questions_to_ask=result.get("questions_to_ask", []),
             final_advice=result.get("final_advice", ""),
             jobs_compared=result.get("jobs_compared", len(request.jobs)),
-            generated_at=result.get(
-                "generated_at", datetime.now(timezone.utc).isoformat()
-            ),
+            generated_at=result.get("generated_at", datetime.now(UTC).isoformat()),
         )
 
     except HTTPException:
@@ -1119,7 +1103,7 @@ async def compare_jobs(
 
 @router.get("/followup-stages", response_model=FollowUpStagesResponse)
 async def get_followup_stages(
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
 ) -> FollowUpStagesResponse:
     """
     Get available follow-up stages with descriptions.
@@ -1135,7 +1119,7 @@ async def get_followup_stages(
 async def generate_followup(
     request: FollowUpRequest,
     response: Response,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ) -> FollowUpResponse:
     """
@@ -1221,9 +1205,7 @@ async def generate_followup(
             next_steps=result.get("next_steps", ""),
             alternative_subject=result.get("alternative_subject", ""),
             stage=result.get("stage", request.stage.value),
-            generated_at=result.get(
-                "generated_at", datetime.now(timezone.utc).isoformat()
-            ),
+            generated_at=result.get("generated_at", datetime.now(UTC).isoformat()),
         )
 
     except HTTPException:
@@ -1244,7 +1226,7 @@ async def generate_followup(
 async def get_salary_coaching(
     request: SalaryCoachRequest,
     response: Response,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ) -> SalaryCoachResponse:
     """
@@ -1283,24 +1265,36 @@ async def get_salary_coaching(
         # Get user API key for BYOK
         user_api_key = await _get_user_api_key(db, user_id)
 
-        # Get years_experience from profile if not provided
+        # Profile supplies omitted experience and the user's salary currency.
         years_experience = request.years_experience
-        if years_experience is None:
-            from models.database import UserProfile
-            from sqlalchemy import select
+        from sqlalchemy import select
 
-            result_profile = await db.execute(
-                select(UserProfile).where(UserProfile.user_id == user_id)
-            )
-            profile = result_profile.scalar_one_or_none()
-            if profile and profile.years_experience is not None:
-                years_experience = profile.years_experience
+        from models.database import UserProfile
+
+        result_profile = await db.execute(
+            select(UserProfile).where(UserProfile.user_id == user_id)
+        )
+        profile = result_profile.scalar_one_or_none()
+        if (
+            years_experience is None
+            and profile
+            and profile.years_experience is not None
+        ):
+            years_experience = profile.years_experience
+        desired_salary_range = profile.desired_salary_range if profile else None
+        profile_currency = (
+            str(desired_salary_range.get("currency")).upper()
+            if isinstance(desired_salary_range, dict)
+            and desired_salary_range.get("currency")
+            else None
+        )
 
         sanitized_payload = {
             "tool": "salary_coach",
             "job_title": sanitize_text(request.job_title),
             "company_name": sanitize_text(request.company_name),
             "offered_salary": sanitize_text(request.offered_salary),
+            "currency": profile_currency,
             "years_experience": years_experience,
             "additional_context": (
                 sanitize_text(request.additional_context)
@@ -1443,9 +1437,7 @@ async def get_salary_coaching(
             job_title=result.get("job_title", request.job_title),
             company_name=result.get("company_name", request.company_name),
             offered_salary=result.get("offered_salary", request.offered_salary),
-            generated_at=result.get(
-                "generated_at", datetime.now(timezone.utc).isoformat()
-            ),
+            generated_at=result.get("generated_at", datetime.now(UTC).isoformat()),
         )
 
     except HTTPException:

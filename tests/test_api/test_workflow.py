@@ -8,20 +8,41 @@ Endpoints:
   GET  /api/v1/workflow/history
 """
 
+import asyncio
 import uuid
-import pytest
-import jwt
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import jwt
+import pytest
 from sqlalchemy import update
 
-from api.workflow import _canonical_job_url
+from api.workflow import (
+    _active_workflow_tasks,
+    _canonical_job_url,
+    cancel_local_workflow_task,
+)
 from config.settings import get_security_settings
 from models.database import ApplicationStatus, JobApplication, User, UserProfile
 from tests.test_api.conftest import _NullSessionLocal
 
 BASE = "/api/v1/workflow"
 SESSION_ID = str(uuid.uuid4())
+
+
+@pytest.mark.asyncio
+async def test_cancelling_active_local_workflow_task_stops_it():
+    """Deleting an in-progress application can interrupt its local LLM request."""
+    session_id = str(uuid.uuid4())
+    blocker = asyncio.Event()
+    task = asyncio.create_task(blocker.wait())
+    _active_workflow_tasks[session_id] = task
+
+    assert cancel_local_workflow_task(session_id) is True
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    _active_workflow_tasks.pop(session_id, None)
+    assert cancel_local_workflow_task(session_id) is False
 
 
 # ---------------------------------------------------------------------------
@@ -55,8 +76,8 @@ class TestWorkflowStart:
                 f"{BASE}/start",
                 data={
                     "job_text": "We are looking for a Senior Python Engineer with 5+ years experience. "
-                                "Must have strong knowledge of FastAPI and PostgreSQL. "
-                                "Full remote, competitive salary.",
+                    "Must have strong knowledge of FastAPI and PostgreSQL. "
+                    "Full remote, competitive salary.",
                 },
             )
 
@@ -66,9 +87,14 @@ class TestWorkflowStart:
     @pytest.mark.asyncio
     async def test_rate_limited_returns_429(self, authed_client):
         from utils.cache import RateLimitResult
-        blocked = RateLimitResult(allowed=False, limit=30, remaining=0, reset_seconds=3600)
-        with patch("api.workflow.check_rate_limit_with_headers",
-                   AsyncMock(return_value=blocked)):
+
+        blocked = RateLimitResult(
+            allowed=False, limit=30, remaining=0, reset_seconds=3600
+        )
+        with patch(
+            "api.workflow.check_rate_limit_with_headers",
+            AsyncMock(return_value=blocked),
+        ):
             resp = await authed_client.post(
                 f"{BASE}/start",
                 data={"job_text": "We need a backend engineer..."},
@@ -78,13 +104,25 @@ class TestWorkflowStart:
     @pytest.mark.asyncio
     async def test_unsupported_file_type_returns_400(self, authed_client):
         """Uploading an unsupported file type should return 400."""
-        with patch("utils.redis_client.get_redis_client", AsyncMock(return_value=None)), \
-             patch("api.workflow.check_rate_limit_with_headers",
-                   AsyncMock(return_value=MagicMock(allowed=True, reset_seconds=3600,
-                                                    get_headers=lambda: {}))):
+        with patch(
+            "utils.redis_client.get_redis_client", AsyncMock(return_value=None)
+        ), patch(
+            "api.workflow.check_rate_limit_with_headers",
+            AsyncMock(
+                return_value=MagicMock(
+                    allowed=True, reset_seconds=3600, get_headers=lambda: {}
+                )
+            ),
+        ):
             resp = await authed_client.post(
                 f"{BASE}/start",
-                files={"job_file": ("malware.exe", b"MZ\x90\x00", "application/octet-stream")},
+                files={
+                    "job_file": (
+                        "malware.exe",
+                        b"MZ\x90\x00",
+                        "application/octet-stream",
+                    )
+                },
             )
         assert resp.status_code in (400, 422)
 
@@ -151,7 +189,9 @@ class TestWorkflowHistory:
         assert resp.status_code in (401, 403)
 
     @pytest.mark.asyncio
-    async def test_returns_200_with_empty_list_for_new_user(self, authed_client_with_user):
+    async def test_returns_200_with_empty_list_for_new_user(
+        self, authed_client_with_user
+    ):
         resp = await authed_client_with_user.get(f"{BASE}/history")
         assert resp.status_code == 200
         data = resp.json()
@@ -238,9 +278,13 @@ class TestWorkflowStartDuplicate:
             }
 
         app.dependency_overrides[get_current_user] = _mock_complete_user
-        app.dependency_overrides[get_current_user_with_complete_profile] = _mock_complete_user
+        app.dependency_overrides[get_current_user_with_complete_profile] = (
+            _mock_complete_user
+        )
 
-        with patch("utils.redis_client.get_redis_client", AsyncMock(return_value=None)), patch(
+        with patch(
+            "utils.redis_client.get_redis_client", AsyncMock(return_value=None)
+        ), patch(
             "config.settings.get_settings",
             return_value=MagicMock(
                 gemini_api_key="AIzaSyDummyTestKey012345678901234567890",
@@ -311,7 +355,9 @@ class TestWorkflowStartDuplicate:
             }
 
         app.dependency_overrides[get_current_user] = _mock_complete_user
-        app.dependency_overrides[get_current_user_with_complete_profile] = _mock_complete_user
+        app.dependency_overrides[get_current_user_with_complete_profile] = (
+            _mock_complete_user
+        )
 
         mock_settings = MagicMock(
             gemini_api_key="AIzaSyDummyTestKey012345678901234567890",
@@ -319,7 +365,9 @@ class TestWorkflowStartDuplicate:
             use_vertex_ai=False,
         )
 
-        with patch("utils.redis_client.get_redis_client", AsyncMock(return_value=None)), patch(
+        with patch(
+            "utils.redis_client.get_redis_client", AsyncMock(return_value=None)
+        ), patch(
             "config.settings.get_settings",
             return_value=mock_settings,
         ), patch(

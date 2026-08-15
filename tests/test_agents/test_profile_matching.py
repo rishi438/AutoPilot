@@ -3,13 +3,13 @@ Unit tests for the Profile Matching Agent.
 Tests profile-job matching analysis with mocked LLM responses.
 """
 
-import pytest
+from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, patch
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+
+import pytest
 
 from agents.profile_matching import ProfileMatchingAgent
-
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -19,9 +19,9 @@ from agents.profile_matching import ProfileMatchingAgent
 def create_test_workflow_state(
     user_id: str = "test-user-123",
     session_id: str = "test-session-456",
-    user_profile: Optional[Dict] = None,
-    job_analysis: Optional[Dict] = None,
-) -> Dict[str, Any]:
+    user_profile: dict | None = None,
+    job_analysis: dict | None = None,
+) -> dict[str, Any]:
     """Create a workflow state dict for testing."""
     return {
         "user_id": user_id,
@@ -36,7 +36,7 @@ def create_test_workflow_state(
         "cover_letter": None,
         "current_phase": "profile_matching",
         "workflow_status": "running",
-        "processing_start_time": datetime.now(timezone.utc).isoformat(),
+        "processing_start_time": datetime.now(UTC).isoformat(),
         "processing_end_time": None,
         "agent_status": {},
         "completed_agents": ["job_analyzer"],
@@ -57,7 +57,7 @@ def create_test_workflow_state(
 def mock_gemini_response():
     """Valid profile matching JSON response from LLM."""
     return {
-        "response": '''{
+        "response": """{
             "executive_summary": {
                 "fit_assessment": "Strong technical fit",
                 "recommendation": "GOOD_MATCH",
@@ -106,7 +106,7 @@ def mock_gemini_response():
             "ai_insights": {
                 "career_advice": "Consider Kubernetes certification"
             }
-        }''',
+        }""",
         "filtered": False,
     }
 
@@ -170,6 +170,25 @@ class TestProfileMatchingInit:
         assert agent.gemini_client is None
 
 
+class TestSalaryCurrencyFormatting:
+    """Salary fit must preserve the currency supplied by profile or job data."""
+
+    def test_profile_and_job_salary_ranges_render_inr(self):
+        agent = ProfileMatchingAgent()
+        assert (
+            agent._format_salary_range(
+                {"min": 1200000, "max": 1500000, "currency": "INR"}
+            )
+            == "INR 1,200,000 - INR 1,500,000"
+        )
+
+    def test_salary_range_does_not_default_to_usd(self):
+        agent = ProfileMatchingAgent()
+        assert agent._format_salary_range({"min": 50000, "max": 70000}) == (
+            "CURRENCY UNSPECIFIED 50,000 - CURRENCY UNSPECIFIED 70,000"
+        )
+
+
 # =============================================================================
 # PROCESSING TESTS
 # =============================================================================
@@ -183,26 +202,31 @@ class TestProfileMatchingProcessing:
         """Test successful profile matching processing."""
         mock_client = AsyncMock()
         mock_client.generate.return_value = mock_gemini_response
-        
+
         agent = ProfileMatchingAgent()
-        
+
         # Patch the gemini client getter
-        with patch('agents.profile_matching.get_gemini_client', return_value=mock_client):
+        with patch(
+            "agents.profile_matching.get_gemini_client", return_value=mock_client
+        ):
             result = await agent.process(workflow_state)
-        
+
         assert "profile_matching" in result
-        assert result["profile_matching"]["executive_summary"]["recommendation"] == "GOOD_MATCH"
+        assert (
+            result["profile_matching"]["executive_summary"]["recommendation"]
+            == "GOOD_MATCH"
+        )
 
     @pytest.mark.asyncio
     async def test_process_missing_user_profile_raises_error(self, sample_job_analysis):
         """Test that missing user profile raises error."""
         agent = ProfileMatchingAgent()
-        
+
         state = create_test_workflow_state(
             user_profile=None,
             job_analysis=sample_job_analysis,
         )
-        
+
         with pytest.raises(ValueError, match="[Uu]ser profile|required"):
             await agent.process(state)
 
@@ -210,12 +234,12 @@ class TestProfileMatchingProcessing:
     async def test_process_missing_job_analysis_raises_error(self, sample_user_profile):
         """Test that missing job analysis raises error."""
         agent = ProfileMatchingAgent()
-        
+
         state = create_test_workflow_state(
             user_profile=sample_user_profile,
             job_analysis=None,
         )
-        
+
         with pytest.raises(ValueError, match="[Jj]ob analysis|required"):
             await agent.process(state)
 
@@ -233,12 +257,14 @@ class TestScoreExtraction:
         """Test that overall score is extracted."""
         mock_client = AsyncMock()
         mock_client.generate.return_value = mock_gemini_response
-        
+
         agent = ProfileMatchingAgent()
-        
-        with patch('agents.profile_matching.get_gemini_client', return_value=mock_client):
+
+        with patch(
+            "agents.profile_matching.get_gemini_client", return_value=mock_client
+        ):
             result = await agent.process(workflow_state)
-        
+
         # Should have final_scores
         assert "final_scores" in result["profile_matching"]
 
@@ -259,12 +285,14 @@ class TestErrorHandling:
             "response": "Content filtered",
             "filtered": True,
         }
-        
+
         agent = ProfileMatchingAgent()
-        
-        with patch('agents.profile_matching.get_gemini_client', return_value=mock_client):
+
+        with patch(
+            "agents.profile_matching.get_gemini_client", return_value=mock_client
+        ):
             result = await agent.process(workflow_state)
-        
+
         # Should return fallback result
         assert "profile_matching" in result
 
@@ -276,12 +304,14 @@ class TestErrorHandling:
             "response": "This is not valid JSON",
             "filtered": False,
         }
-        
+
         agent = ProfileMatchingAgent()
-        
-        with patch('agents.profile_matching.get_gemini_client', return_value=mock_client):
+
+        with patch(
+            "agents.profile_matching.get_gemini_client", return_value=mock_client
+        ):
             result = await agent.process(workflow_state)
-        
+
         # Should return fallback result with parse error indicator
         assert "profile_matching" in result
 
@@ -302,7 +332,9 @@ class TestProfileMatchingAdditional:
 
         agent = ProfileMatchingAgent()
 
-        with patch("agents.profile_matching.get_gemini_client", return_value=failing_client):
+        with patch(
+            "agents.profile_matching.get_gemini_client", return_value=failing_client
+        ):
             with pytest.raises(Exception):
                 await agent.process(workflow_state)
 
@@ -314,13 +346,17 @@ class TestProfileMatchingAdditional:
 
         agent = ProfileMatchingAgent()
 
-        with patch("agents.profile_matching.get_gemini_client", return_value=mock_client):
+        with patch(
+            "agents.profile_matching.get_gemini_client", return_value=mock_client
+        ):
             await agent.process(workflow_state)
 
         assert mock_client.generate.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_get_gemini_client_called_when_none(self, mock_gemini_response, workflow_state):
+    async def test_get_gemini_client_called_when_none(
+        self, mock_gemini_response, workflow_state
+    ):
         """get_gemini_client() should be invoked on first call when client is None."""
         mock_client = AsyncMock()
         mock_client.generate.return_value = mock_gemini_response
@@ -336,14 +372,18 @@ class TestProfileMatchingAdditional:
         mock_getter.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_final_scores_present_in_result(self, mock_gemini_response, workflow_state):
+    async def test_final_scores_present_in_result(
+        self, mock_gemini_response, workflow_state
+    ):
         """final_scores key should be present in profile_matching result."""
         mock_client = AsyncMock()
         mock_client.generate.return_value = mock_gemini_response
 
         agent = ProfileMatchingAgent()
 
-        with patch("agents.profile_matching.get_gemini_client", return_value=mock_client):
+        with patch(
+            "agents.profile_matching.get_gemini_client", return_value=mock_client
+        ):
             result = await agent.process(workflow_state)
 
         assert "final_scores" in result["profile_matching"]

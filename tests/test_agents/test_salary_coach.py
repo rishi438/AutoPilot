@@ -3,12 +3,12 @@ Unit tests for the Salary Coach Agent.
 Tests salary negotiation strategy generation with mocked LLM responses.
 """
 
-import pytest
-from unittest.mock import AsyncMock, patch
 from datetime import datetime
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from agents.salary_coach import SalaryCoachAgent
-
 
 # =============================================================================
 # FIXTURES
@@ -100,7 +100,9 @@ class TestSalaryCoachGeneration:
         """Successful generation returns all expected top-level keys."""
         agent = SalaryCoachAgent()
 
-        with patch("agents.salary_coach.get_gemini_client", return_value=mock_gemini_client):
+        with patch(
+            "agents.salary_coach.get_gemini_client", return_value=mock_gemini_client
+        ):
             result = await agent.generate_strategy(
                 job_title="Senior Software Engineer",
                 company_name="TechCorp",
@@ -128,7 +130,9 @@ class TestSalaryCoachGeneration:
         """job_title, company_name and offered_salary should be echoed in result."""
         agent = SalaryCoachAgent()
 
-        with patch("agents.salary_coach.get_gemini_client", return_value=mock_gemini_client):
+        with patch(
+            "agents.salary_coach.get_gemini_client", return_value=mock_gemini_client
+        ):
             result = await agent.generate_strategy(
                 job_title="Staff Engineer",
                 company_name="BigCo",
@@ -140,11 +144,34 @@ class TestSalaryCoachGeneration:
         assert result["offered_salary"] == "$180k"
 
     @pytest.mark.asyncio
+    async def test_currency_is_included_in_the_negotiation_prompt(
+        self, mock_gemini_client
+    ):
+        """Profile currency must guide the LLM instead of assuming USD."""
+        agent = SalaryCoachAgent()
+
+        with patch(
+            "agents.salary_coach.get_gemini_client", return_value=mock_gemini_client
+        ):
+            await agent.generate_strategy(
+                job_title="Software Engineer",
+                company_name="Example India",
+                offered_salary="₹12,00,000 per year",
+                currency="INR",
+            )
+
+        prompt = mock_gemini_client.generate.await_args.kwargs["prompt"]
+        assert "Currency: INR" in prompt
+        assert "₹12,00,000 per year" in prompt
+
+    @pytest.mark.asyncio
     async def test_generate_with_all_optional_params(self, mock_gemini_client):
         """Should work with all optional params supplied."""
         agent = SalaryCoachAgent()
 
-        with patch("agents.salary_coach.get_gemini_client", return_value=mock_gemini_client):
+        with patch(
+            "agents.salary_coach.get_gemini_client", return_value=mock_gemini_client
+        ):
             result = await agent.generate_strategy(
                 job_title="Senior Engineer",
                 company_name="TechCorp",
@@ -177,7 +204,9 @@ class TestSalaryCoachGeneration:
         """Should work with only the three required params."""
         agent = SalaryCoachAgent()
 
-        with patch("agents.salary_coach.get_gemini_client", return_value=mock_gemini_client):
+        with patch(
+            "agents.salary_coach.get_gemini_client", return_value=mock_gemini_client
+        ):
             result = await agent.generate_strategy(
                 job_title="Backend Dev",
                 company_name="Startup",
@@ -191,7 +220,9 @@ class TestSalaryCoachGeneration:
         """pushback_responses should always be a list."""
         agent = SalaryCoachAgent()
 
-        with patch("agents.salary_coach.get_gemini_client", return_value=mock_gemini_client):
+        with patch(
+            "agents.salary_coach.get_gemini_client", return_value=mock_gemini_client
+        ):
             result = await agent.generate_strategy(
                 job_title="Engineer",
                 company_name="Corp",
@@ -205,7 +236,9 @@ class TestSalaryCoachGeneration:
         """alternative_asks should always be a list."""
         agent = SalaryCoachAgent()
 
-        with patch("agents.salary_coach.get_gemini_client", return_value=mock_gemini_client):
+        with patch(
+            "agents.salary_coach.get_gemini_client", return_value=mock_gemini_client
+        ):
             result = await agent.generate_strategy(
                 job_title="Engineer",
                 company_name="Corp",
@@ -219,7 +252,9 @@ class TestSalaryCoachGeneration:
         """dos_and_donts should contain 'dos' and 'donts' lists."""
         agent = SalaryCoachAgent()
 
-        with patch("agents.salary_coach.get_gemini_client", return_value=mock_gemini_client):
+        with patch(
+            "agents.salary_coach.get_gemini_client", return_value=mock_gemini_client
+        ):
             result = await agent.generate_strategy(
                 job_title="Engineer",
                 company_name="Corp",
@@ -237,7 +272,9 @@ class TestSalaryCoachGeneration:
         """final_tips should always be a list."""
         agent = SalaryCoachAgent()
 
-        with patch("agents.salary_coach.get_gemini_client", return_value=mock_gemini_client):
+        with patch(
+            "agents.salary_coach.get_gemini_client", return_value=mock_gemini_client
+        ):
             result = await agent.generate_strategy(
                 job_title="Engineer",
                 company_name="Corp",
@@ -251,7 +288,9 @@ class TestSalaryCoachGeneration:
         """generated_at should be a valid ISO 8601 timestamp."""
         agent = SalaryCoachAgent()
 
-        with patch("agents.salary_coach.get_gemini_client", return_value=mock_gemini_client):
+        with patch(
+            "agents.salary_coach.get_gemini_client", return_value=mock_gemini_client
+        ):
             result = await agent.generate_strategy(
                 job_title="Engineer",
                 company_name="Corp",
@@ -265,7 +304,9 @@ class TestSalaryCoachGeneration:
         """version field should be '1.0'."""
         agent = SalaryCoachAgent()
 
-        with patch("agents.salary_coach.get_gemini_client", return_value=mock_gemini_client):
+        with patch(
+            "agents.salary_coach.get_gemini_client", return_value=mock_gemini_client
+        ):
             result = await agent.generate_strategy(
                 job_title="Engineer",
                 company_name="Corp",
@@ -279,7 +320,9 @@ class TestSalaryCoachGeneration:
         """User API key should reach gemini_client.generate()."""
         agent = SalaryCoachAgent()
 
-        with patch("agents.salary_coach.get_gemini_client", return_value=mock_gemini_client):
+        with patch(
+            "agents.salary_coach.get_gemini_client", return_value=mock_gemini_client
+        ):
             await agent.generate_strategy(
                 job_title="Engineer",
                 company_name="Corp",
@@ -373,7 +416,9 @@ class TestSalaryCoachErrorHandling:
         """LLM should be called exactly once per generate_strategy() call."""
         agent = SalaryCoachAgent()
 
-        with patch("agents.salary_coach.get_gemini_client", return_value=mock_gemini_client):
+        with patch(
+            "agents.salary_coach.get_gemini_client", return_value=mock_gemini_client
+        ):
             await agent.generate_strategy(
                 job_title="Engineer",
                 company_name="Corp",

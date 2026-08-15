@@ -1,0 +1,112 @@
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    name: Semgrep source scan
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: semgrep scan --config auto --error
+
+  trivy:
+    name: Trivy image scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Build the application image
+        run: docker build --tag applypilot:${{ github.sha }} .
+      - name: Block fixable high and critical image vulnerabilities
+        run: >-
+          docker run --rm
+          aquasec/trivy:latest image
+          --exit-code 1
+          --severity HIGH,CRITICAL
+          --ignore-unfixed
+          applypilot:${{ github.sha }}
+
+  sonarqube:
+    name: SonarQube quality and code scan
+    runs-on: ubuntu-latest
+    if: ${{ secrets.SONAR_TOKEN != '' && secrets.SONAR_HOST_URL != '' }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - name: Analyze with the configured SonarQube server
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: >-
+          docker run --rm
+          -e SONAR_HOST_URL
+          -e SONAR_TOKEN
+          -v "${{ github.workspace }}:/usr/src"
+          sonarsource/sonar-scanner-cli
+
+  zap:
+    name: OWASP ZAP passive web scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Create CI-only application configuration
+        shell: bash
+        run: |
+          cat > .env <<'EOF'
+          JWT_SECRET=ci-only-not-a-production-secret-0123456789
+          ENCRYPTION_KEY=MDEyMzQ1Njc4OUFCQ0RFRjAxMjM0NTY3ODlBQkNERUY=
+          POSTGRES_USER=autopilot
+          POSTGRES_PASSWORD=autopilot
+          POSTGRES_DB=autopilot
+          DEBUG=false
+          DISABLE_EMAIL_VERIFICATION=true
+          POSTHOG_ENABLED=false
+          EOF
+      - name: Start the isolated application under test
+        run: docker compose up --build --detach
+      - name: Wait for the application health endpoint
+        shell: bash
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8000/health > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs app
+          exit 1
+      - name: Run ZAP baseline scan
+        shell: bash
+        run: |
+          mkdir -p .zap-reports
+          set +e
+          docker run --rm --network host \
+            -v "${{ github.workspace }}/.zap-reports:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t http://127.0.0.1:8000 -m 1 -r zap-report.html -J zap-report.json
+          scan_status=$?
+          # ZAP returns 2 for warnings. Preserve the report but fail only when
+          # ZAP itself could not complete (exit 3); rule failures can be added later.
+          if [ "$scan_status" -eq 3 ]; then
+            exit 3
+          fi
+      - name: Upload ZAP report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zap-baseline-report
+          path: .zap-reports/
+          if-no-files-found: warn
+      - name: Stop CI containers
+        if: ${{ always() }}
+        run: docker compose down --volumes

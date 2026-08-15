@@ -3,21 +3,17 @@ REST API endpoints for managing job applications with comprehensive CRUD operati
 Provides advanced filtering, pagination, search functionality, and detailed analytics.
 """
 
-import uuid
-import re
-from typing import Dict, List, Optional, Any, Union, Tuple
-from datetime import datetime, timedelta, timezone
 import logging
+import re
+import uuid
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from fastapi import APIRouter, Depends, Query, HTTPException, status, Response
-from utils.logging_config import get_structured_logger, mask_email
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, validator
+from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, func, and_, case, or_, exists
 
-from utils.auth import get_current_user_with_complete_profile
-from utils.database import get_database
-from utils.error_responses import internal_error, not_found_error, validation_error
 from config.settings import get_settings
 from models.database import (
     ApplicationStatus,
@@ -26,6 +22,11 @@ from models.database import (
     WorkflowSession,
     WorkflowStatusEnum,
 )
+from utils.auth import get_current_user_with_complete_profile
+from utils.cache import invalidate_workflow_state
+from utils.database import get_database
+from utils.error_responses import internal_error, not_found_error, validation_error
+from utils.logging_config import get_structured_logger, mask_email
 
 # =============================================================================
 # CONSTANTS AND CONFIGURATION
@@ -80,14 +81,14 @@ router: APIRouter = APIRouter()
 # =============================================================================
 
 
-def safe_items(obj: Any) -> List[Tuple[Any, Any]]:
+def safe_items(obj: Any) -> list[tuple[Any, Any]]:
     """Safely get items from a dictionary-like object, or return empty list if not a dict."""
     if isinstance(obj, dict):
         return list(obj.items())
     return []
 
 
-def get_user_uuid(current_user: Dict[str, Any]) -> uuid.UUID:
+def get_user_uuid(current_user: dict[str, Any]) -> uuid.UUID:
     """Extract and convert user ID to UUID."""
     user_id = current_user.get("id") or current_user.get("_id")
     if isinstance(user_id, str):
@@ -134,24 +135,22 @@ class ApplicationResponse(BaseModel):
     id: str = Field(..., description="Unique application identifier")
     job_title: str = Field(..., description="Job title or position name")
     company_name: str = Field(..., description="Company or organization name")
-    job_url: Optional[str] = Field(None, description="Original job posting URL")
-    match_score: Optional[float] = Field(
-        None, description="Profile match score (0.0-1.0)"
-    )
+    job_url: str | None = Field(None, description="Original job posting URL")
+    match_score: float | None = Field(None, description="Profile match score (0.0-1.0)")
     status: str = Field(..., description="Current application status")
-    applied_date: Optional[datetime] = Field(
+    applied_date: datetime | None = Field(
         None, description="Date when application was submitted"
     )
-    response_date: Optional[datetime] = Field(
+    response_date: datetime | None = Field(
         None, description="Date when response was received"
     )
-    notes: Optional[str] = Field(None, description="User's personal notes")
+    notes: str | None = Field(None, description="User's personal notes")
     created_at: datetime = Field(..., description="Application creation timestamp")
     updated_at: datetime = Field(..., description="Last modification timestamp")
-    workflow_session_id: Optional[str] = Field(
+    workflow_session_id: str | None = Field(
         None, description="Associated workflow session identifier"
     )
-    workflow_data: Dict[str, Any] = Field(
+    workflow_data: dict[str, Any] = Field(
         default_factory=dict, description="Complete workflow session data"
     )
 
@@ -159,7 +158,7 @@ class ApplicationResponse(BaseModel):
 class ApplicationListResponse(BaseModel):
     """Response model for paginated application list."""
 
-    applications: List[ApplicationResponse] = Field(
+    applications: list[ApplicationResponse] = Field(
         ..., description="List of application records"
     )
     total: int = Field(
@@ -223,15 +222,23 @@ class NotesUpdateRequest(BaseModel):
 
 @router.get("/", response_model=ApplicationListResponse)
 async def list_applications(
-    current_user: Dict[str, Any] = Depends(get_current_user_with_complete_profile),
+    current_user: dict[str, Any] = Depends(get_current_user_with_complete_profile),
     db: AsyncSession = Depends(get_database),
     page: int = Query(default=1, ge=1, le=10000),
     per_page: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
-    status_filter: Optional[str] = Query(default=None),
-    days: Optional[int] = Query(default=None, ge=1, le=365, description="Filter by last N days"),
-    company: Optional[str] = Query(default=None, max_length=200, description="Partial company name search"),
-    search: Optional[str] = Query(default=None, max_length=200, description="Search across job title and company name"),
-    sort: Optional[str] = Query(
+    status_filter: str | None = Query(default=None),
+    days: int | None = Query(
+        default=None, ge=1, le=365, description="Filter by last N days"
+    ),
+    company: str | None = Query(
+        default=None, max_length=200, description="Partial company name search"
+    ),
+    search: str | None = Query(
+        default=None,
+        max_length=200,
+        description="Search across job title and company name",
+    ),
+    sort: str | None = Query(
         default="created_desc",
         description="Sort order: created_desc | created_asc | updated_desc | company_asc | title_asc",
     ),
@@ -242,7 +249,9 @@ async def list_applications(
 
         # Build query — exclude soft-deleted, DB-failed, and workflow-failed rows (no JOIN —
         # visibility uses EXISTS so OFFSET/LIMIT cannot duplicate rows).
-        query = select(JobApplication).where(_dashboard_application_visibility_filter(user_id))
+        query = select(JobApplication).where(
+            _dashboard_application_visibility_filter(user_id)
+        )
 
         # Add status filter if specified (case-insensitive)
         if status_filter:
@@ -252,7 +261,7 @@ async def list_applications(
 
         # Add date filter if specified
         if days:
-            cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+            cutoff_date = datetime.now(UTC) - timedelta(days=days)
             query = query.where(JobApplication.created_at >= cutoff_date)
 
         # Full-text search across job title and company name (takes priority over company-only filter)
@@ -279,12 +288,23 @@ async def list_applications(
         # when many rows share the same timestamp or title — without it, PostgreSQL may reorder
         # ties arbitrarily across requests, producing duplicate rows on "load more".
         sort_map = {
-            "created_asc":  (JobApplication.created_at.asc(), JobApplication.id.asc()),
-            "updated_desc": (JobApplication.updated_at.desc(), JobApplication.id.desc()),
-            "company_asc":  (func.lower(JobApplication.company_name).asc(), JobApplication.id.asc()),
-            "title_asc":    (func.lower(JobApplication.job_title).asc(), JobApplication.id.asc()),
+            "created_asc": (JobApplication.created_at.asc(), JobApplication.id.asc()),
+            "updated_desc": (
+                JobApplication.updated_at.desc(),
+                JobApplication.id.desc(),
+            ),
+            "company_asc": (
+                func.lower(JobApplication.company_name).asc(),
+                JobApplication.id.asc(),
+            ),
+            "title_asc": (
+                func.lower(JobApplication.job_title).asc(),
+                JobApplication.id.asc(),
+            ),
         }
-        order_clauses = sort_map.get(sort or "", (JobApplication.created_at.desc(), JobApplication.id.desc()))
+        order_clauses = sort_map.get(
+            sort or "", (JobApplication.created_at.desc(), JobApplication.id.desc())
+        )
         query = query.order_by(*order_clauses)
         query = query.offset((page - 1) * per_page).limit(per_page)
 
@@ -294,10 +314,12 @@ async def list_applications(
 
         # Batch-load all workflow sessions for this page in a single query
         session_ids = [app.session_id for app in applications if app.session_id]
-        workflow_sessions_map: Dict[str, Any] = {}
+        workflow_sessions_map: dict[str, Any] = {}
         if session_ids:
             ws_result = await db.execute(
-                select(WorkflowSession).where(WorkflowSession.session_id.in_(session_ids))
+                select(WorkflowSession).where(
+                    WorkflowSession.session_id.in_(session_ids)
+                )
             )
             for ws in ws_result.scalars().all():
                 workflow_sessions_map[ws.session_id] = ws
@@ -305,7 +327,9 @@ async def list_applications(
         # Format applications for response
         formatted_applications = []
         for app in applications:
-            formatted_app = await _format_application_response(app, db, workflow_sessions_map)
+            formatted_app = await _format_application_response(
+                app, db, workflow_sessions_map
+            )
             formatted_applications.append(formatted_app)
 
         has_next: bool = (page - 1) * per_page + per_page < total
@@ -329,7 +353,7 @@ async def list_applications(
 async def update_application_status(
     application_id: str,
     status_update: StatusUpdateRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user_with_complete_profile),
+    current_user: dict[str, Any] = Depends(get_current_user_with_complete_profile),
     db: AsyncSession = Depends(get_database),
 ) -> ApplicationResponse:
     """Update application status only."""
@@ -356,20 +380,24 @@ async def update_application_status(
             raise not_found_error("Application not found")
 
         existing_app.status = status_update.new_status
-        existing_app.updated_at = datetime.now(timezone.utc)
+        existing_app.updated_at = datetime.now(UTC)
 
         if (
             status_update.new_status == ApplicationStatus.APPLIED.value
             and not existing_app.applied_date
         ):
-            existing_app.applied_date = datetime.now(timezone.utc)
+            existing_app.applied_date = datetime.now(UTC)
 
-        if status_update.new_status in [
-            ApplicationStatus.INTERVIEW.value,
-            ApplicationStatus.ACCEPTED.value,
-            ApplicationStatus.REJECTED.value,
-        ] and not existing_app.response_date:
-            existing_app.response_date = datetime.now(timezone.utc)
+        if (
+            status_update.new_status
+            in [
+                ApplicationStatus.INTERVIEW.value,
+                ApplicationStatus.ACCEPTED.value,
+                ApplicationStatus.REJECTED.value,
+            ]
+            and not existing_app.response_date
+        ):
+            existing_app.response_date = datetime.now(UTC)
 
         await db.commit()
         await db.refresh(existing_app)
@@ -392,7 +420,7 @@ async def update_application_status(
 async def update_application_notes(
     application_id: str,
     notes_update: NotesUpdateRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user_with_complete_profile),
+    current_user: dict[str, Any] = Depends(get_current_user_with_complete_profile),
     db: AsyncSession = Depends(get_database),
 ) -> ApplicationResponse:
     """Update application notes."""
@@ -419,7 +447,7 @@ async def update_application_notes(
             raise not_found_error("Application not found")
 
         existing_app.notes = notes_update.notes
-        existing_app.updated_at = datetime.now(timezone.utc)
+        existing_app.updated_at = datetime.now(UTC)
         await db.commit()
         await db.refresh(existing_app)
 
@@ -437,7 +465,7 @@ async def update_application_notes(
 @router.delete("/{application_id}")
 async def delete_application(
     application_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user_with_complete_profile),
+    current_user: dict[str, Any] = Depends(get_current_user_with_complete_profile),
     db: AsyncSession = Depends(get_database),
 ):
     """Delete an application and its associated data."""
@@ -463,9 +491,35 @@ async def delete_application(
         if not existing_app:
             raise not_found_error("Application not found")
 
-        # Soft delete — preserves workflow data for audit purposes
-        existing_app.deleted_at = datetime.now(timezone.utc)
+        # Soft delete — preserves workflow data for audit purposes.
+        existing_app.deleted_at = datetime.now(UTC)
+        session_id = existing_app.session_id
+        if session_id:
+            session_result = await db.execute(
+                select(WorkflowSession).where(
+                    and_(
+                        WorkflowSession.session_id == session_id,
+                        WorkflowSession.user_id == user_id,
+                    )
+                )
+            )
+            workflow_session = session_result.scalar_one_or_none()
+            if workflow_session and workflow_session.workflow_status in {
+                WorkflowStatusEnum.INITIALIZED.value,
+                WorkflowStatusEnum.IN_PROGRESS.value,
+                WorkflowStatusEnum.AWAITING_CONFIRMATION.value,
+            }:
+                workflow_session.workflow_status = WorkflowStatusEnum.CANCELLED.value
+                workflow_session.processing_end_time = datetime.now(UTC)
         await db.commit()
+
+        if session_id:
+            await invalidate_workflow_state(session_id)
+            # Cancels a local BackgroundTask and therefore its awaited Ollama
+            # HTTP request. A separate worker observes the cancelled DB state.
+            from api.workflow import cancel_local_workflow_task
+
+            cancel_local_workflow_task(session_id)
 
         logger.info(
             f"Soft-deleted application {application_id} for user {mask_email(current_user['email'])}"
@@ -483,7 +537,7 @@ async def delete_application(
 
 @router.get("/stats/overview", response_model=ApplicationStatsResponse)
 async def get_application_stats(
-    current_user: Dict[str, Any] = Depends(get_current_user_with_complete_profile),
+    current_user: dict[str, Any] = Depends(get_current_user_with_complete_profile),
     db: AsyncSession = Depends(get_database),
 ) -> ApplicationStatsResponse:
     """Get simple application statistics for dashboard display."""
@@ -575,7 +629,7 @@ async def get_application_stats(
 )
 async def get_application_download(
     application_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user_with_complete_profile),
+    current_user: dict[str, Any] = Depends(get_current_user_with_complete_profile),
     db: AsyncSession = Depends(get_database),
 ):
     """Generate a downloadable file with comprehensive application data."""
@@ -639,7 +693,7 @@ async def get_application_download(
         job_title_clean: str = re.sub(r"[^a-zA-Z0-9]", "_", job_title)
         company_name_clean: str = re.sub(r"[^a-zA-Z0-9]", "_", company_name)
         filename: str = f"{company_name_clean}_{job_title_clean}_Application.txt"
-        headers: Dict[str, str] = {
+        headers: dict[str, str] = {
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Type": "text/plain",
         }
@@ -661,7 +715,7 @@ async def get_application_download(
 async def _format_application_response(
     application: JobApplication,
     db: AsyncSession,
-    workflow_sessions_map: Optional[Dict[str, Any]] = None,
+    workflow_sessions_map: dict[str, Any] | None = None,
 ) -> ApplicationResponse:
     """Format application for API response.
 
@@ -680,7 +734,9 @@ async def _format_application_response(
                 workflow_session = workflow_sessions_map.get(session_id)
             else:
                 result = await db.execute(
-                    select(WorkflowSession).where(WorkflowSession.session_id == session_id)
+                    select(WorkflowSession).where(
+                        WorkflowSession.session_id == session_id
+                    )
                 )
                 workflow_session = result.scalar_one_or_none()
 
@@ -722,10 +778,9 @@ async def _format_application_response(
                         or final_scores.get("weighted_recommendation_score")
                     )
                 if match_score is None:
-                    match_score = (
-                        profile_matching.get("overall_score")
-                        or profile_matching.get("overall_match_score")
-                    )
+                    match_score = profile_matching.get(
+                        "overall_score"
+                    ) or profile_matching.get("overall_match_score")
 
     return ApplicationResponse(
         id=str(application.id),
@@ -745,16 +800,16 @@ async def _format_application_response(
 
 
 async def _generate_application_report(
-    application: Dict[str, Any],
-    workflow_data: Dict[str, Any],
-    user_data: Dict[str, Any],
+    application: dict[str, Any],
+    workflow_data: dict[str, Any],
+    user_data: dict[str, Any],
 ) -> str:
     """Generate a detailed report for application download."""
-    lines: List[str] = []
+    lines: list[str] = []
 
     lines.append("JOB APPLICATION REPORT")
     lines.append(REPORT_HEADER_SEPARATOR)
-    lines.append(f"Generated on: {datetime.now(timezone.utc).strftime(REPORT_DATE_FORMAT)} UTC")
+    lines.append(f"Generated on: {datetime.now(UTC).strftime(REPORT_DATE_FORMAT)} UTC")
     lines.append(REPORT_HEADER_SEPARATOR + "\n")
 
     job_title = application.get("job_title", REPORT_EMPTY_VALUE)
@@ -832,7 +887,7 @@ async def _generate_application_report(
     return "\n".join(lines)
 
 
-def _add_dict_section(lines: List[str], data: Dict[str, Any]) -> None:
+def _add_dict_section(lines: list[str], data: dict[str, Any]) -> None:
     """Add a dict section to the report lines."""
     for key, value in safe_items(data):
         if value is not None and value != "" and value != []:

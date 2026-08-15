@@ -128,7 +128,7 @@
     }
 
     /**
-     * @param {{ workflow_gate_threshold: number, auto_generate_documents: boolean, cover_letter_tone?: string, resume_length?: string, preferred_model?: string|null }} prefs
+     * @param {{ workflow_gate_threshold: number, auto_generate_documents: boolean, cover_letter_tone?: string, resume_length?: string, preferred_model?: string|null, ai_provider?: string, local_model?: string|null, local_reasoning_effort?: string }} prefs
      */
     function _applyPreferencesToUI(prefs) {
         const slider  = /** @type {HTMLInputElement|null} */ (document.getElementById('gateThresholdSlider'));
@@ -146,6 +146,13 @@
         if (toggle)       toggle.checked = prefs.auto_generate_documents ?? false;
         if (toneSelect)   toneSelect.value   = prefs.cover_letter_tone ?? 'professional';
         if (lengthSelect) lengthSelect.value = prefs.resume_length    ?? 'concise';
+        const provider = /** @type {HTMLSelectElement|null} */ (document.getElementById('aiProviderSelect'));
+        const localModel = /** @type {HTMLSelectElement|null} */ (document.getElementById('localModelSelect'));
+        if (provider) provider.value = prefs.ai_provider ?? 'cloud';
+        if (localModel) localModel.dataset.selectedModel = prefs.local_model ?? '';
+        const reasoning = /** @type {HTMLSelectElement|null} */ (document.getElementById('localReasoningEffortSelect'));
+        if (reasoning) reasoning.value = prefs.local_reasoning_effort ?? 'medium';
+        _updateAIProviderUI(prefs.ai_provider ?? 'cloud');
     }
 
     /** Read current UI state and return payload object. */
@@ -320,6 +327,9 @@
             if (_modelSaveTimer) clearTimeout(_modelSaveTimer);
             _modelSaveTimer = setTimeout(saveModelPreference, 600);
         });
+        document.getElementById('aiProviderSelect')?.addEventListener('change', saveAIProvider);
+        document.getElementById('saveLocalModelBtn')?.addEventListener('click', saveLocalModel);
+        document.getElementById('localModelSelect')?.addEventListener('change', updateGptOssReasoningVisibility);
 
         // Allow keyboard activation for role="button" elements
         document.querySelectorAll('[role="button"][data-action]').forEach(el => {
@@ -595,6 +605,9 @@
     // API KEY MANAGEMENT
     // =============================================================================
 
+    /** @type {Record<string,unknown>|null} Latest cloud-key status for reactive provider rendering. */
+    let _apiKeyStatus = null;
+
     async function loadApiKeyStatus() {
         try {
             const response = await fetch(`${API_BASE}/profile/api-key/status`, {
@@ -614,16 +627,41 @@
 
     /** @param {Record<string,unknown>} data */
     function updateApiKeyStatusUI(data) {
+        _apiKeyStatus = data;
         const serverNotice   = document.getElementById('serverKeyNotice');
         const byokNotice     = document.getElementById('byokNotice');
         const userKeyNotice  = document.getElementById('userKeyNotice');
         const statusText     = document.getElementById('apiKeyStatusText');
         const userKeyIcon    = document.getElementById('userKeyIcon');
         const modelCard      = /** @type {HTMLElement|null} */ (document.getElementById('modelSelectorCard'));
+        const localCard      = /** @type {HTMLElement|null} */ (document.getElementById('localModelCard'));
+        const localSelect    = /** @type {HTMLSelectElement|null} */ (document.getElementById('localModelSelect'));
+        const provider = (/** @type {HTMLSelectElement|null} */ (document.getElementById('aiProviderSelect')))?.value ?? 'cloud';
 
         serverNotice  && (serverNotice.style.display  = 'none');
         byokNotice    && (byokNotice.style.display    = 'none');
         userKeyNotice && (userKeyNotice.style.display = 'none');
+        if (modelCard) modelCard.style.display = 'none';
+        if (localCard) localCard.style.display = provider === 'local' ? 'block' : 'none';
+        if (localSelect) {
+            const models = data['local_llm_models'] && typeof data['local_llm_models'] === 'object'
+                ? /** @type {Record<string,string>} */ (data['local_llm_models']) : {};
+            const selected = localSelect.dataset.selectedModel || localSelect.value;
+            localSelect.replaceChildren(new Option('Select a local model…', ''));
+            Object.entries(models).forEach(([name, label]) => localSelect.add(new Option(label, name)));
+            localSelect.disabled = !data['local_llm_available'] || Object.keys(models).length === 0;
+            localSelect.value = models[selected] ? selected : '';
+            updateGptOssReasoningVisibility();
+        }
+
+        // Local mode never exposes or uses the cloud key/model controls.
+        if (provider === 'local') {
+            const help = document.getElementById('localModelHelp');
+            if (help && !data['local_llm_available']) {
+                help.textContent = 'This instance has no local LLM endpoint configured. Ask the instance owner to configure one.';
+            }
+            return;
+        }
 
         const hasUserKey   = !!(data['has_user_key'] || data['has_api_key']);
         const useVertexAI  = !!data['use_vertex_ai'];
@@ -653,7 +691,6 @@
         if (modelCard) {
             const showModel = hasUserKey && !useVertexAI;
             modelCard.style.display = showModel ? 'block' : 'none';
-            if (showModel) loadModelPreference();
         }
     }
 
@@ -690,6 +727,59 @@
         } catch (err) {
             console.error('Error saving model preference:', err);
         }
+    }
+
+    function _showAISaved(id) {
+        const indicator = document.getElementById(id);
+        if (indicator) { indicator.style.opacity = '1'; setTimeout(() => { indicator.style.opacity = '0'; }, 2000); }
+    }
+
+    function _updateAIProviderUI(provider) {
+        if (_apiKeyStatus) {
+            updateApiKeyStatusUI(_apiKeyStatus);
+            return;
+        }
+        // Status may still be loading; keep cloud controls hidden until it arrives.
+        const localCard = /** @type {HTMLElement|null} */ (document.getElementById('localModelCard'));
+        if (localCard) localCard.style.display = provider === 'local' ? 'block' : 'none';
+    }
+
+    function updateGptOssReasoningVisibility() {
+        const model = /** @type {HTMLSelectElement|null} */ (document.getElementById('localModelSelect'));
+        const row = document.getElementById('gptOssReasoningRow');
+        if (row) row.style.display = model?.value === 'gpt-oss:20b' ? 'block' : 'none';
+    }
+
+    async function saveAIProvider() {
+        const select = /** @type {HTMLSelectElement|null} */ (document.getElementById('aiProviderSelect'));
+        if (!select) return;
+        try {
+            const res = await fetch(`${API_BASE}/profile/preferences`, {
+                method: 'PATCH', headers: { 'Authorization': `Bearer ${getAuthToken()}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ai_provider: select.value })
+            });
+            if (!res.ok) throw new Error('Could not save AI provider');
+            _updateAIProviderUI(select.value);
+            _showAISaved('aiProviderSavedIndicator');
+        } catch (err) { console.error('Error saving AI provider:', err); showAlert('Could not save AI provider.', 'danger'); }
+    }
+
+    async function saveLocalModel() {
+        const select = /** @type {HTMLSelectElement|null} */ (document.getElementById('localModelSelect'));
+        const model = select?.value ?? '';
+        if (!model) { showAlert('Select a local model.', 'warning'); return; }
+        try {
+            const res = await fetch(`${API_BASE}/profile/preferences`, {
+                method: 'PATCH', headers: { 'Authorization': `Bearer ${getAuthToken()}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ai_provider: 'local', local_model: model, local_reasoning_effort: reasoning?.value ?? 'medium' })
+            });
+            if (!res.ok) { const data = await res.json().catch(() => ({})); throw new Error(data.message || 'Could not save local model'); }
+            const provider = /** @type {HTMLSelectElement|null} */ (document.getElementById('aiProviderSelect'));
+            if (provider) provider.value = 'local';
+            _updateAIProviderUI('local');
+            updateGptOssReasoningVisibility();
+            _showAISaved('localModelSavedIndicator');
+        } catch (err) { console.error('Error saving local model:', err); showAlert(/** @type {Error} */ (err).message, 'danger'); }
     }
 
     function toggleApiKeyVisibility() {
@@ -843,3 +933,4 @@
     window.validateApiKey          = validateApiKey;
 
 }());
+        const reasoning = /** @type {HTMLSelectElement|null} */ (document.getElementById('localReasoningEffortSelect'));

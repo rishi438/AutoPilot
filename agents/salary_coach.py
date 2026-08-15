@@ -4,8 +4,8 @@ Generates personalized salary negotiation strategies and scripts.
 """
 
 import logging
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
+from datetime import UTC, datetime
+from typing import Any
 
 from utils.llm_client import get_gemini_client
 from utils.llm_parsing import parse_json_from_llm_response
@@ -46,6 +46,7 @@ Job & Offer Details:
 - Company Size: {company_size}
 - Industry: {industry}
 - Location: {location}
+- Currency: {currency}
 - Offered Base Salary: {offered_salary}
 - Offered Benefits: {offered_benefits}
 
@@ -150,32 +151,33 @@ class SalaryCoachAgent:
     def __init__(self):
         """Initialize the SalaryCoachAgent."""
         self.gemini_client = None
-        self._current_user_api_key: Optional[str] = None
+        self._current_user_api_key: str | None = None
 
     async def generate_strategy(
         self,
         job_title: str,
         company_name: str,
         offered_salary: str,
-        years_experience: Optional[int] = None,
-        additional_context: Optional[str] = None,
-        location: Optional[str] = None,
-        company_size: Optional[str] = None,
-        industry: Optional[str] = None,
-        offered_benefits: Optional[str] = None,
-        current_salary: Optional[str] = None,
-        achievements: Optional[List[str]] = None,
-        unique_value: Optional[List[str]] = None,
-        other_offers: Optional[str] = None,
-        urgency: Optional[str] = None,
-        target_range: Optional[str] = None,
-        market_info: Optional[str] = None,
-        priority_areas: Optional[List[str]] = None,
-        flexibility_areas: Optional[List[str]] = None,
-        non_negotiables: Optional[List[str]] = None,
-        style_preference: Optional[str] = None,
-        user_api_key: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        years_experience: int | None = None,
+        additional_context: str | None = None,
+        location: str | None = None,
+        currency: str | None = None,
+        company_size: str | None = None,
+        industry: str | None = None,
+        offered_benefits: str | None = None,
+        current_salary: str | None = None,
+        achievements: list[str] | None = None,
+        unique_value: list[str] | None = None,
+        other_offers: str | None = None,
+        urgency: str | None = None,
+        target_range: str | None = None,
+        market_info: str | None = None,
+        priority_areas: list[str] | None = None,
+        flexibility_areas: list[str] | None = None,
+        non_negotiables: list[str] | None = None,
+        style_preference: str | None = None,
+        user_api_key: str | None = None,
+    ) -> dict[str, Any]:
         """
         Generate a comprehensive salary negotiation strategy.
 
@@ -186,6 +188,7 @@ class SalaryCoachAgent:
             years_experience: Years of relevant experience (optional, from profile)
             additional_context: Free-form additional info (target salary, achievements, etc.)
             location: Job location (for market context)
+            currency: Profile salary currency (ISO 4217 code)
             company_size: Size of company (startup, mid-size, enterprise)
             industry: Industry sector
             offered_benefits: Description of offered benefits
@@ -213,6 +216,7 @@ class SalaryCoachAgent:
 
             # Format inputs with defaults
             location_str = location or "Not specified"
+            currency_str = currency or "Not specified"
             company_size_str = company_size or "Not specified"
             industry_str = industry or "Not specified"
             offered_benefits_str = offered_benefits or "Standard benefits"
@@ -264,6 +268,7 @@ class SalaryCoachAgent:
                     company_size=company_size_str,
                     industry=industry_str,
                     location=location_str,
+                    currency=currency_str,
                     offered_salary=offered_salary,
                     offered_benefits=offered_benefits_str,
                     years_experience=years_exp_str,
@@ -283,7 +288,7 @@ class SalaryCoachAgent:
             )
 
             structured_logger.log_agent_start("salary_coach", None)
-            start_time = datetime.now(timezone.utc)
+            start_time = datetime.now(UTC)
 
             # Generate response
             response = await self.gemini_client.generate(
@@ -295,9 +300,7 @@ class SalaryCoachAgent:
                 structured_output=True,
             )
 
-            duration_ms = (
-                datetime.now(timezone.utc) - start_time
-            ).total_seconds() * 1000
+            duration_ms = (datetime.now(UTC) - start_time).total_seconds() * 1000
 
             # Check for filtered content
             if response.get("filtered"):
@@ -335,7 +338,7 @@ class SalaryCoachAgent:
                 "job_title": job_title,
                 "company_name": company_name,
                 "offered_salary": offered_salary,
-                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "generated_at": datetime.now(UTC).isoformat(),
                 "version": "1.0",
             }
 
@@ -345,7 +348,7 @@ class SalaryCoachAgent:
             )
             raise
 
-    def _create_filtered_result(self, filter_message: str) -> Dict[str, Any]:
+    def _create_filtered_result(self, filter_message: str) -> dict[str, Any]:
         """Create a result when content was filtered."""
         return {
             "market_analysis": {},
@@ -365,13 +368,13 @@ class SalaryCoachAgent:
             "final_tips": ["Please try again with different input"],
             "filtered": True,
             "filter_message": filter_message,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
             "version": "1.0",
         }
 
     def _create_parse_error_result(
         self, raw_response: str, job_title: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Create a result when JSON parsing failed."""
         return {
             "market_analysis": {},
@@ -391,6 +394,6 @@ class SalaryCoachAgent:
             "final_tips": ["Regenerate the strategy before negotiating"],
             "job_title": job_title,
             "parse_error": True,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
             "version": "1.0",
         }

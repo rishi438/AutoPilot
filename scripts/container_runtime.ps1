@@ -13,13 +13,21 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$ComposeFile = Join-Path $ProjectRoot 'docker-compose.yml'
+$DefaultComposeFile = Join-Path $ProjectRoot 'docker-compose.yml'
 
 # Avoid a conflicting user-profile .config file. Podman honors XDG_CONFIG_HOME;
 # keeping its local metadata here also leaves the user's profile untouched.
 if ($Runtime -eq 'podman') {
     $env:XDG_CONFIG_HOME = Join-Path $ProjectRoot '.podman-config'
     New-Item -ItemType Directory -Force -Path $env:XDG_CONFIG_HOME | Out-Null
+
+    # Podman otherwise prefers the Windows App Execution Alias for
+    # docker-compose.exe when it is on PATH. Prefer the native provider when
+    # it is installed so that Podman handles Compose consistently.
+    $podmanCompose = Get-Command podman-compose -ErrorAction SilentlyContinue
+    if ($podmanCompose) {
+        $env:PODMAN_COMPOSE_PROVIDER = $podmanCompose.Source
+    }
 }
 
 function Install-WithWinget([string]$PackageId, [string]$Name) {
@@ -89,6 +97,31 @@ if ($Action -eq 'ensure') {
     exit 0
 }
 
-if (-not (Test-Path -LiteralPath $ComposeFile)) { throw "Compose file not found: $ComposeFile" }
-& $runtimePath compose -f $ComposeFile @ComposeArgs
+$SelectedComposeFiles = @()
+$ForwardedComposeArgs = @()
+for ($index = 0; $index -lt $ComposeArgs.Count; $index++) {
+    $argument = $ComposeArgs[$index]
+    if ($argument -in @('-f', '--file')) {
+        if ($index + 1 -ge $ComposeArgs.Count) { throw "$argument requires a Compose file path." }
+        $SelectedComposeFiles += $ComposeArgs[$index + 1]
+        $index++
+        continue
+    }
+    $ForwardedComposeArgs += $argument
+}
+
+if ($SelectedComposeFiles.Count -eq 0) { $SelectedComposeFiles = @($DefaultComposeFile) }
+$ComposeInvocation = @()
+foreach ($file in $SelectedComposeFiles) {
+    $resolvedFile = if ([System.IO.Path]::IsPathRooted($file)) { $file } else { Join-Path $ProjectRoot $file }
+    if (-not (Test-Path -LiteralPath $resolvedFile)) { throw "Compose file not found: $resolvedFile" }
+    $ComposeInvocation += '-f'
+    $ComposeInvocation += $resolvedFile
+}
+
+if ($Runtime -eq 'podman' -and $env:PODMAN_COMPOSE_PROVIDER -and $ForwardedComposeArgs -contains '--ignore-buildable') {
+    # podman-compose 1.x does not support Docker Compose's pull-only flag.
+    $ForwardedComposeArgs = @($ForwardedComposeArgs | Where-Object { $_ -ne '--ignore-buildable' })
+}
+& $runtimePath compose @ComposeInvocation @ForwardedComposeArgs
 exit $LASTEXITCODE

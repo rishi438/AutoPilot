@@ -911,6 +911,21 @@
             <div id="apiKeysSection" class="settings-section">
                 <h4 class="section-title">AI Setup</h4>
 
+                <div class="account-card mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                        <div class="account-icon account-icon--purple"><i class="fas fa-route"></i></div>
+                        <div class="flex-1">
+                            <div class="account-title">AI Provider</div>
+                            <div class="account-subtitle">Choose Cloud Gemini or this instance's Local LLM for resume advice and cover letters.</div>
+                        </div>
+                    </div>
+                    <select class="pref-select mt-3" id="aiProviderSelect" aria-label="AI provider">
+                        <option value="cloud">Cloud — Google Gemini</option>
+                        <option value="local">Local LLM — private instance model</option>
+                    </select>
+                    <div id="aiProviderSavedIndicator" class="save-indicator save-indicator--mt"><i class="fas fa-check-circle"></i> Saved</div>
+                </div>
+
                 <!-- Server has key - ready to use -->
                 <div id="serverKeyNotice" class="account-card is-hidden">
                     <div class="d-flex align-items-center gap-3">
@@ -941,7 +956,7 @@
                     </div>
                     <form id="apiKeyForm" class="pt-3 mt-1 border-top border-secondary">
                         <div class="input-group">
-                            <input type="password" class="form-control" id="geminiApiKey" 
+                            <input type="password" class="form-control" id="geminiApiKey"
                                    placeholder="Paste your API key here..."
                                    autocomplete="off">
                             <button type="button" class="btn btn-outline-secondary" data-action="toggleApiKeyVisibility" aria-label="Toggle API key visibility">
@@ -992,6 +1007,31 @@
                     </select>
                     <div id="modelSavedIndicator" class="save-indicator save-indicator--mt">
                         <i class="fas fa-check-circle"></i> Saved
+                    </div>
+                </div>
+
+                <div id="localModelCard" class="account-card mt-3 is-hidden">
+                    <div class="d-flex align-items-start gap-3 mb-3">
+                        <div class="account-icon account-icon--green"><i class="fas fa-server"></i></div>
+                        <div class="flex-1">
+                            <div class="account-title">Local LLM Model</div>
+                            <div class="account-subtitle" id="localModelHelp">Choose an approved model configured by this instance owner.</div>
+                        </div>
+                    </div>
+                    <select class="pref-select" id="localModelSelect" aria-label="Local LLM model" disabled>
+                        <option value="">Loading approved local models…</option>
+                    </select>
+                    <div id="gptOssReasoningRow" class="mt-3 is-hidden">
+                        <label class="form-label mb-1" for="localReasoningEffortSelect">GPT-OSS reasoning effort</label>
+                        <select class="pref-select" id="localReasoningEffortSelect" aria-label="GPT-OSS reasoning effort">
+                            <option value="low">Low — fastest</option>
+                            <option value="medium" selected>Medium — balanced</option>
+                            <option value="high">High — deepest reasoning</option>
+                        </select>
+                    </div>
+                    <div class="d-flex align-items-center gap-2 mt-3">
+                        <button type="button" class="btn btn-primary btn-sm" id="saveLocalModelBtn">Save local model</button>
+                        <span id="localModelSavedIndicator" class="save-indicator"><i class="fas fa-check-circle"></i> Saved</span>
                     </div>
                 </div>
 

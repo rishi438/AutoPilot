@@ -1267,6 +1267,12 @@
                             </div>
 
                             <!-- API key prompt — slides in below the drop zone when user tries to upload -->
+                            <div class="form-check form-switch mt-3 text-start">
+                                <input class="form-check-input" type="checkbox" role="switch" id="use-gemini-resume" />
+                                <label class="form-check-label" for="use-gemini-resume">Use Gemini for this resume</label>
+                                <p class="text-muted small mb-0">Off uses your local model. On tries Gemini first, then falls back to local.</p>
+                            </div>
+
                             <div class="api-key-prompt is-hidden" id="api-key-prompt">
                                 <div class="api-key-prompt-header">
                                     <div class="api-key-prompt-icon">
@@ -1293,14 +1299,14 @@
                                         aria-label="Gemini API key"
                                     />
                                     <button type="button" class="btn btn-primary" id="setup-save-key-btn">
-                                        <span id="setup-save-key-text">Save &amp; Continue</span>
+                                        <span id="setup-save-key-text">Use for this resume</span>
                                         <span class="spinner-border spinner-border-sm is-hidden" id="setup-save-key-spinner"></span>
                                     </button>
                                 </div>
 
                                 <div class="api-key-prompt-success is-hidden" id="setup-key-success">
                                     <i class="fas fa-check-circle"></i>
-                                    Key saved — upload your resume above
+                                    Key ready for this resume only — upload above
                                 </div>
                                 <p class="api-key-prompt-error is-hidden" id="setup-key-error"></p>
                             </div>
@@ -1387,6 +1393,7 @@
                                                 name="years_experience"
                                                 min="0"
                                                 max="50"
+                                                step="0.1"
                                                 placeholder="Years"
                                                 required
                                             />
@@ -1593,7 +1600,22 @@
                             <form id="career-preferences-form">
 
                                 <div class="row mb-4">
-                                    <div class="col-md-6">
+                                    <div class="col-md-3">
+                                        <div class="form-floating">
+                                            <select class="form-select" id="salary-currency" aria-label="Salary currency">
+                                                <option value="USD">USD ($)</option>
+                                                <option value="INR">INR (₹)</option>
+                                                <option value="EUR">EUR (€)</option>
+                                                <option value="GBP">GBP (£)</option>
+                                                <option value="CAD">CAD (C$)</option>
+                                                <option value="AUD">AUD (A$)</option>
+                                                <option value="JPY">JPY (¥)</option>
+                                                <option value="Other">Other</option>
+                                            </select>
+                                            <label for="salary-currency">Currency</label>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-4">
                                         <div class="form-floating">
                                             <input
                                                 type="text"
@@ -1604,10 +1626,10 @@
                                                 autocomplete="off"
                                                 spellcheck="false"
                                             />
-                                            <label for="min-salary">Minimum Salary ($)</label>
+                                            <label for="min-salary">Minimum salary</label>
                                         </div>
                                     </div>
-                                    <div class="col-md-6">
+                                    <div class="col-md-5">
                                         <div class="form-floating">
                                             <input
                                                 type="text"
@@ -1618,7 +1640,7 @@
                                                 autocomplete="off"
                                                 spellcheck="false"
                                             />
-                                            <label for="max-salary">Maximum Salary ($)</label>
+                                            <label for="max-salary">Maximum salary</label>
                                         </div>
                                     </div>
                                 </div>
@@ -1782,8 +1804,8 @@
 
                                 <div class="form-section mb-4">
                                     <h4>Work authorization</h4>
-                                    <p class="text-muted small mb-3">
-                                        Select the work authorization status that applies to you today.
+                                    <p class="text-muted small mb-3" id="work-authorization-help">
+                                        Select the work authorization status that applies in your country of residence today.
                                     </p>
                                     <div class="form-check mb-2">
                                         <input
@@ -1791,11 +1813,11 @@
                                             type="radio"
                                             name="work-authorization"
                                             id="work-auth-none"
-                                            value="no_work_authorization"
+                                            value="requires_sponsorship"
                                             required
                                         />
                                         <label class="form-check-label" for="work-auth-none">
-                                            I do not have work authorization
+                                            I need employer sponsorship or a work permit
                                         </label>
                                     </div>
                                     <div class="form-check mb-2">
@@ -1804,10 +1826,10 @@
                                             type="radio"
                                             name="work-authorization"
                                             id="work-auth-has"
-                                            value="has_work_authorization"
+                                            value="authorized_to_work"
                                         />
                                         <label class="form-check-label" for="work-auth-has">
-                                            I have work authorization
+                                            I am authorized to work without sponsorship
                                         </label>
                                     </div>
                                     <div class="form-check mb-2">
@@ -1815,11 +1837,11 @@
                                             class="form-check-input"
                                             type="radio"
                                             name="work-authorization"
-                                            id="work-auth-pr"
-                                            value="us_lawful_permanent_resident"
+                                            id="work-auth-resident"
+                                            value="citizen_or_permanent_resident"
                                         />
-                                        <label class="form-check-label" for="work-auth-pr">
-                                            I am a U.S. lawful permanent resident
+                                        <label class="form-check-label" for="work-auth-resident" id="work-auth-resident-label">
+                                            I am a citizen or permanent resident of my country of residence
                                         </label>
                                     </div>
                                     <div class="form-check mb-2">
@@ -1827,11 +1849,11 @@
                                             class="form-check-input"
                                             type="radio"
                                             name="work-authorization"
-                                            id="work-auth-citizen"
-                                            value="us_citizen"
+                                            id="work-auth-other"
+                                            value="other_work_authorization"
                                         />
-                                        <label class="form-check-label" for="work-auth-citizen">
-                                            I am a U.S. citizen
+                                        <label class="form-check-label" for="work-auth-other">
+                                            Other work authorization status
                                         </label>
                                     </div>
                                 </div>

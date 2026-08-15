@@ -22,15 +22,15 @@ services:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: applypilot
-      POSTGRES_PASSWORD: applypilot
-      POSTGRES_DB: applypilot
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-autopilot}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U applypilot"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -61,27 +61,46 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
-    # Load everything from your .env file, then override the service URLs so
-    # they resolve inside the Docker network (not localhost).
-    env_file:
-      - .env
+    # `.env` is mounted below and read by Pydantic inside the app, so host and
+    # container share one live configuration file.
     environment:
-      DATABASE_URL: postgresql+asyncpg://applypilot:applypilot@postgres:5432/applypilot
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-autopilot}
       REDIS_URL: redis://redis:6379/0
       BASE_URL: http://localhost:8000
-      ALLOWED_HOSTS: "localhost,127.0.0.1,0.0.0.0"
+      # `app` is the private Compose DNS name used by the local ZAP container.
+      ALLOWED_HOSTS: "localhost,127.0.0.1,0.0.0.0,app"
       CORS_ORIGINS: "http://localhost:8000"
+      WATCHFILES_FORCE_POLLING: "true"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
-      # Persist logs, uploads, and generated files outside the container
+      # Live, bidirectional development mounts. Python reloads automatically;
+      # DEBUG=true serves UI sources directly without rebuilding the image.
+      - ./api:/app/api
+      - ./agents:/app/agents
+      - ./config:/app/config
+      - ./models:/app/models
+      - ./services:/app/services
+      - ./utils:/app/utils
+      - ./workflows:/app/workflows
+      - ./ui:/app/ui
+      - ./scripts:/app/scripts
+      - ./alembic:/app/alembic
+      - ./main.py:/app/main.py
+      - ./alembic.ini:/app/alembic.ini
+      - ./.env:/app/.env
+      # Persist runtime output outside the container.
       - ./logs:/app/logs
       - ./uploads:/app/uploads
       - ./generated:/app/generated
+      # Durable, appuser-owned storage for uploaded resume originals.
+      - resume_data:/app/data
+    command: ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app", "--reload-include", ".env"]
 
 volumes:
   postgres_data:
   redis_data:
+  resume_data:

@@ -1,14 +1,14 @@
 /**
  * @fileoverview ApplyPilot - Profile Management JavaScript
  * Handles profile setup, editing, and data management.
- * 
+ *
  * @description Provides profile management functionality including:
  * - Multi-step profile setup wizard
  * - Work experience management
  * - Skills and qualifications
  * - Career preferences
  * - Auto-save functionality
- * 
+ *
  * @note This is an alternative/advanced implementation of profile management.
  * The main profile setup interface uses inline JavaScript in setup.html.
  */
@@ -20,7 +20,7 @@
 /**
  * Profile manager class for user profile setup and editing.
  * Implements a multi-step wizard with validation and auto-save.
- * 
+ *
  * @class
  */
 class ProfileManager {
@@ -53,22 +53,22 @@ class ProfileManager {
   constructor() {
     /** @type {string} Base URL for API calls */
     this.apiBaseUrl = (window.APP_CONFIG && window.APP_CONFIG.apiBase) || '/api/v1';
-    
+
     /** @type {number} Current step in the wizard (1-5) */
     this.currentStep = 1;
-    
+
     /** @type {number} Total number of steps */
     this.maxSteps = 5;
-    
+
     /** @type {Object} Profile data being edited */
     this.profileData = {};
-    
+
     /** @type {boolean} Whether auto-save is in progress */
     this.isAutoSaving = false;
-    
+
     /** @type {number} Delay before auto-save triggers (ms) */
     this.autoSaveDelay = 2000;
-    
+
     /** @type {number|null} Auto-save timer ID */
     this.autoSaveTimer = null;
 
@@ -402,10 +402,15 @@ class ProfileManager {
    */
   setNestedValue(obj, path, value) {
     const keys = path.split(".");
+    const forbiddenKeys = new Set(["__proto__", "constructor", "prototype"]);
+    if (keys.some((key) => forbiddenKeys.has(key))) {
+      throw new Error("Unsafe profile field path");
+    }
+
     let current = obj;
 
     for (let i = 0; i < keys.length - 1; i++) {
-      if (!(keys[i] in current)) {
+      if (!Object.prototype.hasOwnProperty.call(current, keys[i])) {
         current[keys[i]] = {};
       }
       current = current[keys[i]];
@@ -458,7 +463,7 @@ class ProfileManager {
       // Auto-save disabled - backend doesn't support auto-save endpoint
       // Would need to save to appropriate step endpoint based on current step
       // Auto-save not implemented in this version
-      
+
       // For now, just mark as saved to prevent constant auto-save attempts
       document.body.removeAttribute("data-profile-changed");
       this.showAutoSaveSuccess();
@@ -1279,16 +1284,16 @@ class ProfileManager {
   async saveAllProfileSteps() {
     // Step 1: Basic Info
     await this.saveBasicInfo();
-    
+
     // Step 2: Work Experience
     await this.saveWorkExperience();
-    
+
     // Step 3: Education
     await this.saveEducation();
-    
+
     // Step 4: Skills & Qualifications
     await this.saveSkillsQualifications();
-    
+
     // Step 5: Career Preferences
     await this.saveCareerPreferences();
   }
@@ -1643,7 +1648,7 @@ class ProfileManager {
     }
 
     const response = await fetch(url, config);
-    
+
     // Handle JSON parsing with error handling
     let result;
     try {

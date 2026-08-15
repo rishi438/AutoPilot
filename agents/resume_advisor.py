@@ -5,11 +5,12 @@ Creates personalized, actionable resume advice by analyzing user profile against
 
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
-from workflows.state_schema import WorkflowState, ResumeRecommendationsResult
+from datetime import UTC, datetime
+from typing import Any
+
 from utils.llm_parsing import parse_json_from_llm_response
 from utils.llm_prompting import build_llm_system_prompt
+from workflows.state_schema import ResumeRecommendationsResult, WorkflowState
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,16 @@ logger = logging.getLogger(__name__)
 LLM_TEMPERATURE: float = 0.25  # Low for consistent, practical advice
 LLM_MAX_TOKENS: int = 4096
 LLM_TIMEOUT: float = 90.0  # Longer timeout for detailed analysis
+
+
+def _generation_timeout(force_local: bool, reasoning_effort: str | None) -> float:
+    """Keep the outer agent timeout longer than GPT-OSS's HTTP timeout."""
+    if not force_local:
+        return LLM_TIMEOUT
+    return {"low": 190.0, "medium": 310.0, "high": 610.0}.get(
+        reasoning_effort or "", 190.0
+    )
+
 
 # =============================================================================
 # PROMPTS
@@ -191,20 +202,26 @@ class ResumeAdvisorAgent:
             Exception: If LLM generation fails
         """
         logger.info(f"Starting resume advisory for session {state['session_id']}")
-        start_time = datetime.now(timezone.utc)
+        start_time = datetime.now(UTC)
 
         # Store user API key for use in LLM calls (BYOK mode)
         self._current_user_api_key = state.get("user_api_key")
 
         try:
             # Extract and validate required data
-            user_profile: Dict[str, Any] = state.get("user_profile", {})
-            job_analysis: Dict[str, Any] = state.get("job_analysis", {})
-            profile_matching: Optional[Dict[str, Any]] = state.get("profile_matching")
-            company_research: Optional[Dict[str, Any]] = state.get("company_research")
-            prefs: Dict[str, Any] = state.get("workflow_preferences") or {}
+            user_profile: dict[str, Any] = state.get("user_profile", {})
+            job_analysis: dict[str, Any] = state.get("job_analysis", {})
+            profile_matching: dict[str, Any] | None = state.get("profile_matching")
+            company_research: dict[str, Any] | None = state.get("company_research")
+            prefs: dict[str, Any] = state.get("workflow_preferences") or {}
             resume_length: str = prefs.get("resume_length", "concise")
-            user_model: Optional[str] = prefs.get("preferred_model")
+            use_local = prefs.get("ai_provider") == "local"
+            user_model: str | None = (
+                prefs.get("local_model") if use_local else prefs.get("preferred_model")
+            )
+            reasoning_effort: str | None = (
+                prefs.get("local_reasoning_effort") if use_local else None
+            )
 
             if not user_profile:
                 raise ValueError("User profile is required for resume advisory")
@@ -219,11 +236,13 @@ class ResumeAdvisorAgent:
                 company_research,
                 resume_length=resume_length,
                 user_model=user_model,
+                force_local=use_local,
+                local_reasoning_effort=reasoning_effort,
             )
 
             # Add processing metadata
             recommendations["processing_time"] = (
-                datetime.now(timezone.utc) - start_time
+                datetime.now(UTC) - start_time
             ).total_seconds()
             recommendations["analysis_method"] = "EXPERT_LLM"
 
@@ -245,13 +264,15 @@ class ResumeAdvisorAgent:
 
     async def _generate_recommendations(
         self,
-        user_profile: Dict[str, Any],
-        job_analysis: Dict[str, Any],
-        profile_matching: Optional[Dict[str, Any]],
-        company_research: Optional[Dict[str, Any]],
+        user_profile: dict[str, Any],
+        job_analysis: dict[str, Any],
+        profile_matching: dict[str, Any] | None,
+        company_research: dict[str, Any] | None,
         resume_length: str = "concise",
-        user_model: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        user_model: str | None = None,
+        force_local: bool = False,
+        local_reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
         """
         Generate expert resume recommendations using LLM.
 
@@ -305,8 +326,10 @@ class ResumeAdvisorAgent:
                     user_api_key=self._current_user_api_key,
                     model=user_model,
                     structured_output=True,
+                    force_local=force_local,
+                    local_reasoning_effort=local_reasoning_effort,
                 ),
-                timeout=LLM_TIMEOUT,
+                timeout=_generation_timeout(force_local, local_reasoning_effort),
             )
 
             if response.get("filtered"):
@@ -331,14 +354,14 @@ class ResumeAdvisorAgent:
 
             return result
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("LLM request timed out")
             return self._create_fallback_result("Request timed out")
         except Exception as e:
             logger.error(f"LLM request failed: {e}", exc_info=True)
             return self._create_fallback_result(str(e))
 
-    def _format_profile(self, profile: Dict[str, Any]) -> str:
+    def _format_profile(self, profile: dict[str, Any]) -> str:
         """Format user profile for LLM consumption."""
         sections = []
 
@@ -409,7 +432,7 @@ class ResumeAdvisorAgent:
 
         return "\n".join(sections)
 
-    def _format_job(self, job: Dict[str, Any]) -> str:
+    def _format_job(self, job: dict[str, Any]) -> str:
         """Format job analysis for LLM consumption."""
         sections = []
 
@@ -460,7 +483,7 @@ class ResumeAdvisorAgent:
 
         return "\n".join(sections)
 
-    def _format_matching(self, matching: Optional[Dict[str, Any]]) -> str:
+    def _format_matching(self, matching: dict[str, Any] | None) -> str:
         """Format profile matching analysis for LLM consumption."""
         if not matching:
             return "No matching analysis available"
@@ -534,7 +557,7 @@ class ResumeAdvisorAgent:
 
         return "\n".join(sections)
 
-    def _format_company(self, company: Optional[Dict[str, Any]]) -> str:
+    def _format_company(self, company: dict[str, Any] | None) -> str:
         """Format company research for LLM consumption."""
         if not company:
             return "No company research available"
@@ -560,7 +583,7 @@ class ResumeAdvisorAgent:
             "\n".join(sections) if sections else "Limited company information available"
         )
 
-    def _create_fallback_result(self, error_message: str) -> Dict[str, Any]:
+    def _create_fallback_result(self, error_message: str) -> dict[str, Any]:
         """Create fallback result on error."""
         return {
             "strategic_assessment": {

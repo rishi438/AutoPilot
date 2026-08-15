@@ -9,9 +9,11 @@ This module provides functionality to:
 
 import io
 import logging
-from datetime import datetime, timezone
-from typing import Dict, Any, List
+import re
+from datetime import UTC, datetime
+from typing import Any
 
+from config.settings import get_settings
 from utils.llm_client import get_gemini_client, user_facing_message_from_llm_exception
 from utils.llm_parsing import parse_json_from_llm_response
 from utils.llm_prompting import build_llm_system_prompt
@@ -24,6 +26,10 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 # LLM Configuration
 LLM_MAX_TOKENS: int = 4096
+# Reasoning-capable local models such as gpt-oss emit hidden reasoning tokens
+# before the JSON answer.  Keep the cloud limit modest, but reserve enough
+# local budget for both reasoning and the extracted resume data.
+LOCAL_LLM_MAX_TOKENS: int = 12288
 LLM_TEMPERATURE: float = 0.2  # Low temperature for accurate extraction
 
 # File processing
@@ -32,7 +38,7 @@ DOCX_EXTENSION: str = (
     "docx"  # Note: .doc (legacy) not supported - requires different library
 )
 TXT_EXTENSION: str = "txt"
-SUPPORTED_EXTENSIONS: List[str] = [PDF_EXTENSION, DOCX_EXTENSION, TXT_EXTENSION]
+SUPPORTED_EXTENSIONS: list[str] = [PDF_EXTENSION, DOCX_EXTENSION, TXT_EXTENSION]
 MAX_FILE_SIZE_MB: int = 10
 MAX_FILE_SIZE_BYTES: int = MAX_FILE_SIZE_MB * 1024 * 1024
 
@@ -83,7 +89,7 @@ Return ONLY this JSON structure. No explanations, no markdown, just the JSON:
     "years_experience": <integer, sum of all work entry durations in months divided by 12, rounded to nearest integer. Do NOT use the calendar span from first job to today — add up each individual role's months separately then divide>,
     "is_student": <true if currently a student, false otherwise>,
     "summary": "<professional summary, 2-4 sentences. If not in resume, synthesize from experience>",
-    
+
     "work_experience": [
         {{
             "company": "<company name>",
@@ -94,12 +100,12 @@ Return ONLY this JSON structure. No explanations, no markdown, just the JSON:
             "description": "<Follow this exact format — overview sentence(s) first (no bullet prefix), then each bullet on its own line with its original marker. Example:\nBuilt and scaled the core payments infrastructure serving 10M+ users.\n• Designed event-driven architecture using Kafka and PostgreSQL, reducing latency by 40%.\n• Led a team of 6 engineers across 3 time zones.\n• Migrated legacy monolith to microservices with zero downtime.\nPreserve all content faithfully from the resume.>"
         }}
     ],
-    
+
     "skills": [
         "<skill 1>",
         "<skill 2>"
     ],
-    
+
     "education": [
         {{
             "institution": "<school/university name>",
@@ -109,19 +115,19 @@ Return ONLY this JSON structure. No explanations, no markdown, just the JSON:
             "gpa": "<GPA if mentioned, null otherwise>"
         }}
     ],
-    
+
     "certifications": [
         "<certification 1>",
         "<certification 2>"
     ],
-    
+
     "languages": [
         {{
             "language": "<language name>",
             "proficiency": "<Native/Fluent/Professional/Conversational>"
         }}
     ],
-    
+
     "parsing_confidence": "<HIGH | MEDIUM | LOW>",
     "parsing_notes": "<any issues or uncertainties encountered during parsing>"
 }}
@@ -263,8 +269,8 @@ def extract_text_from_file(content: bytes, filename: str) -> str:
 
 
 async def parse_resume(
-    resume_text: str, user_api_key: str | None = None
-) -> Dict[str, Any]:
+    resume_text: str, user_api_key: str | None = None, prefer_local: bool = False
+) -> dict[str, Any]:
     """
     Parse resume text using Gemini LLM to extract structured profile data.
 
@@ -283,19 +289,21 @@ async def parse_resume(
     if not resume_text or len(resume_text.strip()) < 50:
         raise ValueError("Resume text is too short. Please provide a complete resume.")
 
-    start_time = datetime.now(timezone.utc)
+    start_time = datetime.now(UTC)
 
     try:
         gemini_client = await get_gemini_client()
 
         prompt = RESUME_PARSE_PROMPT.format(resume_text=resume_text[:15000])
 
+        local_model = get_settings().local_llm_model if prefer_local else None
         response = await gemini_client.generate(
             prompt=prompt,
             system=SYSTEM_CONTEXT,
             temperature=LLM_TEMPERATURE,
-            max_tokens=LLM_MAX_TOKENS,
+            max_tokens=LOCAL_LLM_MAX_TOKENS if prefer_local else LLM_MAX_TOKENS,
             user_api_key=user_api_key,
+            model=local_model,
             structured_output=True,
         )
 
@@ -310,7 +318,7 @@ async def parse_resume(
             logger.error("Failed to parse LLM response as JSON")
             return _create_parse_error_result(response_text)
 
-        processing_time = (datetime.now(timezone.utc) - start_time).total_seconds()
+        processing_time = (datetime.now(UTC) - start_time).total_seconds()
         parsed_data["processing_time"] = processing_time
         parsed_data["parse_method"] = "GEMINI_LLM"
 
@@ -335,8 +343,11 @@ async def parse_resume(
 
 
 async def parse_resume_from_file(
-    content: bytes, filename: str, user_api_key: str | None = None
-) -> Dict[str, Any]:
+    content: bytes,
+    filename: str,
+    user_api_key: str | None = None,
+    prefer_local: bool = False,
+) -> dict[str, Any]:
     """
     Complete resume parsing: extract text from file and parse with LLM.
 
@@ -361,7 +372,9 @@ async def parse_resume_from_file(
         )
 
     # Step 2: Parse with LLM
-    return await parse_resume(resume_text, user_api_key=user_api_key)
+    return await parse_resume(
+        resume_text, user_api_key=user_api_key, prefer_local=prefer_local
+    )
 
 
 # =============================================================================
@@ -369,7 +382,7 @@ async def parse_resume_from_file(
 # =============================================================================
 
 
-def _clean_parsed_data(data: Dict[str, Any]) -> Dict[str, Any]:
+def _clean_parsed_data(data: dict[str, Any]) -> dict[str, Any]:
     """
     Clean and validate parsed resume data.
 
@@ -404,15 +417,6 @@ def _clean_parsed_data(data: Dict[str, Any]) -> Dict[str, Any]:
         else:
             cleaned[field] = None
 
-    # Integer fields
-    years_exp = data.get("years_experience")
-    if isinstance(years_exp, (int, float)):
-        cleaned["years_experience"] = int(years_exp)
-    elif isinstance(years_exp, str) and years_exp.isdigit():
-        cleaned["years_experience"] = int(years_exp)
-    else:
-        cleaned["years_experience"] = 0
-
     # Boolean fields
     cleaned["is_student"] = bool(data.get("is_student", False))
 
@@ -428,6 +432,17 @@ def _clean_parsed_data(data: Dict[str, Any]) -> Dict[str, Any]:
         ]
     else:
         cleaned["work_experience"] = []
+
+    # The LLM extracts dates; the server calculates duration. This keeps a
+    # current role accurate and preserves fractional values such as 4.5.
+    calculated_years = _calculate_years_experience(cleaned["work_experience"])
+    if calculated_years is not None:
+        cleaned["years_experience"] = calculated_years
+    else:
+        try:
+            cleaned["years_experience"] = round(float(data.get("years_experience")), 1)
+        except (TypeError, ValueError):
+            cleaned["years_experience"] = 0.0
 
     # Education - validate structure
     education = data.get("education", [])
@@ -454,7 +469,7 @@ def _clean_parsed_data(data: Dict[str, Any]) -> Dict[str, Any]:
     return cleaned
 
 
-def _clean_list(items: Any) -> List[str]:
+def _clean_list(items: Any) -> list[str]:
     """Clean a list of strings, removing empty/invalid items."""
     if not isinstance(items, list):
         return []
@@ -465,7 +480,7 @@ def _clean_list(items: Any) -> List[str]:
     ]
 
 
-def _clean_work_experience(exp: Dict[str, Any]) -> Dict[str, Any]:
+def _clean_work_experience(exp: dict[str, Any]) -> dict[str, Any]:
     """Clean and validate a work experience entry."""
     return {
         "company": str(exp.get("company", "")).strip() or None,
@@ -477,7 +492,42 @@ def _clean_work_experience(exp: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _clean_education(edu: Dict[str, Any]) -> Dict[str, Any]:
+def _calculate_years_experience(work_experience: list[dict[str, Any]]) -> float | None:
+    """Sum dated role durations, using the server month for current roles."""
+    now = datetime.now(UTC)
+    current_month = now.year * 12 + now.month
+    total_months = 0
+    dated_roles = 0
+    for role in work_experience:
+        start_month = _experience_month(role.get("start_date"), is_end=False)
+        current = bool(role.get("is_current")) or str(
+            role.get("end_date") or ""
+        ).strip().lower() in {"present", "current", "ongoing", "now"}
+        end_month = (
+            current_month
+            if current
+            else _experience_month(role.get("end_date"), is_end=True)
+        )
+        if start_month is None or end_month is None or end_month < start_month:
+            continue
+        total_months += end_month - start_month
+        dated_roles += 1
+    return round(total_months / 12, 1) if dated_roles else None
+
+
+def _experience_month(value: Any, *, is_end: bool) -> int | None:
+    """Convert YYYY or YYYY-MM into a sortable month value."""
+    match = re.fullmatch(
+        r"(19\d{2}|20\d{2})(?:-(0[1-9]|1[0-2]))?", str(value or "").strip()
+    )
+    if not match:
+        return None
+    year = int(match.group(1))
+    month = int(match.group(2) or (12 if is_end else 1))
+    return year * 12 + month
+
+
+def _clean_education(edu: dict[str, Any]) -> dict[str, Any]:
     """Clean and validate an education entry."""
     field_val = edu.get("field_of_study") or edu.get("field")
     field_clean = str(field_val).strip() if field_val else None
@@ -491,7 +541,7 @@ def _clean_education(edu: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _clean_language(lang: Dict[str, Any]) -> Dict[str, Any]:
+def _clean_language(lang: dict[str, Any]) -> dict[str, Any]:
     """Clean and validate a language entry."""
     return {
         "language": str(lang.get("language", "")).strip() or None,
@@ -499,7 +549,7 @@ def _clean_language(lang: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _create_filtered_result(filter_message: str) -> Dict[str, Any]:
+def _create_filtered_result(filter_message: str) -> dict[str, Any]:
     """Create a result when content was filtered."""
     return {
         "full_name": None,
@@ -524,7 +574,7 @@ def _create_filtered_result(filter_message: str) -> Dict[str, Any]:
     }
 
 
-def _create_parse_error_result(raw_response: str) -> Dict[str, Any]:
+def _create_parse_error_result(raw_response: str) -> dict[str, Any]:
     """Create a result when JSON parsing failed."""
     return {
         "full_name": None,

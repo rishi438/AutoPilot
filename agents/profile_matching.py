@@ -3,14 +3,14 @@ Agent for comprehensive AI-powered profile matching using LLM.
 Performs deep semantic analysis to determine candidate-job compatibility with intelligent insights.
 """
 
-import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional
-from workflows.state_schema import WorkflowState
+from datetime import UTC, datetime
+from typing import Any
+
 from utils.llm_client import get_gemini_client
 from utils.llm_parsing import parse_json_from_llm_response
 from utils.llm_prompting import build_llm_system_prompt
+from workflows.state_schema import WorkflowState
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
         "confidence_level": "<Choose exactly one: HIGH | MEDIUM | LOW>",
         "one_line_verdict": "<One sentence a hiring manager would say, e.g., 'Strong technical fit but may need visa sponsorship'>"
     }},
-    
+
     "qualification_analysis": {{
         "overall_score": <number between 0.0 and 1.0>,
         "skills_assessment": {{
@@ -111,7 +111,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
             "recommended_certifications": ["<certs that would strengthen their application>"]
         }}
     }},
-    
+
     "preference_analysis": {{
         "overall_score": <number between 0.0 and 1.0>,
         "salary_fit": {{
@@ -139,7 +139,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
             "assessment": "<Does this role advance their career in the direction they want?>"
         }}
     }},
-    
+
     "deal_breaker_analysis": {{
         "overall_passed": <true or false - false means they CANNOT take this job>,
         "deal_breakers_found": [
@@ -151,7 +151,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
         "security_clearance_viable": <true or false>,
         "certification_requirements_met": <true or false>
     }},
-    
+
     "competitive_positioning": {{
         "estimated_candidate_pool_percentile": <integer 0-100, where they rank vs typical applicants>,
         "strengths_vs_typical_applicant": ["<advantage they have over other candidates>"],
@@ -159,7 +159,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
         "unique_value_proposition": "<What makes them stand out from the typical applicant?>",
         "likely_competition": "<Who else typically applies for roles like this?>"
     }},
-    
+
     "application_strategy": {{
         "should_apply": <true or false>,
         "application_priority": "<HIGH or MEDIUM or LOW or SKIP>",
@@ -186,7 +186,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
         ],
         "networking_suggestions": "<Give 2-3 concrete tactics: specific team names or roles to target on professional networking platforms, what to reference in the outreach message, and any warm-path angles based on the candidate's background. Be actionable, not generic.>"
     }},
-    
+
     "risk_assessment": {{
         "candidate_risks": [
             {{"risk": "<risk the EMPLOYER faces hiring this person>", "mitigation": "<how candidate can reduce this risk>"}}
@@ -197,7 +197,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
         "red_flags_for_employer": ["<things that might concern the employer>"],
         "yellow_flags_for_candidate": ["<things the candidate should investigate about this company/role>"]
     }},
-    
+
     "final_scores": {{
         "qualification_score": <number between 0.0 and 1.0>,
         "preference_score": <number between 0.0 and 1.0>,
@@ -205,7 +205,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
         "overall_match_score": <number between 0.0 and 1.0>,
         "weighted_recommendation_score": <number between 0.0 and 1.0>
     }},
-    
+
     "ai_insights": {{
         "unexpected_findings": "<Anything surprising you noticed during this analysis>",
         "career_advice": "<Brief advice for this candidate beyond this specific job>",
@@ -338,15 +338,23 @@ class ProfileMatchingAgent:
             ValueError: If user profile or job analysis is missing from state
         """
         logger.info(f"Starting AI profile matching for session {state['session_id']}")
-        start_time: datetime = datetime.now(timezone.utc)
+        start_time: datetime = datetime.now(UTC)
 
         # Store user API key for use in LLM calls (BYOK mode)
         self._current_user_api_key = state.get("user_api_key")
+        prefs: dict[str, Any] = state.get("workflow_preferences") or {}
+        use_local = prefs.get("ai_provider") == "local"
+        user_model: str | None = (
+            prefs.get("local_model") if use_local else prefs.get("preferred_model")
+        )
+        reasoning_effort: str | None = (
+            prefs.get("local_reasoning_effort") if use_local else None
+        )
 
         try:
             # Validate required data
-            user_profile: Dict[str, Any] = state.get("user_profile")
-            job_analysis: Optional[Dict[str, Any]] = state.get("job_analysis")
+            user_profile: dict[str, Any] = state.get("user_profile")
+            job_analysis: dict[str, Any] | None = state.get("job_analysis")
 
             if not user_profile:
                 raise ValueError("User profile is required for matching analysis")
@@ -357,16 +365,20 @@ class ProfileMatchingAgent:
             self.gemini_client = await get_gemini_client()
 
             # Perform AI-powered matching analysis
-            matching_result: Dict[str, Any] = await self._analyze_match(
-                user_profile, job_analysis
+            matching_result: dict[str, Any] = await self._analyze_match(
+                user_profile,
+                job_analysis,
+                user_model=user_model,
+                force_local=use_local,
+                local_reasoning_effort=reasoning_effort,
             )
 
             # Add metadata
             matching_result["processing_time"] = (
-                datetime.now(timezone.utc) - start_time
+                datetime.now(UTC) - start_time
             ).total_seconds()
             matching_result["analysis_method"] = "AI_POWERED"
-            matching_result["model_used"] = "gemini"
+            matching_result["model_used"] = user_model or "gemini"
 
             # Extract scores for backward compatibility
             final_scores = matching_result.get("final_scores", {})
@@ -394,7 +406,7 @@ class ProfileMatchingAgent:
                 f"Overall Score: {matching_result.get('overall_score', 0):.2f}"
             )
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("AI profile matching timed out", exc_info=True)
             state["profile_matching"] = self._create_error_result("Analysis timed out")
             raise
@@ -406,8 +418,14 @@ class ProfileMatchingAgent:
         return state
 
     async def _analyze_match(
-        self, user_profile: Dict[str, Any], job_analysis: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self,
+        user_profile: dict[str, Any],
+        job_analysis: dict[str, Any],
+        *,
+        user_model: str | None = None,
+        force_local: bool = False,
+        local_reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
         """
         Execute comprehensive AI-powered matching analysis.
 
@@ -439,7 +457,10 @@ class ProfileMatchingAgent:
             temperature=LLM_TEMPERATURE,
             max_tokens=LLM_MAX_TOKENS,
             user_api_key=self._current_user_api_key,
+            model=user_model,
             structured_output=True,
+            force_local=force_local,
+            local_reasoning_effort=local_reasoning_effort,
         )
 
         # Handle safety filter
@@ -449,7 +470,7 @@ class ProfileMatchingAgent:
 
         # Parse the response
         response_text: str = response.get("response", "")
-        result: Dict[str, Any] = parse_json_from_llm_response(response_text)
+        result: dict[str, Any] = parse_json_from_llm_response(response_text)
 
         if not result:
             logger.error("Failed to parse LLM response as JSON")
@@ -458,7 +479,26 @@ class ProfileMatchingAgent:
         logger.info("AI matching analysis completed successfully")
         return result
 
-    def _format_user_profile(self, profile: Dict[str, Any]) -> str:
+    @staticmethod
+    def _format_salary_range(salary_range: Any) -> str:
+        """Format a salary range with its supplied currency; never assume USD."""
+        if not isinstance(salary_range, dict):
+            return str(salary_range) if salary_range else "Not specified"
+
+        minimum = salary_range.get("min")
+        maximum = salary_range.get("max")
+        if minimum is None or maximum is None:
+            return "Not specified"
+
+        currency = (
+            str(salary_range.get("currency") or "Currency unspecified").strip().upper()
+        )
+        try:
+            return f"{currency} {minimum:,} - {currency} {maximum:,}"
+        except (TypeError, ValueError):
+            return f"{currency} {minimum} - {currency} {maximum}"
+
+    def _format_user_profile(self, profile: dict[str, Any]) -> str:
         """
         Format user profile data for LLM consumption.
 
@@ -535,14 +575,7 @@ class ProfileMatchingAgent:
             edu_section += "No structured education entries listed.\n"
 
         # Preferences
-        salary_range = profile.get("desired_salary_range", {})
-        if salary_range and salary_range.get("min") and salary_range.get("max"):
-            try:
-                salary_str = f"${salary_range['min']:,} - ${salary_range['max']:,}"
-            except (TypeError, ValueError):
-                salary_str = f"{salary_range.get('min', 'N/A')} - {salary_range.get('max', 'N/A')}"
-        else:
-            salary_str = "Not specified"
+        salary_str = self._format_salary_range(profile.get("desired_salary_range"))
 
         preferences_section = f"""
 ### JOB PREFERENCES
@@ -572,7 +605,7 @@ class ProfileMatchingAgent:
             + constraints_section
         )
 
-    def _format_job_analysis(self, job: Dict[str, Any]) -> str:
+    def _format_job_analysis(self, job: dict[str, Any]) -> str:
         """
         Format job analysis data for LLM consumption.
 
@@ -598,21 +631,7 @@ class ProfileMatchingAgent:
 """
 
         # Salary
-        salary_range = job.get("salary_range", {})
-        if (
-            salary_range
-            and isinstance(salary_range, dict)
-            and salary_range.get("min")
-            and salary_range.get("max")
-        ):
-            try:
-                salary_str = f"${salary_range['min']:,} - ${salary_range['max']:,}"
-            except (TypeError, ValueError):
-                salary_str = f"{salary_range.get('min', 'N/A')} - {salary_range.get('max', 'N/A')}"
-        elif salary_range and not isinstance(salary_range, dict):
-            salary_str = str(salary_range)
-        else:
-            salary_str = "Not specified"
+        salary_str = self._format_salary_range(job.get("salary_range"))
 
         salary_section = f"""
 ### COMPENSATION
@@ -684,7 +703,7 @@ class ProfileMatchingAgent:
             + keywords_section
         )
 
-    def _create_error_result(self, error_message: str) -> Dict[str, Any]:
+    def _create_error_result(self, error_message: str) -> dict[str, Any]:
         """
         Create a fallback result when analysis fails.
 
@@ -716,7 +735,7 @@ class ProfileMatchingAgent:
             "analysis_method": "ERROR_FALLBACK",
         }
 
-    def _create_filtered_result(self, filter_message: str) -> Dict[str, Any]:
+    def _create_filtered_result(self, filter_message: str) -> dict[str, Any]:
         """
         Create a result when content is filtered by safety settings.
 
@@ -748,7 +767,7 @@ class ProfileMatchingAgent:
             "analysis_method": "FILTERED_FALLBACK",
         }
 
-    def _create_parse_error_result(self, raw_response: str) -> Dict[str, Any]:
+    def _create_parse_error_result(self, raw_response: str) -> dict[str, Any]:
         """
         Create a safe result when JSON parsing fails.
 

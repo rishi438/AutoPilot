@@ -3,45 +3,51 @@ Main FastAPI application for ApplyPilot.
 This module sets up the web server, API routes, middleware, and application lifecycle.
 """
 
+import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional, Any, Dict
+from typing import Any
+
 import uvicorn
-import json
-from utils.bcrypt_patch import apply_bcrypt_patch
-from fastapi import FastAPI, Request, status, HTTPException
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, HTMLResponse, Response
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+from api.admin import router as admin_router
+from api.applications import router as applications_router
+from api.auth import router as auth_router
+from api.extension_autofill import router as extension_autofill_router
+from api.interview_prep import router as interview_prep_router
+from api.profile import router as profile_router
+from api.tools import router as tools_router
+from api.websocket import router as websocket_router
+from api.workflow import router as workflow_router
 from config.settings import get_settings
+from utils.bcrypt_patch import apply_bcrypt_patch
 from utils.database import (
-    connect_to_database,
     check_database_health,
     close_database_connection,
+    connect_to_database,
 )
-from utils.llm_client import check_gemini_health, close_gemini_client
-from utils.redis_client import check_redis_health, close_redis_connection
-from utils.logging_config import setup_logging, log_startup_info
-from utils.request_middleware import RequestLoggingMiddleware, SlowRequestMiddleware
-from api.auth import router as auth_router
-from api.profile import router as profile_router
-from api.applications import router as applications_router
-from api.workflow import router as workflow_router
-from api.websocket import router as websocket_router
-from api.interview_prep import router as interview_prep_router
-from api.tools import router as tools_router
-from api.extension_autofill import router as extension_autofill_router
-from api.admin import router as admin_router
-from workflows.job_application_workflow import get_initialized_workflow
-from utils.json_utils import serialize_object_for_json
-from utils.error_responses import APIError, ErrorCode, create_error_response, not_found_error
-from utils.logging_config import request_id_var
 from utils.error_reporting import report_exception
+from utils.error_responses import (
+    APIError,
+    ErrorCode,
+    create_error_response,
+    not_found_error,
+)
+from utils.json_utils import serialize_object_for_json
+from utils.llm_client import check_gemini_health, close_gemini_client
+from utils.logging_config import log_startup_info, request_id_var, setup_logging
+from utils.redis_client import check_redis_health, close_redis_connection
+from utils.request_middleware import RequestLoggingMiddleware, SlowRequestMiddleware
+from workflows.job_application_workflow import get_initialized_workflow
 
 apply_bcrypt_patch()
 
@@ -67,13 +73,13 @@ setup_logging(
 logger = logging.getLogger(__name__)
 
 # Global variables
-templates: Optional[Jinja2Templates] = None
+templates: Jinja2Templates | None = None
 
 # =============================================================================
 # ASSET MANIFEST (Vite/esbuild content-hashed output)
 # =============================================================================
 
-_asset_manifest: Optional[dict] = None
+_asset_manifest: dict | None = None
 _MANIFEST_PATH = Path("ui/static/dist/manifest.json")
 
 
@@ -81,6 +87,7 @@ def _load_asset_manifest() -> dict:
     """Load the build manifest. Cached in production; re-read on every request in development."""
     global _asset_manifest
     from config import get_settings as _get_settings
+
     _settings = _get_settings()
     if _asset_manifest is not None and _settings.is_production:
         return _asset_manifest
@@ -88,7 +95,9 @@ def _load_asset_manifest() -> dict:
         try:
             _asset_manifest = json.loads(_MANIFEST_PATH.read_text())
         except (json.JSONDecodeError, OSError) as manifest_err:
-            logger.error("Failed to parse asset manifest at %s: %s", _MANIFEST_PATH, manifest_err)
+            logger.error(
+                "Failed to parse asset manifest at %s: %s", _MANIFEST_PATH, manifest_err
+            )
             _asset_manifest = {}
     else:
         _asset_manifest = {}
@@ -104,6 +113,11 @@ def asset_url(path: str) -> str:
 
     Usage in templates: {{ asset_url('js/app.js') }}
     """
+    # Local DEBUG mode serves mounted source assets directly, so frontend edits
+    # appear without rebuilding an image or regenerating hashed bundles.
+    if settings.debug:
+        return f"/static/{path}"
+
     manifest = _load_asset_manifest()
     hashed = manifest.get(path)
     if hashed:
@@ -127,11 +141,13 @@ async def _cleanup_orphaned_sessions() -> None:
     marked as FAILED so users receive clear feedback.
     """
     from datetime import timedelta
-    from sqlalchemy import update
-    from utils.database import get_session
-    from models.database import WorkflowSession
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+    from sqlalchemy import update
+
+    from models.database import WorkflowSession
+    from utils.database import get_session
+
+    cutoff = datetime.now(UTC) - timedelta(hours=2)
     orphaned_statuses = ["initialized", "in_progress"]
 
     async with get_session() as db:
@@ -143,14 +159,18 @@ async def _cleanup_orphaned_sessions() -> None:
             )
             .values(
                 workflow_status="failed",
-                error_messages=["Session interrupted by server restart. Please re-submit your job."],
+                error_messages=[
+                    "Session interrupted by server restart. Please re-submit your job."
+                ],
             )
             .returning(WorkflowSession.session_id)
         )
         rows = result.fetchall()
         await db.commit()
         if rows:
-            logger.warning(f"Startup: reset {len(rows)} orphaned workflow session(s) to 'failed'")
+            logger.warning(
+                f"Startup: reset {len(rows)} orphaned workflow session(s) to 'failed'"
+            )
 
 
 @asynccontextmanager
@@ -187,8 +207,12 @@ async def lifespan(app: FastAPI):
             )
 
         if settings.is_production and settings.debug:
-            logger.critical("DEBUG=true is set in a production environment. This enables insecure code paths.")
-            raise RuntimeError("DEBUG must be false in production — set DEBUG=false in your environment")
+            logger.critical(
+                "DEBUG=true is set in a production environment. This enables insecure code paths."
+            )
+            raise RuntimeError(
+                "DEBUG must be false in production — set DEBUG=false in your environment"
+            )
 
         redis_url = getattr(settings, "redis_url", "") or ""
         if settings.is_production and not redis_url:
@@ -197,7 +221,11 @@ async def lifespan(app: FastAPI):
                 "Redis is required for caching, rate limiting, and JWT revocation. "
                 "Set REDIS_URL to a valid rediss:// connection string."
             )
-        if settings.is_production and redis_url and not redis_url.startswith("rediss://"):
+        if (
+            settings.is_production
+            and redis_url
+            and not redis_url.startswith("rediss://")
+        ):
             logger.critical(
                 "REDIS_URL does not use TLS (rediss://) in production. "
                 "Redis traffic is unencrypted. Update REDIS_URL to use rediss://."
@@ -206,6 +234,7 @@ async def lifespan(app: FastAPI):
 
         # Initialise distributed tracing (no-op if OTel packages not installed)
         from utils.tracing import setup_tracing
+
         setup_tracing(
             service_name=settings.app_name.lower().replace(" ", "-"),
             service_version=settings.app_version,
@@ -220,7 +249,9 @@ async def lifespan(app: FastAPI):
                 logger.error(f"Permission denied creating directory: {dir_name}")
                 raise
             except OSError as e:
-                logger.error(f"Failed to create directory {dir_name}: {e}", exc_info=True)
+                logger.error(
+                    f"Failed to create directory {dir_name}: {e}", exc_info=True
+                )
                 raise
 
         # Initialize PostgreSQL database connection
@@ -230,6 +261,7 @@ async def lifespan(app: FastAPI):
         # Initialize Redis connection
         try:
             from utils.redis_client import connect_to_redis
+
             await connect_to_redis()
             logger.info("Redis connection initialized successfully")
         except Exception as e:
@@ -332,7 +364,7 @@ def configure_middleware(app: FastAPI):
         SlowRequestMiddleware,
         threshold_ms=settings.slow_request_threshold_ms,
     )
-    
+
     # Security headers middleware
     @app.middleware("http")
     async def security_headers_middleware(request: Request, call_next):
@@ -352,6 +384,9 @@ def configure_middleware(app: FastAPI):
         # Prevent clickjacking
         response.headers["X-Frame-Options"] = "DENY"
 
+        # Prevent other origins from loading this application's responses as resources.
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+
         # XSS protection (legacy, but still useful for older browsers)
         response.headers["X-XSS-Protection"] = "1; mode=block"
 
@@ -359,11 +394,15 @@ def configure_middleware(app: FastAPI):
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
 
         # Restrict browser features
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), microphone=(), geolocation=()"
+        )
 
         # HSTS - only in production (Cloud Run provides HTTPS)
         if settings.is_production:
-            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=31536000; includeSubDomains"
+            )
 
         # Content Security Policy — nonce-based (no 'unsafe-inline' for scripts or styles).
         # All inline <script> and <style> blocks across all templates carry
@@ -387,7 +426,7 @@ def configure_middleware(app: FastAPI):
         response.headers["Content-Security-Policy"] = "; ".join(csp_directives)
 
         return response
-    
+
     # X-API-Version header on all /api/v1/ responses
     @app.middleware("http")
     async def api_version_header_middleware(request: Request, call_next):
@@ -444,18 +483,23 @@ def configure_middleware(app: FastAPI):
     async def api_rate_limit_middleware(request: Request, call_next):
         """Apply rate limiting to API endpoints."""
         from utils.cache import check_rate_limit_with_headers
-        
+
         path = str(request.url.path)
-        
+
         # Only rate limit API endpoints (not static files, health checks, etc.)
         if not path.startswith("/api/"):
             return await call_next(request)
-        
+
         # Skip rate limiting for certain endpoints
-        skip_paths = ["/api/health", "/api/ws/", "/api/v1/auth/login", "/api/v1/auth/register"]
+        skip_paths = [
+            "/api/health",
+            "/api/ws/",
+            "/api/v1/auth/login",
+            "/api/v1/auth/register",
+        ]
         if any(path.startswith(skip) for skip in skip_paths):
             return await call_next(request)
-        
+
         # Get client IP: use the TCP-level peer address (set by Cloud Run/uvicorn)
         # which is not spoofable.  X-Forwarded-For's first entry is client-controlled
         # and must NOT be used for security decisions.
@@ -466,18 +510,19 @@ def configure_middleware(app: FastAPI):
         if auth_header.startswith("Bearer "):
             # Use a SHA-256 hash of the token as identifier (more specific than IP)
             import hashlib
+
             token_hash = hashlib.sha256(auth_header.encode()).hexdigest()[:16]
             identifier = f"api:{token_hash}"
         else:
             identifier = f"api:{client_ip}"
-        
+
         # Rate limit: 100 requests per minute per user/IP
         result = await check_rate_limit_with_headers(
             identifier=identifier,
             limit=100,
             window_seconds=60,
         )
-        
+
         if not result.allowed:
             return create_error_response(
                 error_code=ErrorCode.RATE_LIMIT_EXCEEDED,
@@ -490,27 +535,31 @@ def configure_middleware(app: FastAPI):
                     "X-RateLimit-Reset": str(result.reset_seconds),
                 },
             )
-        
+
         # Process request and add rate limit headers to response
         response = await call_next(request)
         response.headers["X-RateLimit-Limit"] = str(result.limit)
         response.headers["X-RateLimit-Remaining"] = str(result.remaining)
         response.headers["X-RateLimit-Reset"] = str(result.reset_seconds)
-        
+
         return response
-    
+
     # Maintenance mode middleware
     @app.middleware("http")
     async def maintenance_mode_middleware(request: Request, call_next):
         """Check for maintenance mode and return maintenance page if enabled."""
-        from utils.maintenance import is_maintenance_mode, should_bypass_maintenance, get_maintenance_info
-        
+        from utils.maintenance import (
+            get_maintenance_info,
+            is_maintenance_mode,
+            should_bypass_maintenance,
+        )
+
         path = str(request.url.path)
-        
+
         # Allow certain paths to bypass maintenance mode
         if should_bypass_maintenance(path):
             return await call_next(request)
-        
+
         # Check if maintenance mode is enabled
         if await is_maintenance_mode():
             # For API requests, return JSON
@@ -521,12 +570,14 @@ def configure_middleware(app: FastAPI):
                     status_code=503,
                     content={
                         "error": "maintenance",
-                        "message": maintenance_info.get("message", "Service under maintenance"),
+                        "message": maintenance_info.get(
+                            "message", "Service under maintenance"
+                        ),
                         "estimated_end": maintenance_info.get("estimated_end"),
                     },
                     headers={"Retry-After": "300"},  # 5 minutes
                 )
-            
+
             # For browser requests, serve maintenance page
             if templates is not None:
                 maintenance_info = await get_maintenance_info()
@@ -540,23 +591,8 @@ def configure_middleware(app: FastAPI):
                     },
                     status_code=503,
                 )
-        
+
         return await call_next(request)
-
-    # CORS middleware
-    origins = (
-        settings.cors_origins
-        if isinstance(settings.cors_origins, list)
-        else [settings.cors_origins]
-    )
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=settings.cors_credentials,
-        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With"],
-    )
 
     # Trusted Host middleware
     try:
@@ -588,21 +624,46 @@ def configure_middleware(app: FastAPI):
             logger.warning(f"Using fallback hosts: {fallback_hosts}")
             app.add_middleware(TrustedHostMiddleware, allowed_hosts=fallback_hosts)
 
+    # Register CORS last so it is the outermost middleware and adds headers
+    # consistently, including to responses generated by other middleware.
+    origins = (
+        settings.cors_origins
+        if isinstance(settings.cors_origins, list)
+        else [settings.cors_origins]
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=settings.cors_credentials,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With"],
+    )
+
 
 def include_routers(app: FastAPI):
     """Include API routers with versioning."""
 
     # API v1 routes (current version)
     API_V1_PREFIX = "/api/v1"
-    
-    app.include_router(auth_router, prefix=f"{API_V1_PREFIX}/auth", tags=["Authentication"])
-    app.include_router(profile_router, prefix=f"{API_V1_PREFIX}/profile", tags=["User Profile"])
+
     app.include_router(
-        applications_router, prefix=f"{API_V1_PREFIX}/applications", tags=["Job Applications"]
+        auth_router, prefix=f"{API_V1_PREFIX}/auth", tags=["Authentication"]
     )
-    app.include_router(workflow_router, prefix=f"{API_V1_PREFIX}/workflow", tags=["Workflow"])
     app.include_router(
-        interview_prep_router, prefix=f"{API_V1_PREFIX}/interview-prep", tags=["Interview Prep"]
+        profile_router, prefix=f"{API_V1_PREFIX}/profile", tags=["User Profile"]
+    )
+    app.include_router(
+        applications_router,
+        prefix=f"{API_V1_PREFIX}/applications",
+        tags=["Job Applications"],
+    )
+    app.include_router(
+        workflow_router, prefix=f"{API_V1_PREFIX}/workflow", tags=["Workflow"]
+    )
+    app.include_router(
+        interview_prep_router,
+        prefix=f"{API_V1_PREFIX}/interview-prep",
+        tags=["Interview Prep"],
     )
     app.include_router(
         tools_router, prefix=f"{API_V1_PREFIX}/tools", tags=["Career Tools"]
@@ -617,17 +678,41 @@ def include_routers(app: FastAPI):
 
     # Legacy routes (for backward compatibility - redirect to v1)
     # These ensure existing clients continue to work
-    app.include_router(auth_router, prefix="/api/auth", tags=["Authentication (Legacy)"], include_in_schema=False)
-    app.include_router(profile_router, prefix="/api/profile", tags=["User Profile (Legacy)"], include_in_schema=False)
     app.include_router(
-        applications_router, prefix="/api/applications", tags=["Job Applications (Legacy)"], include_in_schema=False
-    )
-    app.include_router(workflow_router, prefix="/api/workflow", tags=["Workflow (Legacy)"], include_in_schema=False)
-    app.include_router(
-        interview_prep_router, prefix="/api/interview-prep", tags=["Interview Prep (Legacy)"], include_in_schema=False
+        auth_router,
+        prefix="/api/auth",
+        tags=["Authentication (Legacy)"],
+        include_in_schema=False,
     )
     app.include_router(
-        tools_router, prefix="/api/tools", tags=["Career Tools (Legacy)"], include_in_schema=False
+        profile_router,
+        prefix="/api/profile",
+        tags=["User Profile (Legacy)"],
+        include_in_schema=False,
+    )
+    app.include_router(
+        applications_router,
+        prefix="/api/applications",
+        tags=["Job Applications (Legacy)"],
+        include_in_schema=False,
+    )
+    app.include_router(
+        workflow_router,
+        prefix="/api/workflow",
+        tags=["Workflow (Legacy)"],
+        include_in_schema=False,
+    )
+    app.include_router(
+        interview_prep_router,
+        prefix="/api/interview-prep",
+        tags=["Interview Prep (Legacy)"],
+        include_in_schema=False,
+    )
+    app.include_router(
+        tools_router,
+        prefix="/api/tools",
+        tags=["Career Tools (Legacy)"],
+        include_in_schema=False,
     )
     app.include_router(
         extension_autofill_router,
@@ -635,18 +720,25 @@ def include_routers(app: FastAPI):
         tags=["Extension (Legacy)"],
         include_in_schema=False,
     )
-    app.include_router(websocket_router, prefix="/api", tags=["WebSocket (Legacy)"], include_in_schema=False)
-    
+    app.include_router(
+        websocket_router,
+        prefix="/api",
+        tags=["WebSocket (Legacy)"],
+        include_in_schema=False,
+    )
+
     # Cache stats endpoint for monitoring — requires admin authentication
     from fastapi import Depends
+
     from utils.auth import require_admin
 
     @app.get("/api/v1/cache/stats", tags=["Monitoring"])
     @app.get("/api/cache/stats", tags=["Monitoring"], include_in_schema=False)
-    async def cache_stats(current_user: Dict[str, Any] = Depends(require_admin)):
+    async def cache_stats(current_user: dict[str, Any] = Depends(require_admin)):
         """Get Redis cache statistics for monitoring. Requires admin role."""
         try:
             from utils.cache import get_cache_stats
+
             return await get_cache_stats()
         except Exception as e:
             logger.warning(f"Failed to get cache stats: {e}")
@@ -665,7 +757,7 @@ def add_custom_routes(app: FastAPI):
         The actual health status is in the response body.
         """
         try:
-            services_status: Dict[str, str] = {}
+            services_status: dict[str, str] = {}
             overall_status: str = "healthy"
 
             # Check database service - critical for application
@@ -683,11 +775,15 @@ def add_custom_routes(app: FastAPI):
                 logger.error(f"Database health check error: {e}", exc_info=True)
 
             # Check Gemini service - non-critical; skip in BYOK-only mode
-            server_has_gemini_key = bool(getattr(settings, "gemini_api_key", None)) or getattr(settings, "use_vertex_ai", False)
+            server_has_gemini_key = bool(
+                getattr(settings, "gemini_api_key", None)
+            ) or getattr(settings, "use_vertex_ai", False)
             if server_has_gemini_key:
                 try:
                     gemini_healthy: bool = await check_gemini_health()
-                    services_status["gemini"] = "healthy" if gemini_healthy else "degraded"
+                    services_status["gemini"] = (
+                        "healthy" if gemini_healthy else "degraded"
+                    )
                 except Exception as e:
                     services_status["gemini"] = "degraded"
                     logger.error(f"Gemini health check error: {e}", exc_info=True)
@@ -706,6 +802,7 @@ def add_custom_routes(app: FastAPI):
             maintenance = False
             try:
                 from utils.maintenance import is_maintenance_mode
+
                 maintenance = await is_maintenance_mode()
             except Exception as e:
                 logger.error(f"Maintenance mode check error: {e}", exc_info=True)
@@ -713,7 +810,7 @@ def add_custom_routes(app: FastAPI):
             health_status = {
                 "status": overall_status,
                 "maintenance": maintenance,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "services": services_status,
                 "version": settings.app_version,
             }
@@ -726,7 +823,7 @@ def add_custom_routes(app: FastAPI):
             return JSONResponse(
                 content={
                     "status": "degraded",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": datetime.now(UTC).isoformat(),
                     "message": "Health check encountered an error but service may still be operational",
                 },
                 status_code=200,
@@ -772,7 +869,11 @@ def add_custom_routes(app: FastAPI):
         try:
             return templates.TemplateResponse(
                 "dashboard/index.html",
-                {"request": request, "app_name": settings.app_name, **get_analytics_context()},
+                {
+                    "request": request,
+                    "app_name": settings.app_name,
+                    **get_analytics_context(),
+                },
             )
         except Exception as e:
             logger.error(f"Error serving dashboard: {e}", exc_info=True)
@@ -984,7 +1085,11 @@ def add_custom_routes(app: FastAPI):
         try:
             return templates.TemplateResponse(
                 "profile/setup.html",
-                {"request": request, "app_name": settings.app_name, **get_analytics_context()},
+                {
+                    "request": request,
+                    "app_name": settings.app_name,
+                    **get_analytics_context(),
+                },
             )
         except Exception as e:
             logger.error(f"Error serving profile setup page: {e}", exc_info=True)
@@ -1006,7 +1111,11 @@ def add_custom_routes(app: FastAPI):
         try:
             return templates.TemplateResponse(
                 "help.html",
-                {"request": request, "app_name": settings.app_name, **get_analytics_context()},
+                {
+                    "request": request,
+                    "app_name": settings.app_name,
+                    **get_analytics_context(),
+                },
             )
         except Exception as e:
             logger.error(f"Error serving help page: {e}", exc_info=True)
@@ -1020,7 +1129,7 @@ def add_custom_routes(app: FastAPI):
     async def maintenance_page(request: Request):
         """Serve the maintenance page."""
         from utils.maintenance import get_maintenance_info
-        
+
         if templates is None:
             return HTMLResponse(
                 content="<h1>Maintenance</h1><p>Service under maintenance...</p>",
@@ -1141,14 +1250,17 @@ def add_custom_routes(app: FastAPI):
     @app.get("/.well-known/security.txt", include_in_schema=False)
     async def security_txt(request: Request):
         """Serve security.txt per RFC 9116 for responsible disclosure."""
-        from datetime import timezone
         import datetime
 
         expires = (
-            datetime.datetime.now(timezone.utc) + datetime.timedelta(days=365)
+            datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=365)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        domain = settings.base_url.replace("https://", "").replace("http://", "").split("/")[0]
+        domain = (
+            settings.base_url.replace("https://", "")
+            .replace("http://", "")
+            .split("/")[0]
+        )
         contact_email = settings.security_contact_email or f"security@{domain}"
 
         content = (
@@ -1196,7 +1308,9 @@ def add_exception_handlers(app: FastAPI):
     @app.exception_handler(APIError)
     async def api_error_handler(request: Request, exc: APIError):
         """Handle custom API errors with standardized format."""
-        logger.warning(f"API Error {exc.error_code.value}: {exc.message} - {request.url}")
+        logger.warning(
+            f"API Error {exc.error_code.value}: {exc.message} - {request.url}"
+        )
         return exc.to_response()
 
     @app.exception_handler(RequestValidationError)
@@ -1209,16 +1323,16 @@ def add_exception_handlers(app: FastAPI):
         details = []
         for error in errors:
             field = ".".join(str(loc) for loc in error.get("loc", []))
-            details.append({
-                "field": field,
-                "message": error.get("msg", "Validation error"),
-                "code": error.get("type", "validation_error"),
-            })
+            details.append(
+                {
+                    "field": field,
+                    "message": error.get("msg", "Validation error"),
+                    "code": error.get("type", "validation_error"),
+                }
+            )
 
-        logger.error(
-            f"Validation error for {request.method} {request.url}: {details}"
-        )
-        
+        logger.error(f"Validation error for {request.method} {request.url}: {details}")
+
         return create_error_response(
             error_code=ErrorCode.VALIDATION_ERROR,
             message="Request validation failed",
@@ -1242,11 +1356,16 @@ def add_exception_handlers(app: FastAPI):
                         {"request": request, "app_name": settings.app_name},
                         status_code=404,
                     )
-                except Exception as tpl_err:
-                    logger.debug("Failed to render 404 template, falling back to JSON", exc_info=True)
+                except Exception:
+                    logger.debug(
+                        "Failed to render 404 template, falling back to JSON",
+                        exc_info=True,
+                    )
             elif exc.status_code >= 500:
                 try:
-                    error_id = request_id_var.get() or f"ERR-{datetime.now().timestamp()}"
+                    error_id = (
+                        request_id_var.get() or f"ERR-{datetime.now().timestamp()}"
+                    )
                     return templates.TemplateResponse(
                         "errors/500.html",
                         {
@@ -1256,8 +1375,11 @@ def add_exception_handlers(app: FastAPI):
                         },
                         status_code=exc.status_code,
                     )
-                except Exception as tpl_err:
-                    logger.debug("Failed to render 500 template, falling back to JSON", exc_info=True)
+                except Exception:
+                    logger.debug(
+                        "Failed to render 500 template, falling back to JSON",
+                        exc_info=True,
+                    )
 
         # Map HTTP status codes to error codes
         error_code_map = {
@@ -1298,7 +1420,10 @@ def add_exception_handlers(app: FastAPI):
                     status_code=500,
                 )
             except Exception:
-                logger.debug("Failed to render 500 template in general handler, falling back to JSON", exc_info=True)
+                logger.debug(
+                    "Failed to render 500 template in general handler, falling back to JSON",
+                    exc_info=True,
+                )
 
         message = "An unexpected error occurred"
         if not settings.is_production:

@@ -68,6 +68,11 @@ COPY --chown=appuser:appuser . .
 # Copy the built frontend assets from the Node stage (overwrites empty dist/)
 COPY --from=frontend-builder --chown=appuser:appuser /app/ui/static/dist ./ui/static/dist
 
+# Resume uploads are stored beneath /app/data.  WORKDIR itself is root-owned,
+# so create the directory before dropping privileges.
+RUN mkdir -p /app/data/user_resumes \
+    && chown -R appuser:appuser /app/data
+
 # Alembic runs before uvicorn (see docker-entrypoint.sh) so `docker compose up` needs no separate migrate step.
 RUN chmod +x /app/docker-entrypoint.sh
 

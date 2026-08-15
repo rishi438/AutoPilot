@@ -3,31 +3,32 @@ Agent for advanced job posting analysis and extraction from URLs and text.
 Uses AI-powered content analysis to generate structured job data for application workflows.
 """
 
-import asyncio
 import json
 import logging
 import re
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
-from utils.text_processing import clean_text
-from workflows.state_schema import WorkflowState, InputMethod, JobAnalysisResult
+from datetime import UTC, datetime
+from typing import Any
+
+from config.constants import _INVALID_JOB_TITLES
+from utils.cache import (
+    _get_job_cache_key,
+    acquire_compute_lock,
+    cache_job_analysis,
+    get_cached_job_analysis,
+    release_compute_lock,
+)
 from utils.llm_parsing import parse_json_from_llm_response
 from utils.llm_prompting import build_llm_system_prompt
-from utils.cache import (
-    get_cached_job_analysis,
-    cache_job_analysis,
-    acquire_compute_lock,
-    release_compute_lock,
-    _get_job_cache_key,
-)
+from utils.text_processing import clean_text
+from workflows.state_schema import InputMethod, JobAnalysisResult, WorkflowState
 
 logger: logging.Logger = logging.getLogger(__name__)
 
 
-def _normalize_string_list(val: Any, *, split_lines: bool = False) -> List[str]:
+def _normalize_string_list(val: Any, *, split_lines: bool = False) -> list[str]:
     """Coerce LLM output to List[str]; models often emit a prose string instead of an array."""
 
-    def _flatten_dict(obj: Dict[str, Any]) -> Optional[str]:
+    def _flatten_dict(obj: dict[str, Any]) -> str | None:
         for key in (
             "qualification",
             "requirement",
@@ -47,7 +48,7 @@ def _normalize_string_list(val: Any, *, split_lines: bool = False) -> List[str]:
     if val is None:
         return []
     if isinstance(val, list):
-        out: List[str] = []
+        out: list[str] = []
         for item in val:
             if isinstance(item, str):
                 s = item.strip()
@@ -68,6 +69,14 @@ def _normalize_string_list(val: Any, *, split_lines: bool = False) -> List[str]:
                 return lines
         return [s]
     return []
+
+
+def _has_usable_job_title(value: Any) -> bool:
+    """A completed application must have an actual posting title."""
+    if not isinstance(value, str):
+        return False
+    normalized = " ".join(value.split()).casefold()
+    return bool(normalized and normalized not in _INVALID_JOB_TITLES)
 
 
 # =============================================================================
@@ -127,7 +136,7 @@ Extract information into this EXACT JSON structure. Output ONLY valid JSON, no e
     "posted_date": "<YYYY-MM-DD if the posting date is explicitly stated; must be between 2026-01-01 and today (inclusive); null if absent, unclear, or would violate those constraints>",
     "application_deadline": "<date string or null>",
     "benefits": ["<benefit 1>", "<benefit 2>"],
-    
+
     "required_skills": [
         "<technical skill 1 - be specific, e.g., 'Python 3' not just 'Python'>",
         "<technical skill 2>",
@@ -154,7 +163,7 @@ Extract information into this EXACT JSON structure. Output ONLY valid JSON, no e
     "language_requirements": [
         {{"language": "<language>", "proficiency": "<Native | Fluent | Intermediate | Basic>"}}
     ],
-    
+
     "industry": "<Technology | Healthcare | Finance | Education | Retail | Manufacturing | etc.>",
     "role_classification": "<Engineering | Sales | Marketing | Operations | Management | Design | Data | Support | etc.>",
     "keywords": ["<important keyword 1>", "<keyword 2>", "<keyword 3>"],
@@ -163,12 +172,12 @@ Extract information into this EXACT JSON structure. Output ONLY valid JSON, no e
         "<another ATS keyword>",
         "<skill variation, e.g., both 'JavaScript' and 'JS'>"
     ],
-    
+
     "visa_sponsorship": <true | false | null if not mentioned>,
     "security_clearance": <true | false | null if not mentioned>,
     "max_travel_preference": <0 | 25 | 50 | 75 | 100 | null>,
     "contact_information": "<recruiter name/email or null>",
-    
+
     "responsibilities": [
         "<key responsibility 1>",
         "<key responsibility 2>"
@@ -191,7 +200,7 @@ Extract information into this EXACT JSON structure. Output ONLY valid JSON, no e
 """
 
 
-def _validate_posted_date(date_str: Optional[str]) -> Optional[str]:
+def _validate_posted_date(date_str: str | None) -> str | None:
     """Validate and normalise an LLM-extracted posted_date.
 
     Accepts any common date string and returns it in YYYY-MM-DD format only if:
@@ -221,14 +230,14 @@ def _validate_posted_date(date_str: Optional[str]) -> Optional[str]:
             "%d/%m/%Y",
         ):
             try:
-                parsed = datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+                parsed = datetime.strptime(raw, fmt).replace(tzinfo=UTC)
                 break
             except ValueError:
                 continue
         if parsed is None:
             return None
-        now = datetime.now(timezone.utc)
-        min_date = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = datetime.now(UTC)
+        min_date = datetime(2026, 1, 1, tzinfo=UTC)
         if parsed > now:
             return None
         if parsed < min_date:
@@ -286,10 +295,18 @@ class JobAnalyzerAgent:
         logger.info(
             f"Starting job analysis for session {state.get('session_id', 'unknown')}"
         )
-        start_time: datetime = datetime.now(timezone.utc)
+        start_time: datetime = datetime.now(UTC)
 
         # Store user API key for use in LLM calls (BYOK mode)
         self._current_user_api_key = state.get("user_api_key")
+        prefs: dict[str, Any] = state.get("workflow_preferences") or {}
+        use_local = prefs.get("ai_provider") == "local"
+        user_model: str | None = (
+            prefs.get("local_model") if use_local else prefs.get("preferred_model")
+        )
+        reasoning_effort: str | None = (
+            prefs.get("local_reasoning_effort") if use_local else None
+        )
 
         try:
             analysis_result: JobAnalysisResult
@@ -301,19 +318,25 @@ class JobAnalyzerAgent:
             input_method = job_input_data.get("input_method")
 
             # Determine cache lookup parameters
-            job_url: Optional[str] = job_input_data.get("job_url")
-            job_content: Optional[str] = job_input_data.get("job_content")
+            job_url: str | None = job_input_data.get("job_url")
+            job_content: str | None = job_input_data.get("job_content")
 
             # Check cache first
             cached_analysis = await get_cached_job_analysis(
                 job_url=job_url,
                 job_content=job_content,
             )
-            if cached_analysis:
+            if cached_analysis and _has_usable_job_title(
+                cached_analysis.get("job_title")
+            ):
                 logger.info("Using cached job analysis result")
                 state["job_analysis"] = cached_analysis
                 state["job_analysis"]["from_cache"] = True
                 return state
+            if cached_analysis:
+                logger.warning(
+                    "Ignoring cached job analysis without a usable job title"
+                )
 
             # Stampede protection: only one coroutine should compute for this job at a time
             cache_key = _get_job_cache_key(job_url, job_content)
@@ -330,7 +353,9 @@ class JobAnalyzerAgent:
                     cached_analysis = await get_cached_job_analysis(
                         job_url=job_url, job_content=job_content
                     )
-                    if cached_analysis:
+                    if cached_analysis and _has_usable_job_title(
+                        cached_analysis.get("job_title")
+                    ):
                         logger.info("Using cached job analysis result (lock wait)")
                         state["job_analysis"] = cached_analysis
                         state["job_analysis"]["from_cache"] = True
@@ -358,14 +383,18 @@ class JobAnalyzerAgent:
                         else "manual"
                     )
                     analysis_result = await self._process_manual_input(
-                        job_content, source_type
+                        job_content,
+                        source_type,
+                        user_model=user_model,
+                        force_local=use_local,
+                        local_reasoning_effort=reasoning_effort,
                     )
                 else:
                     raise ValueError(f"Unknown job input method: {input_method}")
 
                 # Calculate and record processing time
                 processing_time: float = (
-                    datetime.now(timezone.utc) - start_time
+                    datetime.now(UTC) - start_time
                 ).total_seconds()
                 analysis_result.processing_time = processing_time
                 logger.info(f"Job analysis completed in {processing_time:.2f} seconds")
@@ -386,7 +415,7 @@ class JobAnalyzerAgent:
 
             logger.info("Job analysis completed successfully and cached")
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("Job analyzer timed out", exc_info=True)
             raise
         except Exception as e:
@@ -396,7 +425,13 @@ class JobAnalyzerAgent:
         return state
 
     async def _process_manual_input(
-        self, job_text: str, source_type: str = "manual"
+        self,
+        job_text: str,
+        source_type: str = "manual",
+        *,
+        user_model: str | None = None,
+        force_local: bool = False,
+        local_reasoning_effort: str | None = None,
     ) -> JobAnalysisResult:
         """
         Process manually entered or extension-extracted job posting text.
@@ -421,12 +456,22 @@ class JobAnalyzerAgent:
 
         # Process the validated text using AI extraction
         analysis_result: JobAnalysisResult = await self._parse_generic_job_content(
-            job_text, source_type
+            job_text,
+            source_type,
+            user_model=user_model,
+            force_local=force_local,
+            local_reasoning_effort=local_reasoning_effort,
         )
         return analysis_result
 
     async def _parse_generic_job_content(
-        self, content: str, source: str
+        self,
+        content: str,
+        source: str,
+        *,
+        user_model: str | None = None,
+        force_local: bool = False,
+        local_reasoning_effort: str | None = None,
     ) -> JobAnalysisResult:
         """
         Parse job content using AI to extract structured information.
@@ -452,17 +497,20 @@ class JobAnalyzerAgent:
             prompt: str = JOB_ANALYSIS_PROMPT.replace("{content}", truncated_content)
 
             # Generate AI analysis with expert system context
-            response: Dict[str, Any] = await self.gemini_client.generate(
+            response: dict[str, Any] = await self.gemini_client.generate(
                 prompt=prompt,
                 system=AI_SYSTEM_CONTEXT,
                 temperature=AI_TEMPERATURE,
                 max_tokens=AI_MAX_TOKENS,
                 user_api_key=self._current_user_api_key,
+                model=user_model,
                 structured_output=True,
+                force_local=force_local,
+                local_reasoning_effort=local_reasoning_effort,
             )
 
             # Use our shared utility function to parse JSON from LLM response
-            parsed_data: Dict[str, Any] = parse_json_from_llm_response(response)
+            parsed_data: dict[str, Any] = parse_json_from_llm_response(response)
 
             # Validate parsed data
             if not parsed_data:
@@ -473,16 +521,18 @@ class JobAnalyzerAgent:
                 val = parsed_data.get(key)
                 return str(val).strip() if val else default
 
-            # Helper to safely get list values
-            def get_list(key: str) -> List[Any]:
-                val = parsed_data.get(key)
-                return val if isinstance(val, list) else []
-
             # Create structured result from flat JSON (new format)
+            job_title = get_str("job_title")
+            if not _has_usable_job_title(job_title):
+                raise ValueError(
+                    "The job posting did not contain a usable job title. "
+                    "Please paste the complete posting or use the job URL."
+                )
+
             job_analysis_result = JobAnalysisResult(
                 source=source,
                 # Basic information
-                job_title=get_str("job_title"),
+                job_title=job_title,
                 company_name=get_str("company_name"),
                 job_city=parsed_data.get("job_city"),
                 job_state=parsed_data.get("job_state"),
@@ -532,6 +582,6 @@ class JobAnalyzerAgent:
             return job_analysis_result
 
         except json.JSONDecodeError as e:
-            raise ValueError(f"Failed to parse AI response as JSON: {str(e)}")
+            raise ValueError(f"Failed to parse AI response as JSON: {str(e)}") from e
         except Exception as e:
-            raise ValueError(f"AI extraction failed: {str(e)}")
+            raise ValueError(f"AI extraction failed: {str(e)}") from e

@@ -5,13 +5,19 @@ Provides instant push notifications for workflow status changes instead of polli
 
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional, Set
-from uuid import UUID
+from datetime import UTC, datetime
+from typing import Any
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, Request, Depends, status
-from starlette.websockets import WebSocketState
 import jwt
+from fastapi import (
+    APIRouter,
+    Depends,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
+from starlette.websockets import WebSocketState
 
 from config.settings import get_settings
 from utils.auth import get_current_user
@@ -40,7 +46,7 @@ MAX_CONNECTIONS_PER_SESSION = 3  # Maximum connections watching same session
 class ConnectionManager:
     """
     Manages WebSocket connections for workflow updates.
-    
+
     Supports:
     - Multiple connections per user (with limits)
     - Session-specific subscriptions
@@ -51,49 +57,55 @@ class ConnectionManager:
 
     def __init__(self):
         # Map: user_id -> set of (websocket, session_id) tuples
-        self._user_connections: Dict[str, Set[tuple]] = {}
+        self._user_connections: dict[str, set[tuple]] = {}
         # Map: session_id -> set of websockets
-        self._session_connections: Dict[str, Set[WebSocket]] = {}
+        self._session_connections: dict[str, set[WebSocket]] = {}
         # Map: websocket -> (user_id, session_id)
-        self._connection_info: Dict[WebSocket, tuple] = {}
+        self._connection_info: dict[WebSocket, tuple] = {}
 
     def _check_connection_limits(
-        self, user_id: str, session_id: Optional[str] = None
+        self, user_id: str, session_id: str | None = None
     ) -> tuple[bool, str]:
         """
         Check if connection limits allow a new connection.
-        
+
         Args:
             user_id: User ID requesting connection
             session_id: Optional session ID
-            
+
         Returns:
             Tuple of (allowed, reason_if_denied)
         """
         # Check user connection limit
         user_conn_count = len(self._user_connections.get(user_id, set()))
         if user_conn_count >= MAX_CONNECTIONS_PER_USER:
-            return False, f"Maximum connections per user ({MAX_CONNECTIONS_PER_USER}) exceeded"
-        
+            return (
+                False,
+                f"Maximum connections per user ({MAX_CONNECTIONS_PER_USER}) exceeded",
+            )
+
         # Check session connection limit if session specified
         if session_id:
             session_conn_count = len(self._session_connections.get(session_id, set()))
             if session_conn_count >= MAX_CONNECTIONS_PER_SESSION:
-                return False, f"Maximum connections per session ({MAX_CONNECTIONS_PER_SESSION}) exceeded"
-        
+                return (
+                    False,
+                    f"Maximum connections per session ({MAX_CONNECTIONS_PER_SESSION}) exceeded",
+                )
+
         return True, ""
 
     async def connect(
-        self, websocket: WebSocket, user_id: str, session_id: Optional[str] = None
+        self, websocket: WebSocket, user_id: str, session_id: str | None = None
     ) -> bool:
         """
         Accept a new WebSocket connection with limit checking.
-        
+
         Args:
             websocket: The WebSocket connection
             user_id: Authenticated user ID
             session_id: Optional workflow session ID to subscribe to
-            
+
         Returns:
             True if connection accepted, False if rejected due to limits
         """
@@ -103,25 +115,27 @@ class ConnectionManager:
             logger.warning(
                 f"WebSocket connection rejected for user {user_id[:8]}...: {reason}"
             )
-            await websocket.close(code=4429, reason=reason)  # Custom code for rate limit
+            await websocket.close(
+                code=4429, reason=reason
+            )  # Custom code for rate limit
             return False
-        
+
         await websocket.accept()
-        
+
         # Track by user
         if user_id not in self._user_connections:
             self._user_connections[user_id] = set()
         self._user_connections[user_id].add((websocket, session_id))
-        
+
         # Track by session if specified
         if session_id:
             if session_id not in self._session_connections:
                 self._session_connections[session_id] = set()
             self._session_connections[session_id].add(websocket)
-        
+
         # Track connection info for cleanup
         self._connection_info[websocket] = (user_id, session_id)
-        
+
         logger.info(
             f"WebSocket connected: user={user_id[:8]}..., session={session_id or 'all'}, "
             f"user_connections={len(self._user_connections[user_id])}"
@@ -131,45 +145,45 @@ class ConnectionManager:
     def disconnect(self, websocket: WebSocket) -> None:
         """
         Remove a WebSocket connection.
-        
+
         Args:
             websocket: The WebSocket connection to remove
         """
         if websocket not in self._connection_info:
             return
-            
+
         user_id, session_id = self._connection_info[websocket]
-        
+
         # Remove from user connections
         if user_id in self._user_connections:
             self._user_connections[user_id].discard((websocket, session_id))
             if not self._user_connections[user_id]:
                 del self._user_connections[user_id]
-        
+
         # Remove from session connections
         if session_id and session_id in self._session_connections:
             self._session_connections[session_id].discard(websocket)
             if not self._session_connections[session_id]:
                 del self._session_connections[session_id]
-        
+
         # Remove connection info
         del self._connection_info[websocket]
-        
+
         logger.info(
             f"WebSocket disconnected: user={user_id[:8]}..., session={session_id or 'all'}"
         )
 
-    async def send_to_user(self, user_id: str, message: Dict[str, Any]) -> None:
+    async def send_to_user(self, user_id: str, message: dict[str, Any]) -> None:
         """
         Send a message to all connections for a user.
-        
+
         Args:
             user_id: Target user ID
             message: Message payload to send
         """
         if user_id not in self._user_connections:
             return
-            
+
         dead_connections = []
         for websocket, _ in self._user_connections[user_id]:
             try:
@@ -178,22 +192,22 @@ class ConnectionManager:
             except Exception as e:
                 logger.warning(f"Failed to send to user {user_id[:8]}...: {e}")
                 dead_connections.append(websocket)
-        
+
         # Clean up dead connections
         for ws in dead_connections:
             self.disconnect(ws)
 
-    async def send_to_session(self, session_id: str, message: Dict[str, Any]) -> None:
+    async def send_to_session(self, session_id: str, message: dict[str, Any]) -> None:
         """
         Send a message to all connections watching a specific session.
-        
+
         Args:
             session_id: Target session ID
             message: Message payload to send
         """
         if session_id not in self._session_connections:
             return
-            
+
         dead_connections = []
         for websocket in self._session_connections[session_id]:
             try:
@@ -202,12 +216,12 @@ class ConnectionManager:
             except Exception as e:
                 logger.warning(f"Failed to send to session {session_id[:8]}...: {e}")
                 dead_connections.append(websocket)
-        
+
         # Clean up dead connections
         for ws in dead_connections:
             self.disconnect(ws)
 
-    def get_connection_count(self) -> Dict[str, int]:
+    def get_connection_count(self) -> dict[str, int]:
         """Get connection statistics."""
         return {
             "total_users": len(self._user_connections),
@@ -225,7 +239,7 @@ manager = ConnectionManager()
 # =============================================================================
 
 
-async def verify_websocket_token(token: str) -> Optional[Dict[str, Any]]:
+async def verify_websocket_token(token: str) -> dict[str, Any] | None:
     """
     Verify JWT token for WebSocket authentication including revocation checks.
 
@@ -234,7 +248,7 @@ async def verify_websocket_token(token: str) -> Optional[Dict[str, Any]]:
     """
     try:
         settings = get_settings()
-        payload: Dict[str, Any] = jwt.decode(
+        payload: dict[str, Any] = jwt.decode(
             token,
             settings.jwt_secret,
             algorithms=[settings.jwt_algorithm],
@@ -242,31 +256,39 @@ async def verify_websocket_token(token: str) -> Optional[Dict[str, Any]]:
     except jwt.ExpiredSignatureError:
         logger.warning("WebSocket token expired")
         return None
-    except jwt.InvalidTokenError as e:
-        logger.warning(f"WebSocket token invalid: {e}")
+    except jwt.InvalidTokenError:
+        logger.warning("WebSocket token invalid")
         return None
 
     # Check jti blocklist (covers individual token revocation and logout)
-    from utils.auth import _is_token_revoked, _INVALIDATED_PREFIX
-    jti: Optional[str] = payload.get("jti")
+    from utils.auth import _INVALIDATED_PREFIX, _is_token_revoked
+
+    jti: str | None = payload.get("jti")
     if jti and await _is_token_revoked(jti):
-        logger.warning("WebSocket rejected: revoked token (jti=%s)", jti[:8])
+        logger.warning("WebSocket rejected: revoked token")
         return None
 
     # Check per-user invalidation timestamp (covers password change, account recovery)
-    user_id_str: Optional[str] = payload.get("sub") or payload.get("user_id") or payload.get("id")
-    iat: Optional[float] = payload.get("iat")
+    user_id_str: str | None = (
+        payload.get("sub") or payload.get("user_id") or payload.get("id")
+    )
+    iat: float | None = payload.get("iat")
     if user_id_str and iat is not None:
         try:
             from utils.redis_client import get_redis_client
+
             redis_client = await get_redis_client()
             if redis_client:
                 inv_ts = await redis_client.get(f"{_INVALIDATED_PREFIX}{user_id_str}")
                 if inv_ts and float(inv_ts) > iat:
-                    logger.warning("WebSocket rejected: token issued before user invalidation")
+                    logger.warning(
+                        "WebSocket rejected: token issued before user invalidation"
+                    )
                     return None
         except Exception as e:
-            logger.debug(f"WebSocket user invalidation check skipped (Redis error): {e}")
+            logger.debug(
+                f"WebSocket user invalidation check skipped (Redis error): {e}"
+            )
 
     return payload
 
@@ -284,15 +306,15 @@ async def workflow_updates(
 ):
     """
     WebSocket endpoint for workflow-specific updates.
-    
+
     Receives real-time updates for a specific workflow session:
     - Agent status changes (started, completed, failed)
     - Workflow phase transitions
     - Completion/failure notifications
-    
+
     Query params:
         token: JWT authentication token (required)
-    
+
     Message format:
     {
         "type": "agent_update" | "phase_change" | "workflow_complete" | "workflow_error",
@@ -306,26 +328,28 @@ async def workflow_updates(
     if not payload:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    
+
     user_id = payload.get("sub") or payload.get("id")
     if not user_id:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    
+
     # Connect and handle messages (returns False if limit exceeded)
     connected = await manager.connect(websocket, str(user_id), session_id)
     if not connected:
         return  # Connection was rejected due to limits
-    
+
     try:
         # Send initial connection confirmation
-        await websocket.send_json({
-            "type": "connected",
-            "session_id": session_id,
-            "message": "Subscribed to workflow updates",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "session_id": session_id,
+                "message": "Subscribed to workflow updates",
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+        )
+
         # Keep connection alive and handle incoming messages
         try:
             while True:
@@ -343,17 +367,19 @@ async def workflow_updates(
 
                     # Handle ping
                     if isinstance(data, dict) and data.get("type") == "ping":
-                        await websocket.send_json({
-                            "type": "pong",
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
+                        await websocket.send_json(
+                            {
+                                "type": "pong",
+                                "timestamp": datetime.now(UTC).isoformat(),
+                            }
+                        )
 
                 except WebSocketDisconnect:
                     break
         except Exception as exc:
             await report_exception(exc, user_id=str(user_id))
             logger.error("Unexpected error in workflow WebSocket", exc_info=True)
-                
+
     finally:
         manager.disconnect(websocket)
 
@@ -365,12 +391,12 @@ async def user_updates(
 ):
     """
     WebSocket endpoint for all user updates.
-    
+
     Receives real-time updates for all user workflows:
     - New workflow started
     - Any workflow status changes
     - Application updates
-    
+
     Query params:
         token: JWT authentication token (required)
     """
@@ -379,25 +405,27 @@ async def user_updates(
     if not payload:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    
+
     user_id = payload.get("sub") or payload.get("id")
     if not user_id:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    
+
     # Connect without session filter (returns False if limit exceeded)
     connected = await manager.connect(websocket, str(user_id), None)
     if not connected:
         return  # Connection was rejected due to limits
-    
+
     try:
         # Send initial connection confirmation
-        await websocket.send_json({
-            "type": "connected",
-            "message": "Subscribed to all user updates",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "message": "Subscribed to all user updates",
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+        )
+
         # Keep connection alive
         try:
             while True:
@@ -415,17 +443,19 @@ async def user_updates(
 
                     # Handle ping
                     if isinstance(data, dict) and data.get("type") == "ping":
-                        await websocket.send_json({
-                            "type": "pong",
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
+                        await websocket.send_json(
+                            {
+                                "type": "pong",
+                                "timestamp": datetime.now(UTC).isoformat(),
+                            }
+                        )
 
                 except WebSocketDisconnect:
                     break
         except Exception as exc:
             await report_exception(exc, user_id=str(user_id))
             logger.error("Unexpected error in user WebSocket", exc_info=True)
-                
+
     finally:
         manager.disconnect(websocket)
 
@@ -440,11 +470,11 @@ async def broadcast_agent_update(
     session_id: str,
     agent_name: str,
     status: str,
-    message: Optional[str] = None,
+    message: str | None = None,
 ) -> None:
     """
     Broadcast agent status update to connected clients.
-    
+
     Args:
         user_id: User ID to notify
         session_id: Workflow session ID
@@ -460,12 +490,12 @@ async def broadcast_agent_update(
             "status": status,
             "message": message,
         },
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
-    
+
     # Send to session-specific subscribers
     await manager.send_to_session(session_id, payload)
-    
+
     # Also send to general user subscribers
     await manager.send_to_user(user_id, payload)
 
@@ -478,7 +508,7 @@ async def broadcast_phase_change(
 ) -> None:
     """
     Broadcast workflow phase change.
-    
+
     Args:
         user_id: User ID to notify
         session_id: Workflow session ID
@@ -492,9 +522,9 @@ async def broadcast_phase_change(
             "phase": phase,
             "progress": progress_percentage,
         },
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
-    
+
     await manager.send_to_session(session_id, payload)
     await manager.send_to_user(user_id, payload)
 
@@ -502,11 +532,11 @@ async def broadcast_phase_change(
 async def broadcast_workflow_complete(
     user_id: str,
     session_id: str,
-    result_summary: Dict[str, Any],
+    result_summary: dict[str, Any],
 ) -> None:
     """
     Broadcast workflow completion.
-    
+
     Args:
         user_id: User ID to notify
         session_id: Workflow session ID
@@ -516,9 +546,9 @@ async def broadcast_workflow_complete(
         "type": "workflow_complete",
         "session_id": session_id,
         "data": result_summary,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
-    
+
     await manager.send_to_session(session_id, payload)
     await manager.send_to_user(user_id, payload)
 
@@ -527,11 +557,11 @@ async def broadcast_workflow_error(
     user_id: str,
     session_id: str,
     error_message: str,
-    failed_agent: Optional[str] = None,
+    failed_agent: str | None = None,
 ) -> None:
     """
     Broadcast workflow error.
-    
+
     Args:
         user_id: User ID to notify
         session_id: Workflow session ID
@@ -545,9 +575,9 @@ async def broadcast_workflow_error(
             "error": error_message,
             "failed_agent": failed_agent,
         },
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
-    
+
     await manager.send_to_session(session_id, payload)
     await manager.send_to_user(user_id, payload)
 
@@ -560,7 +590,7 @@ async def broadcast_gate_decision(
 ) -> None:
     """
     Broadcast gate decision requiring user confirmation.
-    
+
     Args:
         user_id: User ID to notify
         session_id: Workflow session ID
@@ -575,9 +605,9 @@ async def broadcast_gate_decision(
             "recommendation": recommendation,
             "requires_confirmation": True,
         },
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
-    
+
     await manager.send_to_session(session_id, payload)
     await manager.send_to_user(user_id, payload)
 
@@ -597,7 +627,7 @@ async def broadcast_workflow_resumed(
         "type": "workflow_resumed",
         "session_id": session_id,
         "data": {},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
     await manager.send_to_session(session_id, payload)
@@ -619,7 +649,7 @@ async def broadcast_document_generation_started(
         "type": "document_generation_started",
         "session_id": session_id,
         "data": {},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
     await manager.send_to_session(session_id, payload)
@@ -641,7 +671,7 @@ async def broadcast_interview_prep_started(
         "type": "interview_prep_started",
         "session_id": session_id,
         "data": {},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
     await manager.send_to_session(session_id, payload)
@@ -663,7 +693,7 @@ async def broadcast_interview_prep_complete(
         "type": "interview_prep_complete",
         "session_id": session_id,
         "data": {},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
     await manager.send_to_session(session_id, payload)
@@ -687,7 +717,7 @@ async def broadcast_interview_prep_error(
         "type": "interview_prep_error",
         "session_id": session_id,
         "data": {"error": error_message},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
     await manager.send_to_session(session_id, payload)
@@ -703,4 +733,3 @@ async def broadcast_interview_prep_error(
 async def websocket_stats(current_user: dict = Depends(get_current_user)):
     """Get WebSocket connection statistics. Requires authentication."""
     return manager.get_connection_count()
-

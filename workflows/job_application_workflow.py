@@ -28,42 +28,40 @@ STEP 4: Run in PARALLEL (both at same time)
          └─────────────────┴─────────────────┘
 """
 
+import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
-from time import perf_counter
-from typing import Dict, Any, Optional, Tuple
-import asyncio
 from copy import deepcopy
+from datetime import UTC, datetime
+from time import perf_counter
+from typing import Any, Optional
 
-from langgraph.graph import StateGraph, END
-from sqlalchemy.ext.asyncio import AsyncSession
+from langgraph.graph import END, StateGraph
 from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from utils.logging_config import (
-    get_structured_logger,
-    session_id_var,
-    set_request_context,
-    clear_request_context,
-)
 from api.websocket import (
     broadcast_agent_update,
+    broadcast_gate_decision,
     broadcast_phase_change,
     broadcast_workflow_complete,
     broadcast_workflow_error,
-    broadcast_gate_decision,
+)
+from utils.logging_config import (
+    clear_request_context,
+    get_structured_logger,
+    session_id_var,
+    set_request_context,
 )
 from workflows.state_schema import (
-    NodeName,
-    WorkflowState,
-    AgentStatus,
-    WorkflowPhase,
-    WorkflowStatus,
     Agent,
-    UserProfile,
-    JobInputData,
-    create_initial_state,
+    AgentStatus,
+    NodeName,
+    WorkflowPhase,
+    WorkflowState,
+    WorkflowStatus,
     add_error,
+    create_initial_state,
     get_current_time_string,
     key_to_agent,
 )
@@ -75,7 +73,7 @@ DEFAULT_WORKFLOW_PREFERENCES: dict = {
 }
 
 
-def _resolve_workflow_preferences(user_data: Dict[str, Any]) -> Dict[str, Any]:
+def _resolve_workflow_preferences(user_data: dict[str, Any]) -> dict[str, Any]:
     """Merge workflow defaults with the user's persisted preferences.
 
     Provider selection is intentionally left untouched: a saved model preference
@@ -88,25 +86,27 @@ def _resolve_workflow_preferences(user_data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-from agents.job_analyzer import JobAnalyzerAgent
 from agents.company_research import CompanyResearchAgent
+from agents.cover_letter_writer import CoverLetterWriterAgent
+from agents.job_analyzer import JobAnalyzerAgent
 from agents.profile_matching import ProfileMatchingAgent
 from agents.resume_advisor import ResumeAdvisorAgent
-from agents.cover_letter_writer import CoverLetterWriterAgent
+from config.settings import get_settings
+from models.database import (
+    JobApplication as JobApplicationModel,
+)
+from models.database import (
+    WorkflowSession as WorkflowSessionModel,
+)
+from utils.application_dedupe import find_conflicting_job_application
 from utils.llm_client import get_gemini_client, user_facing_message_from_llm_exception
 from utils.redis_client import get_redis_client
 from utils.security import (
-    sanitize_job_analysis,
     sanitize_cover_letter,
-    sanitize_resume_recommendations,
     sanitize_dict,
+    sanitize_job_analysis,
+    sanitize_resume_recommendations,
 )
-from config.settings import get_settings
-from models.database import (
-    WorkflowSession as WorkflowSessionModel,
-    JobApplication as JobApplicationModel,
-)
-from utils.application_dedupe import find_conflicting_job_application
 
 # =============================================================================
 # CONSTANTS
@@ -122,10 +122,10 @@ _DUPLICATE_JOB_USER_MESSAGE = (
 MATCH_SCORE_THRESHOLD: float = 0.5  # 50% - below this triggers gate
 
 # Recommendations that trigger gate decision (require user confirmation)
-GATE_RECOMMENDATIONS: Tuple[str, ...] = ("NOT_RECOMMENDED", "WEAK_MATCH")
+GATE_RECOMMENDATIONS: tuple[str, ...] = ("NOT_RECOMMENDED", "WEAK_MATCH")
 
 # Agent configuration for generic execution
-AGENT_CONFIG: Dict[str, Dict[str, Any]] = {
+AGENT_CONFIG: dict[str, dict[str, Any]] = {
     "job_analyzer": {
         "phase": WorkflowPhase.JOB_ANALYSIS,
         "display_name": "Job analysis",
@@ -188,7 +188,7 @@ class JobApplicationWorkflow:
         cover_letter_writer: Cover letter writer agent instance
     """
 
-    def __init__(self, db: Optional[AsyncSession] = None) -> None:
+    def __init__(self, db: AsyncSession | None = None) -> None:
         """
         Initialize the workflow orchestrator.
 
@@ -198,18 +198,18 @@ class JobApplicationWorkflow:
         self.settings = get_settings()
 
         # Initialize workflow components
-        self.workflow: Optional[StateGraph] = None
-        self.continuation_workflow: Optional[StateGraph] = None
+        self.workflow: StateGraph | None = None
+        self.continuation_workflow: StateGraph | None = None
 
         # Database session (passed in or initialized during initialize)
-        self.db: Optional[AsyncSession] = db
+        self.db: AsyncSession | None = db
 
         # Agent instances (initialized later)
-        self.job_analyzer: Optional[JobAnalyzerAgent] = None
-        self.company_research: Optional[CompanyResearchAgent] = None
-        self.profile_matching: Optional[ProfileMatchingAgent] = None
-        self.resume_advisor: Optional[ResumeAdvisorAgent] = None
-        self.cover_letter_writer: Optional[CoverLetterWriterAgent] = None
+        self.job_analyzer: JobAnalyzerAgent | None = None
+        self.company_research: CompanyResearchAgent | None = None
+        self.profile_matching: ProfileMatchingAgent | None = None
+        self.resume_advisor: ResumeAdvisorAgent | None = None
+        self.cover_letter_writer: CoverLetterWriterAgent | None = None
 
     async def initialize(self) -> None:
         """
@@ -401,9 +401,9 @@ class JobApplicationWorkflow:
         user_id: str,
         input_method: str,
         job_input: str,
-        user_data: Dict[str, Any],
-        user_api_key: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        user_data: dict[str, Any],
+        user_api_key: str | None = None,
+    ) -> dict[str, Any]:
         """
         Run the initial workflow from start.
 
@@ -460,7 +460,7 @@ class JobApplicationWorkflow:
                     self.workflow.ainvoke(initial_state),
                     timeout=_WORKFLOW_TOTAL_TIMEOUT_SECONDS,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.error(
                     f"Workflow timed out after {_WORKFLOW_TOTAL_TIMEOUT_SECONDS}s "
                     f"(session={session_id[:8]}...)"
@@ -497,8 +497,8 @@ class JobApplicationWorkflow:
     async def continue_workflow_after_gate(
         self,
         session_id: str,
-        user_api_key: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        user_api_key: str | None = None,
+    ) -> dict[str, Any]:
         """
         Continue a workflow that was paused at the gate decision.
 
@@ -546,7 +546,7 @@ class JobApplicationWorkflow:
                     self.continuation_workflow.ainvoke(state),
                     timeout=_WORKFLOW_TOTAL_TIMEOUT_SECONDS,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.error(
                     f"Continuation workflow timed out after {_WORKFLOW_TOTAL_TIMEOUT_SECONDS}s"
                 )
@@ -560,8 +560,8 @@ class JobApplicationWorkflow:
     async def run_document_generation(
         self,
         session_id: str,
-        user_api_key: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        user_api_key: str | None = None,
+    ) -> dict[str, Any]:
         """Generate documents for a session that is in ANALYSIS_COMPLETE state.
 
         Loads the stored state, runs the parallel document generation node, and
@@ -603,7 +603,7 @@ class JobApplicationWorkflow:
         finally:
             clear_request_context(context_tokens)
 
-    def _state_to_dict(self, state: WorkflowState) -> Dict[str, Any]:
+    def _state_to_dict(self, state: WorkflowState) -> dict[str, Any]:
         """Convert workflow state to serializable dictionary with XSS sanitization."""
         # Sanitize LLM outputs before returning
         job_analysis = state.get("job_analysis")
@@ -675,8 +675,8 @@ class JobApplicationWorkflow:
         self,
         state: WorkflowState,
         agent_name: str,
-        agent_instance: Optional[Any],
-        config: Dict[str, Any],
+        agent_instance: Any | None,
+        config: dict[str, Any],
         save_state: bool = True,
     ) -> WorkflowState:
         """
@@ -1005,7 +1005,7 @@ class JobApplicationWorkflow:
             )
 
         # Execute both agents in parallel
-        results: Tuple[WorkflowState, WorkflowState] = await asyncio.gather(
+        results: tuple[WorkflowState, WorkflowState] = await asyncio.gather(
             run_resume_advisor(),
             run_cover_letter_writer(),
         )
@@ -1352,6 +1352,14 @@ class JobApplicationWorkflow:
             workflow_session = result.scalar_one_or_none()
 
             if workflow_session:
+                # This session can be cancelled by a concurrent application
+                # deletion while an LLM request is running.
+                await self.db.refresh(workflow_session)
+                if workflow_session.workflow_status == WorkflowStatus.CANCELLED.value:
+                    logger.info(
+                        "Workflow %s was cancelled; skipping state save", session_id
+                    )
+                    return
                 await self._maybe_fail_duplicate_job_after_analyzer(state)
 
                 # Update existing session
@@ -1440,8 +1448,8 @@ class JobApplicationWorkflow:
                         _early_title = state["job_analysis"].get("job_title")
                         _early_company = state["job_analysis"].get("company_name")
                         if _early_title or _early_company:
-                            _early_vals: Dict[str, Any] = {
-                                "updated_at": datetime.now(timezone.utc)
+                            _early_vals: dict[str, Any] = {
+                                "updated_at": datetime.now(UTC)
                             }
                             if _early_title:
                                 _early_vals["job_title"] = _early_title
@@ -1494,8 +1502,8 @@ class JobApplicationWorkflow:
             # Don't raise exception - state saving failures shouldn't break the workflow
 
     async def _load_workflow_state(
-        self, session_id: str, user_api_key: Optional[str] = None
-    ) -> Optional[WorkflowState]:
+        self, session_id: str, user_api_key: str | None = None
+    ) -> WorkflowState | None:
         """
         Load workflow state from PostgreSQL database for resumption.
 
@@ -1579,7 +1587,7 @@ class JobApplicationWorkflow:
 
 
 async def get_initialized_workflow(
-    db: Optional[AsyncSession] = None,
+    db: AsyncSession | None = None,
 ) -> "JobApplicationWorkflow":
     """
     Get or create a globally initialized workflow instance.

@@ -3,10 +3,10 @@ Workflow state schema for LangGraph multi-agent system.
 Defines the global state structure shared across all agents.
 """
 
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, TypedDict
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
-from dataclasses import dataclass, field, asdict
+from typing import Any, TypedDict
 
 
 class InputMethod(str, Enum):
@@ -36,20 +36,20 @@ class UserProfile:
     summary: str
 
     # Profile sections
-    work_experience: List[Dict[str, Any]]
-    skills: List[str]
+    work_experience: list[dict[str, Any]]
+    skills: list[str]
 
     # Job preferences
-    desired_salary_range: Dict[str, Any]
-    desired_company_sizes: List[str]
-    job_types: List[str]
-    work_arrangements: List[str]
+    desired_salary_range: dict[str, Any]
+    desired_company_sizes: list[str]
+    job_types: list[str]
+    work_arrangements: list[str]
     willing_to_relocate: bool
     requires_visa_sponsorship: bool
     has_security_clearance: bool
     max_travel_preference: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert UserProfile to dictionary."""
         return asdict(self)
 
@@ -61,8 +61,8 @@ class JobInputData:
     input_method: InputMethod
     job_title: str
     company_name: str
-    job_url: Optional[str] = None
-    job_content: Optional[str] = None
+    job_url: str | None = None
+    job_content: str | None = None
 
     _MAX_TITLE_LEN = 500
     _MAX_COMPANY_LEN = 255
@@ -89,7 +89,7 @@ class JobInputData:
                 f"company_name exceeds maximum length of {self._MAX_COMPANY_LEN} characters"
             )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert JobInputData to dictionary."""
         return asdict(self)
 
@@ -124,9 +124,12 @@ class WorkflowStatus(str, Enum):
     INITIALIZED = "initialized"
     IN_PROGRESS = "in_progress"
     AWAITING_CONFIRMATION = "awaiting_confirmation"  # Paused at gate, waiting for user
-    ANALYSIS_COMPLETE = "analysis_complete"  # Analysis done, documents not generated yet
+    ANALYSIS_COMPLETE = (
+        "analysis_complete"  # Analysis done, documents not generated yet
+    )
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class AgentStatus(str, Enum):
@@ -158,7 +161,7 @@ def datetime_to_string(dt: datetime) -> str:
 
 def get_current_time_string() -> str:
     """Get current UTC time as ISO format string."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def agent_to_key(agent: Agent) -> str:
@@ -172,7 +175,7 @@ def key_to_agent(key: str) -> Agent:
 
 
 # Constants for workflow management
-REQUIRED_AGENTS: List[Agent] = [
+REQUIRED_AGENTS: list[Agent] = [
     Agent.JOB_ANALYZER,
     Agent.COMPANY_RESEARCH,
     Agent.PROFILE_MATCHING,
@@ -181,7 +184,7 @@ REQUIRED_AGENTS: List[Agent] = [
 ]
 
 # Default agent status mapping for initialization
-DEFAULT_AGENT_STATUS: Dict[Agent, AgentStatus] = {
+DEFAULT_AGENT_STATUS: dict[Agent, AgentStatus] = {
     Agent.JOB_ANALYZER: AgentStatus.PENDING,
     Agent.COMPANY_RESEARCH: AgentStatus.PENDING,
     Agent.PROFILE_MATCHING: AgentStatus.PENDING,
@@ -195,56 +198,56 @@ class JobAnalysisResult:
     """Schema for job analysis results."""
 
     # Basic information
-    source: Optional[str] = None
-    job_title: Optional[str] = None
-    company_name: Optional[str] = None
-    job_city: Optional[str] = None
-    job_state: Optional[str] = None
-    job_country: Optional[str] = None
-    employment_type: Optional[str] = None
-    work_arrangement: Optional[str] = None
-    salary_range: Optional[Dict[str, Any]] = None
-    posted_date: Optional[str] = None
-    application_deadline: Optional[str] = None
-    benefits: Optional[List[str]] = field(default_factory=list)
-    job_type: Optional[str] = None
-    is_student_position: Optional[bool] = None
-    company_size: Optional[str] = None
+    source: str | None = None
+    job_title: str | None = None
+    company_name: str | None = None
+    job_city: str | None = None
+    job_state: str | None = None
+    job_country: str | None = None
+    employment_type: str | None = None
+    work_arrangement: str | None = None
+    salary_range: dict[str, Any] | None = None
+    posted_date: str | None = None
+    application_deadline: str | None = None
+    benefits: list[str] | None = field(default_factory=list)
+    job_type: str | None = None
+    is_student_position: bool | None = None
+    company_size: str | None = None
 
     # Skills and qualifications
-    required_skills: Optional[List[str]] = field(default_factory=list)
-    soft_skills: Optional[List[str]] = field(default_factory=list)
-    required_qualifications: Optional[List[str]] = field(default_factory=list)
-    preferred_qualifications: Optional[List[str]] = field(default_factory=list)
-    education_requirements: Optional[Dict[str, str]] = field(
+    required_skills: list[str] | None = field(default_factory=list)
+    soft_skills: list[str] | None = field(default_factory=list)
+    required_qualifications: list[str] | None = field(default_factory=list)
+    preferred_qualifications: list[str] | None = field(default_factory=list)
+    education_requirements: dict[str, str] | None = field(
         default_factory=dict
     )  # Object with institution, degree, and field
-    years_experience_required: Optional[int] = None
-    language_requirements: Optional[List[Dict[str, str]]] = field(
+    years_experience_required: int | None = None
+    language_requirements: list[dict[str, str]] | None = field(
         default_factory=list
     )  # List of language requirements with proficiency levels
 
     # Classification and keywords
-    industry: Optional[str] = None
-    role_classification: Optional[str] = None
-    keywords: Optional[List[str]] = field(default_factory=list)
-    ats_keywords: Optional[List[str]] = field(default_factory=list)
+    industry: str | None = None
+    role_classification: str | None = None
+    keywords: list[str] | None = field(default_factory=list)
+    ats_keywords: list[str] | None = field(default_factory=list)
 
     # Additional details
-    visa_sponsorship: Optional[str] = None
-    security_clearance: Optional[str] = None
-    max_travel_preference: Optional[str] = None
-    contact_information: Optional[str] = None
+    visa_sponsorship: str | None = None
+    security_clearance: str | None = None
+    max_travel_preference: str | None = None
+    contact_information: str | None = None
 
     # Role context (from LLM analysis)
-    responsibilities: Optional[List[str]] = field(default_factory=list)
-    team_info: Optional[str] = None
-    reporting_to: Optional[str] = None
+    responsibilities: list[str] | None = field(default_factory=list)
+    team_info: str | None = None
+    reporting_to: str | None = None
 
     # Processing metadata
-    processing_time: Optional[float] = None
+    processing_time: float | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert JobAnalysisResult to dictionary."""
         return asdict(self)
 
@@ -253,42 +256,42 @@ class JobAnalysisResult:
 class ProfileMatchingResult:
     """
     Schema for AI-powered profile matching analysis.
-    
+
     This comprehensive analysis compares a candidate's profile against
     job requirements and provides actionable insights for application strategy.
     """
 
     # Executive Summary
-    executive_summary: Dict[str, Any] = field(default_factory=dict)
+    executive_summary: dict[str, Any] = field(default_factory=dict)
     # Contains: fit_assessment, recommendation (STRONG_MATCH|GOOD_MATCH|MODERATE_MATCH|WEAK_MATCH|NOT_RECOMMENDED),
     #           confidence_level (HIGH|MEDIUM|LOW), one_line_verdict
 
     # Detailed Analysis Sections
-    qualification_analysis: Dict[str, Any] = field(default_factory=dict)
+    qualification_analysis: dict[str, Any] = field(default_factory=dict)
     # Contains: overall_score, skills_assessment, experience_assessment, education_assessment
 
-    preference_analysis: Dict[str, Any] = field(default_factory=dict)
+    preference_analysis: dict[str, Any] = field(default_factory=dict)
     # Contains: overall_score, salary_fit, work_arrangement_fit, company_size_fit, job_type_fit, location_fit
 
-    deal_breaker_analysis: Dict[str, Any] = field(default_factory=dict)
+    deal_breaker_analysis: dict[str, Any] = field(default_factory=dict)
     # Contains: all_passed, visa_sponsorship, location_requirements, security_clearance, etc.
 
     # Strategic Insights
-    competitive_positioning: Dict[str, Any] = field(default_factory=dict)
+    competitive_positioning: dict[str, Any] = field(default_factory=dict)
     # Contains: estimated_candidate_pool_percentile, strengths_vs_typical_applicant, unique_value_proposition
 
-    application_strategy: Dict[str, Any] = field(default_factory=dict)
+    application_strategy: dict[str, Any] = field(default_factory=dict)
     # Contains: should_apply, application_priority, success_probability, key_talking_points, cover_letter_angle
 
-    risk_assessment: Dict[str, Any] = field(default_factory=dict)
+    risk_assessment: dict[str, Any] = field(default_factory=dict)
     # Contains: concerns, mitigation_strategies, things_to_research, red_flags_for_candidate
 
     # Final Scores (0.0-1.0)
-    final_scores: Dict[str, float] = field(default_factory=dict)
+    final_scores: dict[str, float] = field(default_factory=dict)
     # Contains: qualification_score, preference_score, deal_breaker_score, overall_match_score
 
     # AI Insights
-    ai_insights: Dict[str, Any] = field(default_factory=dict)
+    ai_insights: dict[str, Any] = field(default_factory=dict)
     # Contains: unexpected_findings, career_advice, similar_roles_to_consider
 
     # Backward Compatibility Scores (extracted from final_scores)
@@ -302,7 +305,7 @@ class ProfileMatchingResult:
     analysis_method: str = "AI_POWERED"
     model_used: str = "gemini"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert ProfileMatchingResult to dictionary."""
         return asdict(self)
 
@@ -312,60 +315,60 @@ class CompanyResearchResult:
     """Schema for company research results from LLM-based research."""
 
     # Basic company information
-    company_size: Optional[str] = None
-    industry: Optional[str] = None
-    headquarters: Optional[str] = None
-    founded_year: Optional[int] = None
-    website: Optional[str] = None
-    mission_vision: Optional[str] = None
-    key_products: List[str] = field(default_factory=list)
-    recent_developments: Optional[str] = None
+    company_size: str | None = None
+    industry: str | None = None
+    headquarters: str | None = None
+    founded_year: int | None = None
+    website: str | None = None
+    mission_vision: str | None = None
+    key_products: list[str] = field(default_factory=list)
+    recent_developments: str | None = None
 
     # Company culture
-    core_values: List[str] = field(default_factory=list)
-    work_environment: Optional[str] = None
-    employee_benefits: List[str] = field(default_factory=list)
-    diversity_inclusion: Optional[str] = None
-    remote_work_policy: Optional[str] = None
-    employee_satisfaction: Optional[str] = None
+    core_values: list[str] = field(default_factory=list)
+    work_environment: str | None = None
+    employee_benefits: list[str] = field(default_factory=list)
+    diversity_inclusion: str | None = None
+    remote_work_policy: str | None = None
+    employee_satisfaction: str | None = None
 
     # Hiring/Interview information
-    typical_interview_process: List[str] = field(default_factory=list)
-    hiring_timeline: Optional[str] = None
-    interview_format: Optional[str] = None
-    assessment_methods: List[str] = field(default_factory=list)
-    hiring_volume: Optional[str] = None
+    typical_interview_process: list[str] = field(default_factory=list)
+    hiring_timeline: str | None = None
+    interview_format: str | None = None
+    assessment_methods: list[str] = field(default_factory=list)
+    hiring_volume: str | None = None
 
     # Leadership information
-    leadership_info: List[Dict[str, Any]] = field(
+    leadership_info: list[dict[str, Any]] = field(
         default_factory=list
     )  # Contains: name, title, background, tenure
 
     # Competitive landscape
-    competitors: List[str] = field(default_factory=list)
-    market_position: Optional[str] = None
-    competitive_advantages: List[str] = field(default_factory=list)
-    market_challenges: List[str] = field(default_factory=list)
-    growth_opportunities: List[str] = field(default_factory=list)
+    competitors: list[str] = field(default_factory=list)
+    market_position: str | None = None
+    competitive_advantages: list[str] = field(default_factory=list)
+    market_challenges: list[str] = field(default_factory=list)
+    growth_opportunities: list[str] = field(default_factory=list)
 
     # Recent news
-    recent_news: List[Dict[str, Any]] = field(
+    recent_news: list[dict[str, Any]] = field(
         default_factory=list
     )  # Contains: title, summary, date, relevance
 
     # Application insights (for job seekers)
-    application_insights: Dict[str, Any] = field(default_factory=dict)
+    application_insights: dict[str, Any] = field(default_factory=dict)
     # Contains: what_to_emphasize, culture_fit_signals, red_flags_to_watch
 
     # Confidence assessment
-    confidence_assessment: Dict[str, Any] = field(default_factory=dict)
+    confidence_assessment: dict[str, Any] = field(default_factory=dict)
     # Contains: overall_confidence (HIGH|MEDIUM|LOW), uncertain_areas, recommendation
 
     # Research metadata
-    research_date: Optional[str] = None
+    research_date: str | None = None
     processing_time: float = 0.0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert CompanyResearchResult to dictionary."""
         return asdict(self)
 
@@ -374,12 +377,12 @@ class CompanyResearchResult:
 class ResumeRecommendationsResult:
     """
     Schema for resume advisory recommendations with comprehensive LLM-generated advice.
-    
+
     Contains structured, actionable advice for optimizing a resume for a specific job.
     """
 
     # Comprehensive structured advice from LLM
-    comprehensive_advice: Dict[str, Any] = field(default_factory=dict)
+    comprehensive_advice: dict[str, Any] = field(default_factory=dict)
     # Contains:
     #   strategic_assessment: competitiveness, ats_pass_likelihood, interview_likelihood
     #   professional_summary: current_assessment, recommended_summary, key_elements
@@ -394,7 +397,7 @@ class ResumeRecommendationsResult:
     processing_time: float = 0.0
     analysis_method: str = "EXPERT_LLM"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert ResumeRecommendationsResult to dictionary."""
         return asdict(self)
 
@@ -407,10 +410,10 @@ class CoverLetterResult:
     content: str = ""
 
     # Generation metadata
-    generated_at: Optional[str] = None
+    generated_at: str | None = None
     processing_time: float = 0.0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert CoverLetterResult to dictionary."""
         return asdict(self)
 
@@ -429,45 +432,45 @@ class WorkflowState(TypedDict):
     session_id: str
 
     # User data
-    user_profile: Dict[str, Any]
+    user_profile: dict[str, Any]
 
     # User API Key (BYOK - Bring Your Own Key)
     # This is the decrypted API key for LLM calls, passed through the workflow
-    user_api_key: Optional[str]
+    user_api_key: str | None
 
     # Per-user workflow preferences (derived from UserProfile.application_preferences)
     # Keys: workflow_gate_threshold (float), auto_generate_documents (bool)
-    workflow_preferences: Optional[Dict[str, Any]]
+    workflow_preferences: dict[str, Any] | None
 
     # Job Input Data
-    job_input_data: Dict[str, Any]
+    job_input_data: dict[str, Any]
 
     # Agent Processing Results
-    job_analysis: Optional[Dict[str, Any]]
-    company_research: Optional[Dict[str, Any]]
-    profile_matching: Optional[Dict[str, Any]]
-    resume_recommendations: Optional[Dict[str, Any]]
-    cover_letter: Optional[Dict[str, Any]]
+    job_analysis: dict[str, Any] | None
+    company_research: dict[str, Any] | None
+    profile_matching: dict[str, Any] | None
+    resume_recommendations: dict[str, Any] | None
+    cover_letter: dict[str, Any] | None
 
     # Workflow Control and Status
     current_phase: WorkflowPhase
     workflow_status: WorkflowStatus
     processing_start_time: str
-    processing_end_time: Optional[str]
+    processing_end_time: str | None
 
     # Agent Status Tracking
-    current_agent: Optional[Agent]
-    agent_status: Dict[str, AgentStatus]
-    completed_agents: List[Agent]
-    failed_agents: List[Agent]
+    current_agent: Agent | None
+    agent_status: dict[str, AgentStatus]
+    completed_agents: list[Agent]
+    failed_agents: list[Agent]
 
     # Error Handling
-    error_messages: List[str]
-    warning_messages: List[str]
+    error_messages: list[str]
+    warning_messages: list[str]
 
     # Performance Metrics
-    agent_start_times: Dict[str, str]
-    agent_durations: Dict[str, float]  # Agent name -> duration in milliseconds
+    agent_start_times: dict[str, str]
+    agent_durations: dict[str, float]  # Agent name -> duration in milliseconds
 
 
 def create_initial_state(
@@ -475,8 +478,8 @@ def create_initial_state(
     session_id: str,
     user_profile: UserProfile,
     job_input_data: JobInputData,
-    user_api_key: Optional[str] = None,
-    workflow_preferences: Optional[Dict[str, Any]] = None,
+    user_api_key: str | None = None,
+    workflow_preferences: dict[str, Any] | None = None,
 ) -> WorkflowState:
     """
     Create initial workflow state for a new job application workflow session.
@@ -498,16 +501,18 @@ def create_initial_state(
     Raises:
         ValueError: If input_method is missing or invalid in job_input_data
     """
-    current_time: datetime = datetime.now(timezone.utc)
+    current_time: datetime = datetime.now(UTC)
 
     # Handle both dict and object inputs for user_profile and job_input_data
     user_profile_dict = (
-        user_profile.to_dict() if hasattr(user_profile, 'to_dict') else user_profile
+        user_profile.to_dict() if hasattr(user_profile, "to_dict") else user_profile
     )
     job_input_data_dict = (
-        job_input_data.to_dict() if hasattr(job_input_data, 'to_dict') else job_input_data
+        job_input_data.to_dict()
+        if hasattr(job_input_data, "to_dict")
+        else job_input_data
     )
-    
+
     return WorkflowState(
         user_id=user_id,
         session_id=session_id,
@@ -548,7 +553,7 @@ def create_initial_state(
 
 
 def add_error(
-    state: WorkflowState, error_message: str, _agent_name: Optional[str] = None
+    state: WorkflowState, error_message: str, _agent_name: str | None = None
 ) -> WorkflowState:
     """
     Add an error message to the workflow state for tracking and reporting.
@@ -570,7 +575,7 @@ def add_error(
 
 
 def add_warning(
-    state: WorkflowState, warning_message: str, _agent_name: Optional[str] = None
+    state: WorkflowState, warning_message: str, _agent_name: str | None = None
 ) -> WorkflowState:
     """
     Add a warning message to the workflow state for tracking and reporting.

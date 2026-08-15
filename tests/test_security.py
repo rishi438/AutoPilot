@@ -5,12 +5,10 @@ NOTE: Most authentication security tests are already covered in test_auth.py.
 This file contains additional security-focused tests.
 """
 
-import pytest
 import uuid
+
+import pytest
 from httpx import AsyncClient
-
-from main import app
-
 
 # =============================================================================
 # FIXTURES
@@ -64,7 +62,7 @@ class TestSQLInjectionPrevention:
             "admin'--",
             "' OR '1'='1",
         ]
-        
+
         for payload in sql_payloads:
             response = await async_client.post(
                 "/api/auth/login",
@@ -74,7 +72,9 @@ class TestSQLInjectionPrevention:
                 },
             )
             # Should be validation error or unauthorized, not 500 server error
-            assert response.status_code != 500, f"SQL injection payload caused server error: {payload}"
+            assert (
+                response.status_code != 500
+            ), f"SQL injection payload caused server error: {payload}"
             assert response.status_code in [400, 401, 422]
 
 
@@ -87,10 +87,12 @@ class TestXSSPrevention:
     """Tests for XSS prevention in user inputs."""
 
     @pytest.mark.asyncio
-    async def test_xss_payload_does_not_cause_server_error(self, async_client: AsyncClient):
+    async def test_xss_payload_does_not_cause_server_error(
+        self, async_client: AsyncClient
+    ):
         """Test that XSS payloads don't cause server errors."""
         xss_payload = "<script>alert('xss')</script>"
-        
+
         # Even without auth, this should return auth error, not server error
         response = await async_client.put(
             "/api/v1/profile/basic-info",
@@ -117,6 +119,13 @@ class TestSecurityHeaders:
     """Tests for security headers."""
 
     @pytest.mark.asyncio
+    async def test_cross_origin_resource_policy_header(self, async_client: AsyncClient):
+        """Responses must not be loadable as cross-origin subresources."""
+        response = await async_client.get("/", headers={"host": "localhost"})
+
+        assert response.headers["cross-origin-resource-policy"] == "same-origin"
+
+    @pytest.mark.asyncio
     async def test_cors_options_request(self, async_client: AsyncClient):
         """Test that CORS is configured for OPTIONS requests."""
         response = await async_client.options(
@@ -139,7 +148,7 @@ class TestInputValidation:
     async def test_extremely_long_input_handled(self, async_client: AsyncClient):
         """Test that extremely long inputs are handled gracefully."""
         long_string = "a" * 100000  # 100KB string
-        
+
         response = await async_client.post(
             "/api/auth/register",
             json={

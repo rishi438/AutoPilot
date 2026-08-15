@@ -108,6 +108,30 @@
         return parseSalaryDigits(el.value);
     }
 
+    const COUNTRY_CURRENCY = {
+        india: 'INR', 'united states': 'USD', usa: 'USD', 'united kingdom': 'GBP',
+        uk: 'GBP', canada: 'CAD', australia: 'AUD', japan: 'JPY', germany: 'EUR',
+        france: 'EUR', italy: 'EUR', spain: 'EUR', netherlands: 'EUR'
+    };
+
+    function updateCountryAwareCareerFields() {
+        const country = String(document.getElementById('country')?.value || '').trim();
+        const countryKey = country.toLowerCase();
+        const residentLabel = document.getElementById('work-auth-resident-label');
+        const help = document.getElementById('work-authorization-help');
+        const currency = /** @type {HTMLSelectElement|null} */ (document.getElementById('salary-currency'));
+        if (residentLabel) {
+            residentLabel.textContent = country
+                ? `I am a citizen or permanent resident of ${country}`
+                : 'I am a citizen or permanent resident of my country of residence';
+        }
+        if (help) help.textContent = country
+            ? `Select the work authorization status that applies in ${country} today.`
+            : 'Select the work authorization status that applies in your country of residence today.';
+        const suggestedCurrency = COUNTRY_CURRENCY[countryKey];
+        if (currency && suggestedCurrency && !currency.dataset.userSelected) currency.value = suggestedCurrency;
+    }
+
     // Validation rules and constants
     const VALIDATION_RULES = {
         MIN_EXPERIENCE_ENTRIES: 1,
@@ -195,6 +219,12 @@
         prevBtn.addEventListener("click", goToPrevStep);
         completeBtn.addEventListener("click", completeProfile);
         document.getElementById("logout-btn").addEventListener("click", logout);
+        document.getElementById('country')?.addEventListener('input', updateCountryAwareCareerFields);
+        document.getElementById('country')?.addEventListener('change', updateCountryAwareCareerFields);
+        document.getElementById('salary-currency')?.addEventListener('change', function () {
+            this.dataset.userSelected = 'true';
+        });
+        updateCountryAwareCareerFields();
 
         // Skip resume button - go directly to basic info
         const skipResumeBtn = document.getElementById("skip-resume-btn");
@@ -340,6 +370,7 @@
             document.getElementById("state").value = profileData.state;
         if (profileData.country)
             document.getElementById("country").value = profileData.country;
+        updateCountryAwareCareerFields();
 
         // Populate professional details
         if (profileData.professional_title)
@@ -410,6 +441,11 @@
                 profileData.desired_salary_range.min;
             document.getElementById("max-salary").value =
                 profileData.desired_salary_range.max;
+            const currency = /** @type {HTMLSelectElement|null} */ (document.getElementById('salary-currency'));
+            if (currency && profileData.desired_salary_range.currency) {
+                currency.value = profileData.desired_salary_range.currency;
+                currency.dataset.userSelected = 'true';
+            }
         }
 
         // Company sizes
@@ -461,13 +497,14 @@
         }
 
         // Work authorization (career step)
-        const validWorkAuth = new Set([
-            "no_work_authorization",
-            "has_work_authorization",
-            "us_lawful_permanent_resident",
-            "us_citizen",
-        ]);
-        let workAuth = profileData.work_authorization;
+        const validWorkAuth = new Set(["requires_sponsorship", "authorized_to_work", "citizen_or_permanent_resident", "other_work_authorization"]);
+        const legacyWorkAuth = {
+            no_work_authorization: "requires_sponsorship",
+            has_work_authorization: "authorized_to_work",
+            us_lawful_permanent_resident: "citizen_or_permanent_resident",
+            us_citizen: "citizen_or_permanent_resident",
+        };
+        let workAuth = legacyWorkAuth[profileData.work_authorization] || profileData.work_authorization;
         if (workAuth && validWorkAuth.has(workAuth)) {
             document.querySelectorAll('input[name="work-authorization"]').forEach((/** @type {Element} */ el) => {
                 const inp = /** @type {HTMLInputElement} */ (el);
@@ -676,7 +713,7 @@
 
         // Click to upload — show API key prompt first if no key is configured
         dropZone.addEventListener("click", () => {
-            if (!_hasApiKey) {
+            if (isGeminiResumeEnabled() && !_hasGeminiKey) {
                 showApiKeyPrompt();
                 return;
             }
@@ -707,7 +744,7 @@
             e.preventDefault();
             dropZone.classList.remove("dragover");
 
-            if (!_hasApiKey) {
+            if (isGeminiResumeEnabled() && !_hasGeminiKey) {
                 showApiKeyPrompt();
                 return;
             }
@@ -724,7 +761,13 @@
      * Populated silently on load — never mutates the DOM directly.
      * @type {boolean}
      */
-    let _hasApiKey = true; // optimistic default; corrected by checkApiKeyStatus()
+    let _hasGeminiKey = false;
+    let _hasPersistedOrServerKey = false;
+    let _initialResumeApiKey = '';
+
+    function isGeminiResumeEnabled() {
+        return !!/** @type {HTMLInputElement|null} */ (document.getElementById('use-gemini-resume'))?.checked;
+    }
 
     /**
      * Silently fetch key status and store the result in _hasApiKey.
@@ -740,7 +783,8 @@
             });
             if (!res.ok) return;
             const data = await res.json();
-            _hasApiKey = !!(data.has_user_key || data.server_has_key || data.use_vertex_ai);
+            _hasPersistedOrServerKey = !!(data.has_user_key || data.server_has_key || data.use_vertex_ai);
+            _hasGeminiKey = _hasPersistedOrServerKey || !!_initialResumeApiKey;
         } catch (_e) {
             // Non-fatal — assume key available so we never block upload incorrectly
         }
@@ -759,9 +803,7 @@
     }
 
     /**
-     * Wire up the inline API key save button on step 0.
-     * On success: marks _hasApiKey = true, shows confirmation briefly,
-     * then collapses the card so the upload zone is the focus.
+     * Keep the setup key in page memory only until the next resume parse.
      */
     function setupInlineApiKey() {
         const saveBtn   = document.getElementById('setup-save-key-btn');
@@ -786,24 +828,12 @@
 
             saveBtn.disabled = true;
             if (spinner) spinner.style.display = 'inline-block';
-            if (btnText) btnText.textContent = 'Saving…';
+            if (btnText) btnText.textContent = 'Preparing…';
 
             try {
-                const token = getAuthToken();
-                const res = await fetch(`${API_BASE}/profile/api-key`, {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${token}`,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ api_key: key })
-                });
-
-                const data = await res.json().catch(() => ({}));
-                if (!res.ok) throw new Error(data.message || data.detail || 'Failed to save key.');
-
-                // Mark key as available so next interaction goes straight to upload
-                _hasApiKey = true;
+                // Validation happens during parsing; never persist this key.
+                _initialResumeApiKey = key;
+                _hasGeminiKey = true;
                 input.value = '';
 
                 // Swap input row for success message
@@ -825,7 +855,7 @@
             } finally {
                 saveBtn.disabled = false;
                 if (spinner) spinner.style.display = 'none';
-                if (btnText) btnText.textContent = 'Save & Continue';
+                if (btnText) btnText.textContent = 'Use for this resume';
             }
         });
 
@@ -891,6 +921,9 @@
             // Prepare form data
             const formData = new FormData();
             formData.append("resume", file);
+            const useGemini = isGeminiResumeEnabled();
+            formData.append("use_gemini", String(useGemini));
+            if (useGemini && _initialResumeApiKey) formData.append("api_key", _initialResumeApiKey);
 
             // Get auth token
             const token = getAuthToken();
@@ -911,7 +944,7 @@
                 const errorData = await response.json().catch(() => ({}));
                 // No API key — update flag and surface the prompt
                 if (errorData.error_code === 'CFG_6001') {
-                    _hasApiKey = false;
+                    _hasGeminiKey = false;
                     showApiKeyPrompt();
                     throw new Error('Resume parsing requires a Gemini API key. Add your key above, or use "Fill in manually".');
                 }
@@ -956,6 +989,9 @@
             errorAlert?.classList.add("d-none");
             successAlert?.classList.add("d-none");
         } finally {
+            // Discard the setup-only key after this request, successful or not.
+            _initialResumeApiKey = '';
+            _hasGeminiKey = _hasPersistedOrServerKey;
             dropZone.classList.remove("uploading");
         }
     }
@@ -1254,7 +1290,7 @@
 
                 // Additional validation for specific fields
                 if (fieldInfo.id === "years-experience") {
-                    const years = parseInt(value);
+                    const years = parseFloat(value);
                     if (isNaN(years) || years < 0 || years > 50) {
                         field.classList.add("is-invalid");
                         showError("Years of experience must be between 0 and 50");
@@ -1348,8 +1384,8 @@
         }
         for (let i = 0; i < educationHistory.length; i++) {
             const edu = educationHistory[i];
-            if (!edu.institution?.trim() || !edu.degree?.trim() || !edu.field_of_study?.trim()) {
-                showError(`Education entry ${i + 1}: Please fill in Institution, Degree, and Field of study`);
+            if (!edu.institution?.trim() || !edu.degree?.trim()) {
+                showError(`Education entry ${i + 1}: Please fill in Institution and Degree`);
                 return false;
             }
             if (!edu.start_date?.trim()) {
@@ -1555,7 +1591,7 @@
             data.years_experience =
                 rawYears === undefined || rawYears === null || rawYears === ""
                     ? NaN
-                    : parseInt(String(rawYears), 10);
+                    : parseFloat(String(rawYears));
 
             // Convert is_student checkbox to boolean
             data.is_student = data.is_student === "on";
@@ -1731,7 +1767,7 @@
             const toSave = JSON.parse(JSON.stringify(educationHistory));
             for (let i = 0; i < toSave.length; i++) {
                 const edu = toSave[i];
-                if (!edu.institution?.trim() || !edu.degree?.trim() || !edu.field_of_study?.trim()) {
+                if (!edu.institution?.trim() || !edu.degree?.trim()) {
                     toSave.splice(i, 1);
                     i--;
                     continue;
@@ -1814,7 +1850,7 @@
 
             const companySizeMapping = {
                 "startup": "STARTUP",
-                "small": "SMALL", 
+                "small": "SMALL",
                 "medium": "MEDIUM",
                 "large": "LARGE",
                 "enterprise": "ENTERPRISE"
@@ -1924,6 +1960,10 @@
             const desiredSalaryRange = {};
             if (minSalaryVal > 0) desiredSalaryRange.min = minSalaryVal;
             if (maxSalaryVal > 0) desiredSalaryRange.max = maxSalaryVal;
+            const salaryCurrency = /** @type {HTMLSelectElement|null} */ (document.getElementById('salary-currency'));
+            if (Object.keys(desiredSalaryRange).length > 0 && salaryCurrency?.value) {
+                desiredSalaryRange.currency = salaryCurrency.value;
+            }
 
             const data = {
                 job_types: jobTypes,
@@ -2921,9 +2961,9 @@
                 updateEducation(index, "field_of_study", this.value);
             });
             const fieldLabel = document.createElement("label");
-            fieldLabel.textContent = "Field of study *";
+            fieldLabel.textContent = "Field of study (optional)";
             fieldLabel.htmlFor = fieldInput.id;
-            fieldInput.required = true;
+            fieldInput.required = false;
             fieldWrap.appendChild(fieldInput);
             fieldWrap.appendChild(fieldLabel);
             fieldCol.appendChild(fieldWrap);

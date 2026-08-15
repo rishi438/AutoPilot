@@ -92,13 +92,23 @@ _compose-docker +ARGS:
 _compose-docker +ARGS:
     docker compose {{ARGS}}
 
-# Generate .env + start all services (foreground)
+# Generate .env + start existing images (foreground)
 start: _ensure-podman _create-env
+    just _compose-podman pull --ignore-buildable
+    just _compose-podman up
+
+# Generate .env + rebuild images, then start all services (foreground)
+rebuild: _ensure-podman _create-env
     just _compose-podman pull --ignore-buildable
     just _compose-podman up --build
 
-# Generate .env + start all services (background)
+# Generate .env + start existing images (background)
 start-d: _ensure-docker _create-env
+    just _compose-docker pull --ignore-buildable
+    just _compose-docker up -d
+
+# Generate .env + rebuild images, then start all services (background)
+rebuild-d: _ensure-docker _create-env
     just _compose-docker pull --ignore-buildable
     just _compose-docker up --build -d
 
@@ -130,6 +140,23 @@ podman-logs:
 
 podman-build:
     just _compose-podman build
+
+# Start or stop the independent local SonarQube security stack.
+security-up: _ensure-podman
+    just _compose-podman --project-name autopilot-security -f docker-compose.security.yml --profile security up -d
+
+security-down: _ensure-podman
+    just _compose-podman --project-name autopilot-security -f docker-compose.security.yml --profile security down
+
+# Passive DAST scan of the locally running application. The Compose network
+# avoids Podman Desktop's unreliable host.containers.internal gateway. It never
+# runs active attack rules; start the app first with `just start`.
+zap-baseline: _ensure-podman
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_zap_baseline.ps1
+
+# Static security scan of source and configuration. A finding exits non-zero.
+semgrep: _ensure-podman
+    podman run --rm --volume "${PWD}:/src:ro" --workdir /src semgrep/semgrep semgrep scan --config auto --error --exclude .pytest_cache --exclude .sonar --exclude .tmp .
 
 # ---------------------------------------------------------------------------
 # Option C — Manual (you run PostgreSQL and Redis yourself)

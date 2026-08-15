@@ -3,73 +3,67 @@ REST API endpoints for managing workflow processing.
 Provides endpoints for starting, monitoring, and managing job application workflows.
 """
 
+import asyncio
 import hashlib
+import logging
 import re
 import unicodedata
 import uuid
-from datetime import datetime, timezone
-import logging
+from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
-
-from utils.logging_config import mask_email as _mask_email
-from typing import Dict, Any, List, Optional
-import asyncio
 
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
+    File,
+    Form,
     HTTPException,
     Query,
     Request,
-    status,
-    BackgroundTasks,
-    UploadFile,
-    File,
-    Form,
     Response,
+    UploadFile,
+    status,
 )
 from pydantic import BaseModel, Field, validator
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, update, func
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from utils.auth import get_current_user, get_current_user_with_complete_profile
-from utils.database import get_database, get_session
-from utils.error_reporting import report_exception
-from utils.cloud_tasks import (
-    enqueue_workflow_task,
-    enqueue_continue_workflow_task,
-    verify_cloud_tasks_secret,
-)
-from config.settings import get_settings
-from utils.cache import (
-    get_cached_workflow_state,
-    cache_workflow_state,
-    invalidate_workflow_state,
-    check_rate_limit,
-    check_rate_limit_with_headers,
-)
-from workflows.state_schema import (
-    WorkflowPhase,
-    WorkflowStatus,
-    AgentStatus,
-    InputMethod,
-)
-from workflows.job_application_workflow import JobApplicationWorkflow
 from api.websocket import (
-    broadcast_workflow_resumed,
     broadcast_document_generation_started,
     broadcast_workflow_error,
+    broadcast_workflow_resumed,
 )
+from config.settings import get_settings
 from models.database import (
     ApplicationStatus,
     JobApplication,
-    WorkflowSession,
-    UserProfile,
     User,
+    UserProfile,
     UserWorkflowPreferences,
+    WorkflowSession,
 )
+from utils.application_dedupe import (
+    normalize_title_company_key as _normalize_title_company_key,
+)
+from utils.auth import get_current_user, get_current_user_with_complete_profile
+from utils.cache import (
+    cache_workflow_state,
+    check_rate_limit,
+    check_rate_limit_with_headers,
+    get_cached_workflow_state,
+    invalidate_workflow_state,
+)
+from utils.cloud_tasks import (
+    enqueue_continue_workflow_task,
+    enqueue_workflow_task,
+    verify_cloud_tasks_secret,
+)
+from utils.database import get_database, get_session
 from utils.encryption import decrypt_api_key
+from utils.error_reporting import report_exception
 from utils.error_responses import (
     APIError,
     ErrorCode,
@@ -80,11 +74,15 @@ from utils.error_responses import (
     unauthorized_error,
     validation_error,
 )
-from utils.security import sanitize_llm_output
-from utils.application_dedupe import (
-    normalize_title_company_key as _normalize_title_company_key,
-)
+from utils.logging_config import mask_email as _mask_email
 from utils.resume_parser import extract_text_from_docx, extract_text_from_pdf
+from utils.security import sanitize_llm_output
+from workflows.job_application_workflow import JobApplicationWorkflow
+from workflows.state_schema import (
+    InputMethod,
+    WorkflowPhase,
+    WorkflowStatus,
+)
 
 # =============================================================================
 # CONSTANTS AND CONFIGURATION
@@ -99,15 +97,15 @@ VALID_URL_PREFIXES: tuple = ("http://", "https://")
 # File processing
 MAX_FILE_SIZE: int = 5 * 1024 * 1024  # 5 MB
 MIN_EXTRACTED_JOB_FILE_TEXT_LEN: int = 50
-ALLOWED_FILE_TYPES: List[str] = [
+ALLOWED_FILE_TYPES: list[str] = [
     "application/pdf",
     "text/plain",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 ]
-ALLOWED_FILE_EXTENSIONS: List[str] = [".pdf", ".txt", ".docx"]
+ALLOWED_FILE_EXTENSIONS: list[str] = [".pdf", ".txt", ".docx"]
 
 # Magic bytes for MIME-type validation (prevents extension spoofing)
-_JOB_FILE_MAGIC: Dict[str, Optional[bytes]] = {
+_JOB_FILE_MAGIC: dict[str, bytes | None] = {
     ".pdf": b"%PDF",
     ".txt": None,  # UTF-8 text has no fixed signature
     ".docx": b"PK\x03\x04",  # Office Open XML (ZIP) — same signature as resume DOCX
@@ -117,11 +115,12 @@ _JOB_FILE_MAGIC: Dict[str, Optional[bytes]] = {
 WORKFLOW_TIMEOUT_SECONDS: int = 300  # 5 minutes
 
 # Status mapping
-STATUS_DISPLAY_MAP: Dict[str, str] = {
+STATUS_DISPLAY_MAP: dict[str, str] = {
     "initialized": "Starting",
     "in_progress": "In Progress",
     "completed": "Completed",
     "failed": "Failed",
+    "cancelled": "Cancelled",
     "awaiting_confirmation": "Awaiting Confirmation",
     "analysis_complete": "Analysis Complete",
 }
@@ -133,6 +132,18 @@ STATUS_DISPLAY_MAP: Dict[str, str] = {
 logger: logging.Logger = logging.getLogger(__name__)
 settings = get_settings()
 router: APIRouter = APIRouter()
+
+_active_workflow_tasks: dict[str, asyncio.Task[Any]] = {}
+
+
+def cancel_local_workflow_task(session_id: str) -> bool:
+    """Cancel an in-process workflow task and its active HTTP request."""
+    task = _active_workflow_tasks.get(session_id)
+    if not task or task.done():
+        return False
+    task.cancel()
+    logger.info("Cancellation requested for local workflow %s", session_id)
+    return True
 
 
 # =============================================================================
@@ -211,7 +222,7 @@ async def _soft_delete_job_application_for_failed_workflow(
     Workflow sessions keep error details for support; job_applications rows are
     hidden from list/stats like user-initiated deletes.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await db.execute(
         update(JobApplication)
         .where(
@@ -254,7 +265,7 @@ _DUPLICATE_JOB_CONSTRAINT_MESSAGE = (
 async def _revert_workflow_session_after_duplicate_job_constraint(
     db: AsyncSession,
     session_id: str,
-) -> Optional[str]:
+) -> str | None:
     """
     The workflow session row was already committed as COMPLETED with agent outputs, but
     the follow-up ``job_applications`` update hit ``uq_user_job_company``. Revert the
@@ -276,12 +287,12 @@ async def _revert_workflow_session_after_duplicate_job_constraint(
         msgs.append(_DUPLICATE_JOB_CONSTRAINT_MESSAGE)
     ws.error_messages = msgs
     flag_modified(ws, "error_messages")
-    ws.processing_end_time = datetime.now(timezone.utc)
+    ws.processing_end_time = datetime.now(UTC)
     _strip_agent_outputs_on_session_model(ws)
     return str(ws.user_id)
 
 
-def get_user_uuid(current_user: Dict[str, Any]) -> uuid.UUID:
+def get_user_uuid(current_user: dict[str, Any]) -> uuid.UUID:
     """Extract and convert user ID to UUID."""
     user_id = current_user.get("id") or current_user.get("_id")
     if isinstance(user_id, str):
@@ -335,7 +346,7 @@ def _canonical_job_url(url: str) -> str:
 _MIN_JOB_CONTENT_FINGERPRINT_CHARS: int = 80
 
 
-def _fingerprint_job_content(raw: Optional[str]) -> Optional[str]:
+def _fingerprint_job_content(raw: str | None) -> str | None:
     """
     Stable SHA-256 hex digest of normalized job posting text (manual / file / extension).
 
@@ -359,11 +370,11 @@ def _fingerprint_job_content(raw: Optional[str]) -> Optional[str]:
 async def _find_duplicate_active_application(
     db: AsyncSession,
     user_id: uuid.UUID,
-    effective_job_url: Optional[str],
-    detected_title: Optional[str],
-    detected_company: Optional[str],
-    content_fingerprint: Optional[str],
-) -> Optional[JobApplication]:
+    effective_job_url: str | None,
+    detected_title: str | None,
+    detected_company: str | None,
+    content_fingerprint: str | None,
+) -> JobApplication | None:
     """
     If the user already has a non-deleted application for the same job URL, the same
     title+company pair, or the same normalized job text (fingerprint), return that row.
@@ -430,34 +441,34 @@ async def _find_duplicate_active_application(
 class WorkflowStartRequest(BaseModel):
     """Request model for starting a workflow."""
 
-    job_url: Optional[str] = Field(
+    job_url: str | None = Field(
         None,
         min_length=MIN_URL_LENGTH,
         max_length=MAX_URL_LENGTH,
         description="Job posting URL from any job board or company careers page",
     )
-    job_text: Optional[str] = Field(
+    job_text: str | None = Field(
         None,
         max_length=MAX_TEXT_LENGTH,
         description="Job posting text content",
     )
     # Extension-specific fields
-    source: Optional[str] = Field(
+    source: str | None = Field(
         None,
         max_length=50,
         description="Source of the job data (e.g., 'extension', 'web')",
     )
-    source_url: Optional[str] = Field(
+    source_url: str | None = Field(
         None,
         max_length=MAX_URL_LENGTH,
         description="URL where the job content was extracted from (for extension)",
     )
-    detected_title: Optional[str] = Field(
+    detected_title: str | None = Field(
         None,
         max_length=500,
         description="Job title detected by the extension",
     )
-    detected_company: Optional[str] = Field(
+    detected_company: str | None = Field(
         None,
         max_length=200,
         description="Company name detected by the extension",
@@ -483,22 +494,22 @@ class WorkflowStatusResponse(BaseModel):
     )
     status_display: str = Field(..., description="Human-readable status for display")
     current_phase: str = Field(..., description="Current workflow phase")
-    current_agent: Optional[str] = Field(None, description="Currently executing agent")
-    agent_status: Dict[str, str] = Field(
+    current_agent: str | None = Field(None, description="Currently executing agent")
+    agent_status: dict[str, str] = Field(
         default_factory=dict, description="Status of each agent"
     )
-    completed_agents: List[str] = Field(
+    completed_agents: list[str] = Field(
         default_factory=list, description="List of completed agents"
     )
-    error_messages: List[str] = Field(
+    error_messages: list[str] = Field(
         default_factory=list, description="Any error messages"
     )
     progress_percentage: int = Field(
         ..., description="Overall progress percentage (0-100)"
     )
-    started_at: Optional[str] = Field(None, description="Workflow start time")
-    completed_at: Optional[str] = Field(None, description="Workflow completion time")
-    agent_durations: Dict[str, float] = Field(
+    started_at: str | None = Field(None, description="Workflow start time")
+    completed_at: str | None = Field(None, description="Workflow completion time")
+    agent_durations: dict[str, float] = Field(
         default_factory=dict, description="Duration of each agent in milliseconds"
     )
 
@@ -516,25 +527,25 @@ class WorkflowResultsResponse(BaseModel):
 
     session_id: str = Field(..., description="Workflow session ID")
     status: str = Field(..., description="Final workflow status")
-    job_url: Optional[str] = Field(None, description="Original job posting URL")
-    application_id: Optional[str] = Field(None, description="Associated application ID")
-    job_analysis: Optional[Dict[str, Any]] = Field(
+    job_url: str | None = Field(None, description="Original job posting URL")
+    application_id: str | None = Field(None, description="Associated application ID")
+    job_analysis: dict[str, Any] | None = Field(
         None, description="Job analysis results"
     )
-    company_research: Optional[Dict[str, Any]] = Field(
+    company_research: dict[str, Any] | None = Field(
         None, description="Company research results"
     )
-    profile_matching: Optional[Dict[str, Any]] = Field(
+    profile_matching: dict[str, Any] | None = Field(
         None, description="Profile matching results"
     )
-    resume_recommendations: Optional[Dict[str, Any]] = Field(
+    resume_recommendations: dict[str, Any] | None = Field(
         None, description="Resume recommendations"
     )
-    cover_letter: Optional[Dict[str, Any]] = Field(
+    cover_letter: dict[str, Any] | None = Field(
         None, description="Generated cover letter"
     )
-    notes: Optional[str] = Field(None, description="User's personal notes")
-    error_messages: List[str] = Field(
+    notes: str | None = Field(None, description="User's personal notes")
+    error_messages: list[str] = Field(
         default_factory=list, description="Any error messages from workflow"
     )
 
@@ -551,7 +562,7 @@ class RegenerateCoverLetterResponse(BaseModel):
     """Response model for cover letter regeneration."""
 
     session_id: str = Field(..., description="Workflow session ID")
-    cover_letter: Dict[str, Any] = Field(..., description="Regenerated cover letter")
+    cover_letter: dict[str, Any] = Field(..., description="Regenerated cover letter")
     message: str = Field(..., description="Status message")
 
 
@@ -559,7 +570,7 @@ class RegenerateAgentResponse(BaseModel):
     """Generic response model for agent regeneration."""
 
     session_id: str = Field(..., description="Workflow session ID")
-    result: Dict[str, Any] = Field(..., description="Regenerated agent output")
+    result: dict[str, Any] = Field(..., description="Regenerated agent output")
     message: str = Field(..., description="Status message")
 
 
@@ -574,11 +585,11 @@ async def start_workflow(
     response: Response,
     request: WorkflowStartRequest = None,
     job_file: UploadFile = File(None),
-    job_url: Optional[str] = Form(None),
-    job_text: Optional[str] = Form(None),
-    detected_title_form: Optional[str] = Form(None, alias="detected_title"),
-    detected_company_form: Optional[str] = Form(None, alias="detected_company"),
-    current_user: Dict[str, Any] = Depends(get_current_user_with_complete_profile),
+    job_url: str | None = Form(None),
+    job_text: str | None = Form(None),
+    detected_title_form: str | None = Form(None, alias="detected_title"),
+    detected_company_form: str | None = Form(None, alias="detected_company"),
+    current_user: dict[str, Any] = Depends(get_current_user_with_complete_profile),
     db: AsyncSession = Depends(get_database),
 ) -> WorkflowStartResponse:
     """Start a new job application workflow with rate limiting."""
@@ -605,8 +616,8 @@ async def start_workflow(
         # Concurrency guard: prevent two simultaneous start_workflow calls for the
         # same user (would create duplicate sessions and consume double LLM credits).
         try:
-            from utils.redis_client import get_redis_client as _get_wf_rc
             from utils.error_responses import APIError as _APIError
+            from utils.redis_client import get_redis_client as _get_wf_rc
 
             _wf_rc = await _get_wf_rc()
             if _wf_rc:
@@ -630,7 +641,7 @@ async def start_workflow(
         resolved_text = job_text or (request.job_text if request else None)
         file_content = None
         file_name = None
-        matched_ext: Optional[str] = None
+        matched_ext: str | None = None
 
         # Process uploaded file
         if job_file and job_file.filename:
@@ -745,7 +756,7 @@ async def start_workflow(
         if resolved_url:
             input_method = InputMethod.URL.value
             job_input = resolved_url
-            content_fingerprint: Optional[str] = None
+            content_fingerprint: str | None = None
         elif file_content:
             input_method = InputMethod.FILE.value
             if not matched_ext:
@@ -770,7 +781,7 @@ async def start_workflow(
             content_fingerprint,
         )
         if dup_row:
-            dup_details: List[Dict[str, Any]] = [
+            dup_details: list[dict[str, Any]] = [
                 {
                     "field": "application_id",
                     "message": str(dup_row.id),
@@ -828,7 +839,7 @@ async def start_workflow(
                 "content_fingerprint": content_fingerprint,
             },
             user_data=user_data,
-            processing_start_time=datetime.now(timezone.utc),
+            processing_start_time=datetime.now(UTC),
         )
 
         # Create job application entry with job_url if available
@@ -936,7 +947,7 @@ async def start_workflow(
 @router.get("/status/{session_id}", response_model=WorkflowStatusResponse)
 async def get_workflow_status(
     session_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ) -> WorkflowStatusResponse:
     """Get current workflow status with caching for frequent polling."""
@@ -1020,7 +1031,7 @@ async def get_workflow_status(
 @router.get("/results/{session_id}", response_model=WorkflowResultsResponse)
 async def get_workflow_results(
     session_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ) -> WorkflowResultsResponse:
     """Get workflow results after completion."""
@@ -1113,7 +1124,7 @@ async def get_workflow_results(
 async def regenerate_cover_letter(
     session_id: str,
     response: Response,
-    current_user: Dict[str, Any] = Depends(get_current_user_with_complete_profile),
+    current_user: dict[str, Any] = Depends(get_current_user_with_complete_profile),
     db: AsyncSession = Depends(get_database),
 ) -> RegenerateCoverLetterResponse:
     """
@@ -1212,6 +1223,10 @@ async def regenerate_cover_letter(
             "warning_messages": [],
         }
 
+        workflow_session_id = workflow_session.id
+        # Do not hold a database connection while a local reasoning model may
+        # run for several minutes. Re-query before persisting the result.
+        await db.rollback()
         # Run the cover letter agent
         updated_state = await agent.process(state)
         new_cover_letter = updated_state.get("cover_letter", {})
@@ -1221,6 +1236,10 @@ async def regenerate_cover_letter(
 
         from sqlalchemy.orm.attributes import flag_modified
 
+        persist_result = await db.execute(
+            select(WorkflowSession).where(WorkflowSession.id == workflow_session_id)
+        )
+        workflow_session = persist_result.scalar_one()
         workflow_session.cover_letter = new_cover_letter
         flag_modified(workflow_session, "cover_letter")
         await db.commit()
@@ -1244,7 +1263,7 @@ async def regenerate_cover_letter(
 async def regenerate_resume(
     session_id: str,
     response: Response,
-    current_user: Dict[str, Any] = Depends(get_current_user_with_complete_profile),
+    current_user: dict[str, Any] = Depends(get_current_user_with_complete_profile),
     db: AsyncSession = Depends(get_database),
 ) -> RegenerateAgentResponse:
     """
@@ -1335,6 +1354,10 @@ async def regenerate_resume(
             "warning_messages": [],
         }
 
+        workflow_session_id = workflow_session.id
+        # Do not hold a database connection while a local reasoning model may
+        # run for several minutes. Re-query before persisting the result.
+        await db.rollback()
         updated_state = await agent.process(state)
         new_resume = updated_state.get("resume_recommendations", {})
 
@@ -1343,6 +1366,10 @@ async def regenerate_resume(
 
         from sqlalchemy.orm.attributes import flag_modified
 
+        persist_result = await db.execute(
+            select(WorkflowSession).where(WorkflowSession.id == workflow_session_id)
+        )
+        workflow_session = persist_result.scalar_one()
         workflow_session.resume_recommendations = new_resume
         flag_modified(workflow_session, "resume_recommendations")
         await db.commit()
@@ -1368,7 +1395,7 @@ async def regenerate_resume(
 async def generate_interview_prep(
     session_id: str,
     response: Response,
-    current_user: Dict[str, Any] = Depends(get_current_user_with_complete_profile),
+    current_user: dict[str, Any] = Depends(get_current_user_with_complete_profile),
     db: AsyncSession = Depends(get_database),
 ) -> RegenerateAgentResponse:
     """
@@ -1431,8 +1458,9 @@ async def generate_interview_prep(
 
             user_api_key = decrypt_api_key(user_record.gemini_api_key_encrypted)
 
-        from utils.llm_client import get_gemini_client
         import json
+
+        from utils.llm_client import get_gemini_client
 
         gemini_client = await get_gemini_client()
 
@@ -1562,7 +1590,7 @@ Generate 4-6 interview stages, 8-10 likely questions with personalized suggested
 async def continue_workflow_after_gate(
     session_id: str,
     background_tasks: BackgroundTasks,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ) -> WorkflowContinueResponse:
     """
@@ -1666,7 +1694,7 @@ async def generate_documents(
     session_id: str,
     background_tasks: BackgroundTasks,
     response: Response,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
 ) -> WorkflowContinueResponse:
     """
@@ -1751,10 +1779,13 @@ async def _execute_workflow_background(
     user_id: str,
     input_method: str,
     job_input: str,
-    user_data: Dict[str, Any],
-    user_api_key: Optional[str] = None,
+    user_data: dict[str, Any],
+    user_api_key: str | None = None,
 ) -> None:
     """Execute workflow in background."""
+    current_task = asyncio.current_task()
+    if current_task is not None:
+        _active_workflow_tasks[session_id] = current_task
     try:
         async with get_session() as db:
             # Get workflow session
@@ -1775,6 +1806,7 @@ async def _execute_workflow_background(
                 WorkflowStatus.COMPLETED.value,
                 WorkflowStatus.AWAITING_CONFIRMATION.value,
                 WorkflowStatus.ANALYSIS_COMPLETE.value,
+                WorkflowStatus.CANCELLED.value,
             }
             if workflow_session.workflow_status in _idempotent_statuses:
                 logger.warning(
@@ -1867,7 +1899,7 @@ async def _execute_workflow_background(
                     workflow_session.error_messages = (
                         workflow_session.error_messages or []
                     ) + [_safe_error_msg(e, settings.debug)]
-                    workflow_session.processing_end_time = datetime.now(timezone.utc)
+                    workflow_session.processing_end_time = datetime.now(UTC)
                     flag_modified(workflow_session, "error_messages")
                     _strip_agent_outputs_on_session_model(workflow_session)
                     await db.commit()
@@ -1890,6 +1922,12 @@ async def _execute_workflow_background(
                         exc_info=True,
                     )
 
+    except asyncio.CancelledError:
+        # Deletion commits the terminal status first; cancellation closes an
+        # awaited httpx request so Ollama can stop generation.
+        logger.info("Workflow %s cancelled", session_id)
+        await invalidate_workflow_state(session_id)
+        raise
     except Exception as e:
         logger.error(f"Background workflow execution failed: {e}", exc_info=True)
         await report_exception(e, user_id=user_id)
@@ -1905,7 +1943,7 @@ async def _execute_workflow_background(
                     )
                     .values(
                         workflow_status=WorkflowStatus.FAILED.value,
-                        processing_end_time=datetime.now(timezone.utc),
+                        processing_end_time=datetime.now(UTC),
                         job_analysis=None,
                         company_research=None,
                         profile_matching=None,
@@ -1920,10 +1958,12 @@ async def _execute_workflow_background(
                 f"Workflow {session_id}: failed to set FAILED status after top-level error: {_update_err}",
                 exc_info=True,
             )
+    finally:
+        _active_workflow_tasks.pop(session_id, None)
 
 
 async def _continue_workflow_background(
-    session_id: str, user_id: Optional[str] = None
+    session_id: str, user_id: str | None = None
 ) -> None:
     """Continue workflow execution after user confirmation."""
     try:
@@ -1946,6 +1986,7 @@ async def _continue_workflow_background(
                 WorkflowStatus.COMPLETED.value,
                 WorkflowStatus.ANALYSIS_COMPLETE.value,
                 WorkflowStatus.FAILED.value,
+                WorkflowStatus.CANCELLED.value,
             }
             if workflow_session.workflow_status in _continuation_idempotent_statuses:
                 logger.warning(
@@ -2051,7 +2092,7 @@ async def _continue_workflow_background(
                     workflow_session.error_messages = (
                         workflow_session.error_messages or []
                     ) + [_safe_error_msg(e, settings.debug)]
-                    workflow_session.processing_end_time = datetime.now(timezone.utc)
+                    workflow_session.processing_end_time = datetime.now(UTC)
                     flag_modified(workflow_session, "error_messages")
                     _strip_agent_outputs_on_session_model(workflow_session)
                     await _soft_delete_job_application_for_failed_workflow(
@@ -2078,7 +2119,7 @@ async def _continue_workflow_background(
                     )
                     .values(
                         workflow_status=WorkflowStatus.FAILED.value,
-                        processing_end_time=datetime.now(timezone.utc),
+                        processing_end_time=datetime.now(UTC),
                         job_analysis=None,
                         company_research=None,
                         profile_matching=None,
@@ -2096,7 +2137,7 @@ async def _continue_workflow_background(
 
 
 async def _generate_documents_background(
-    session_id: str, user_id: Optional[str] = None
+    session_id: str, user_id: str | None = None
 ) -> None:
     """Run resume advisor + cover letter writer for an ANALYSIS_COMPLETE session."""
     try:
@@ -2115,6 +2156,7 @@ async def _generate_documents_background(
             _doc_gen_idempotent_statuses = {
                 WorkflowStatus.COMPLETED.value,
                 WorkflowStatus.FAILED.value,
+                WorkflowStatus.CANCELLED.value,
             }
             if workflow_session.workflow_status in _doc_gen_idempotent_statuses:
                 logger.warning(
@@ -2214,7 +2256,7 @@ async def _generate_documents_background(
                     workflow_session.error_messages = (
                         workflow_session.error_messages or []
                     ) + [_safe_error_msg(e, settings.debug)]
-                    workflow_session.processing_end_time = datetime.now(timezone.utc)
+                    workflow_session.processing_end_time = datetime.now(UTC)
                     flag_modified(workflow_session, "error_messages")
                     _strip_agent_outputs_on_session_model(workflow_session)
                     await _soft_delete_job_application_for_failed_workflow(
@@ -2236,7 +2278,7 @@ async def _generate_documents_background(
                     .where(WorkflowSession.session_id == session_id)
                     .values(
                         workflow_status=WorkflowStatus.FAILED.value,
-                        processing_end_time=datetime.now(timezone.utc),
+                        processing_end_time=datetime.now(UTC),
                         job_analysis=None,
                         company_research=None,
                         profile_matching=None,
@@ -2256,7 +2298,7 @@ async def _generate_documents_background(
 async def _update_workflow_session_with_state(
     db: AsyncSession,
     session_id: str,
-    final_state: Dict[str, Any],
+    final_state: dict[str, Any],
 ) -> None:
     """Update workflow session with final state."""
     result = await db.execute(
@@ -2265,6 +2307,13 @@ async def _update_workflow_session_with_state(
     workflow_session = result.scalar_one_or_none()
 
     if not workflow_session:
+        return
+
+    await db.refresh(workflow_session)
+    if workflow_session.workflow_status == WorkflowStatus.CANCELLED.value:
+        logger.info(
+            "Workflow %s was cancelled; skipping final state update", session_id
+        )
         return
 
     from sqlalchemy.orm.attributes import flag_modified
@@ -2282,7 +2331,7 @@ async def _update_workflow_session_with_state(
     workflow_session.failed_agents = final_state.get("failed_agents", [])
     workflow_session.error_messages = final_state.get("error_messages", [])
     workflow_session.warning_messages = final_state.get("warning_messages", [])
-    workflow_session.processing_end_time = datetime.now(timezone.utc)
+    workflow_session.processing_end_time = datetime.now(UTC)
 
     flag_modified(workflow_session, "agent_status")
     flag_modified(workflow_session, "completed_agents")
@@ -2338,7 +2387,7 @@ def _normalize_workflow_status_string(raw: Any) -> str:
 async def _update_job_application_with_final_state(
     db: AsyncSession,
     session_id: str,
-    final_state: Dict[str, Any],
+    final_state: dict[str, Any],
 ) -> bool:
     """
     Update job application based on final workflow state.
@@ -2406,8 +2455,8 @@ async def _update_job_application_with_final_state(
     # If ``uq_user_job_company`` fires on a completed workflow, we revert the session row
     # and soft-delete this application (see IntegrityError branch) — we do not drop
     # title/company and leave a second visible card.
-    now_ts = datetime.now(timezone.utc)
-    full_values: Dict[str, Any] = {
+    now_ts = datetime.now(UTC)
+    full_values: dict[str, Any] = {
         "status": app_status,
         "updated_at": now_ts,
     }
@@ -2464,7 +2513,7 @@ async def _update_job_application_with_final_state(
             f"Workflow {session_id}: duplicate constraint on job_applications — "
             "retrying without title/company"
         )
-        minimal_values: Dict[str, Any] = {
+        minimal_values: dict[str, Any] = {
             "status": app_status,
             "updated_at": now_ts,
         }
@@ -2492,17 +2541,17 @@ class WorkflowHistoryItem(BaseModel):
 
     session_id: str
     workflow_status: str
-    current_phase: Optional[str] = None
-    job_title: Optional[str] = None
-    company_name: Optional[str] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    current_phase: str | None = None
+    job_title: str | None = None
+    company_name: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 class WorkflowHistoryResponse(BaseModel):
     """Paginated list of workflow sessions."""
 
-    sessions: List[WorkflowHistoryItem]
+    sessions: list[WorkflowHistoryItem]
     total: int
     page: int
     per_page: int
@@ -2512,14 +2561,14 @@ class WorkflowHistoryResponse(BaseModel):
 
 @router.get("/history", response_model=WorkflowHistoryResponse)
 async def list_workflow_history(
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db: AsyncSession = Depends(get_database),
     page: int = Query(default=1, ge=1, le=10000, description="Page number (1-indexed)"),
     per_page: int = Query(default=10, ge=1, le=100, description="Items per page"),
-    status_filter: Optional[str] = Query(
+    status_filter: str | None = Query(
         default=None, description="Filter by workflow_status"
     ),
-    sort: Optional[str] = Query(
+    sort: str | None = Query(
         default="created_desc",
         description="Sort order: created_desc | created_asc | updated_desc",
     ),
@@ -2609,11 +2658,11 @@ class WorkflowTaskPayload(BaseModel):
     session_id: str
     user_id: str
     # Action is only set for continuation tasks; absent means initial execution.
-    action: Optional[str] = None
+    action: str | None = None
     # Initial-execution fields (only present when action is None).
-    input_method: Optional[str] = None
-    job_input: Optional[str] = None
-    user_data: Optional[Dict[str, Any]] = None
+    input_method: str | None = None
+    job_input: str | None = None
+    user_data: dict[str, Any] | None = None
 
 
 @router.post(

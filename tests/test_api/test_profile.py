@@ -20,8 +20,9 @@ Endpoints:
   POST   /api/v1/profile/parse-resume (format validation; LLM path not covered here)
 """
 
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 BASE = "/api/v1/profile"
 
@@ -66,7 +67,11 @@ class TestProfileStatus:
         resp = await authed_client_with_user.get(f"{BASE}/status")
         assert resp.status_code == 200
         data = resp.json()
-        assert "profile_completed" in data or "completion_percentage" in data or "is_complete" in data
+        assert (
+            "profile_completed" in data
+            or "completion_percentage" in data
+            or "is_complete" in data
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +113,11 @@ class TestUpdateBasicInfo:
         resp = await authed_client_with_user.put(
             f"{BASE}/basic-info",
             json={
-                "city": "NYC", "state": "NY", "country": "USA",
-                "professional_title": "Dev", "years_experience": -1,
+                "city": "NYC",
+                "state": "NY",
+                "country": "USA",
+                "professional_title": "Dev",
+                "years_experience": -1,
                 "is_student": False,
                 "summary": "Summary here.",
             },
@@ -127,11 +135,15 @@ class TestUpdateWorkExperience:
 
     @pytest.mark.asyncio
     async def test_no_auth_returns_401_or_403(self, api_client):
-        resp = await api_client.put(f"{BASE}/work-experience", json={"work_experience": []})
+        resp = await api_client.put(
+            f"{BASE}/work-experience", json={"work_experience": []}
+        )
         assert resp.status_code in (401, 403)
 
     @pytest.mark.asyncio
-    async def test_empty_list_marks_work_experience_step_complete(self, authed_client_with_user):
+    async def test_empty_list_marks_work_experience_step_complete(
+        self, authed_client_with_user
+    ):
         """Explicit [] is stored in JSONB and counts as completing step 2 (no experience yet)."""
         resp = await authed_client_with_user.put(
             f"{BASE}/work-experience",
@@ -158,7 +170,9 @@ class TestUpdateEducation:
         assert resp.status_code in (401, 403)
 
     @pytest.mark.asyncio
-    async def test_empty_list_marks_education_step_complete(self, authed_client_with_user):
+    async def test_empty_list_marks_education_step_complete(
+        self, authed_client_with_user
+    ):
         """Explicit [] is stored in JSONB and counts as completing the education step."""
         resp = await authed_client_with_user.put(
             f"{BASE}/education",
@@ -193,7 +207,9 @@ class TestUpdateEducation:
         assert "education" in st.json().get("completed_steps", [])
 
     @pytest.mark.asyncio
-    async def test_education_row_without_start_date_rejected(self, authed_client_with_user):
+    async def test_education_row_without_start_date_rejected(
+        self, authed_client_with_user
+    ):
         """Start date is required for each education entry."""
         resp = await authed_client_with_user.put(
             f"{BASE}/education",
@@ -212,7 +228,9 @@ class TestUpdateEducation:
         assert resp.status_code == 422
 
     @pytest.mark.asyncio
-    async def test_education_row_institution_degree_only_no_dates_rejected(self, authed_client_with_user):
+    async def test_education_row_institution_degree_only_no_dates_rejected(
+        self, authed_client_with_user
+    ):
         """Institution, degree, field, and dates are required (or Currently enrolled)."""
         resp = await authed_client_with_user.put(
             f"{BASE}/education",
@@ -230,8 +248,10 @@ class TestUpdateEducation:
         assert resp.status_code == 422
 
     @pytest.mark.asyncio
-    async def test_education_row_missing_field_of_study_rejected(self, authed_client_with_user):
-        """field_of_study is required with institution and degree."""
+    async def test_education_row_missing_field_of_study_is_accepted(
+        self, authed_client_with_user
+    ):
+        """field_of_study is optional when institution, degree, and dates are supplied."""
         resp = await authed_client_with_user.put(
             f"{BASE}/education",
             json={
@@ -239,12 +259,14 @@ class TestUpdateEducation:
                     {
                         "institution": "State University",
                         "degree": "Bachelor of Science",
+                        "start_date": "2018-08",
+                        "end_date": "2022-05",
                         "is_current": False,
                     }
                 ]
             },
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +279,9 @@ class TestUpdateSkills:
 
     @pytest.mark.asyncio
     async def test_no_auth_returns_401_or_403(self, api_client):
-        resp = await api_client.put(f"{BASE}/skills-qualifications", json={"skills": ["Python"]})
+        resp = await api_client.put(
+            f"{BASE}/skills-qualifications", json={"skills": ["Python"]}
+        )
         assert resp.status_code in (401, 403)
 
     @pytest.mark.asyncio
@@ -305,7 +329,9 @@ class TestSetApiKey:
 
     @pytest.mark.asyncio
     async def test_empty_key_returns_422(self, authed_client_with_user):
-        resp = await authed_client_with_user.post(f"{BASE}/api-key", json={"api_key": ""})
+        resp = await authed_client_with_user.post(
+            f"{BASE}/api-key", json={"api_key": ""}
+        )
         assert resp.status_code == 422
 
     @pytest.mark.asyncio
@@ -407,7 +433,9 @@ class TestParseResumeFormatValidation:
 
     @pytest.mark.asyncio
     async def test_legacy_doc_extension_rejected(self, authed_client_with_user):
-        files = {"resume": ("resume.doc", b"\xd0\xcf\x11\xe0fake", "application/msword")}
+        files = {
+            "resume": ("resume.doc", b"\xd0\xcf\x11\xe0fake", "application/msword")
+        }
         resp = await authed_client_with_user.post(f"{BASE}/parse-resume", files=files)
         assert resp.status_code in (400, 422)
         data = resp.json()
@@ -422,6 +450,61 @@ class TestParseResumeFormatValidation:
         assert resp.status_code in (400, 422)
         msg = resp.json().get("message", "").lower()
         assert "legacy" in msg and "not supported" in msg
+
+    @pytest.mark.asyncio
+    async def test_one_time_key_is_used_without_being_saved(
+        self, authed_client_with_user
+    ):
+        key = "AIza-one-time-key"
+        parsed = {"parsing_confidence": "HIGH", "processing_time": 0.1}
+        with patch(
+            "api.profile.parse_resume_from_file",
+            new_callable=AsyncMock,
+            return_value=parsed,
+        ) as parse, patch(
+            "api.profile._upsert_user_resume_asset", new_callable=AsyncMock
+        ):
+            resp = await authed_client_with_user.post(
+                f"{BASE}/parse-resume",
+                data={"api_key": key, "use_gemini": "true"},
+                files={"resume": ("resume.txt", b"A" * 80, "text/plain")},
+            )
+
+        assert resp.status_code == 200
+        assert parse.await_args.kwargs["user_api_key"] == key
+        assert parse.await_args.kwargs["prefer_local"] is False
+        status = await authed_client_with_user.get(f"{BASE}/api-key/status")
+        assert status.status_code == 200
+        assert status.json()["has_user_key"] is False
+
+    @pytest.mark.asyncio
+    async def test_local_model_is_default_for_resume_parsing(
+        self, authed_client_with_user
+    ):
+        parsed = {"parsing_confidence": "HIGH", "processing_time": 0.1}
+        with patch(
+            "api.profile.parse_resume_from_file",
+            new_callable=AsyncMock,
+            return_value=parsed,
+        ) as parse, patch(
+            "api.profile._upsert_user_resume_asset", new_callable=AsyncMock
+        ), patch.object(
+            __import__("api.profile", fromlist=["settings"]).settings,
+            "local_llm_url",
+            "http://local",
+        ), patch.object(
+            __import__("api.profile", fromlist=["settings"]).settings,
+            "local_llm_model",
+            "deepseek-r1:14b",
+        ):
+            resp = await authed_client_with_user.post(
+                f"{BASE}/parse-resume",
+                files={"resume": ("resume.txt", b"A" * 80, "text/plain")},
+            )
+
+        assert resp.status_code == 200
+        assert parse.await_args.kwargs["user_api_key"] is None
+        assert parse.await_args.kwargs["prefer_local"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -4,21 +4,21 @@ Uses Gemini LLM for comprehensive company research - no external web search need
 Provides strategic insights for job applicants.
 """
 
-import asyncio
 import logging
 import re
-from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional
-from workflows.state_schema import WorkflowState, CompanyResearchResult
+from datetime import UTC, datetime
+from typing import Any
+
+from utils.cache import (
+    _get_company_research_cache_key,
+    acquire_compute_lock,
+    cache_company_research,
+    get_cached_company_research,
+    release_compute_lock,
+)
 from utils.llm_parsing import parse_json_from_llm_response
 from utils.llm_prompting import build_llm_system_prompt
-from utils.cache import (
-    get_cached_company_research,
-    cache_company_research,
-    acquire_compute_lock,
-    release_compute_lock,
-    _get_company_research_cache_key,
-)
+from workflows.state_schema import CompanyResearchResult, WorkflowState
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -147,7 +147,7 @@ Respond with ONLY valid JSON in this exact structure:
 Be concise and useful. Never fill an unsupported factual field from general knowledge."""
 
 
-def _has_usable_company_name(name: Optional[str]) -> bool:
+def _has_usable_company_name(name: str | None) -> bool:
     """False for empty, whitespace, or common LLM placeholders when no real employer is named."""
     if not name or not str(name).strip():
         return False
@@ -172,7 +172,7 @@ def _has_usable_company_name(name: Optional[str]) -> bool:
     return True
 
 
-def _format_job_context_for_unnamed_employer(job_analysis: Dict[str, Any]) -> str:
+def _format_job_context_for_unnamed_employer(job_analysis: dict[str, Any]) -> str:
     """Build a text block for prompts when the posting omits the company (founding/confidential listings)."""
     title = (job_analysis.get("job_title") or "").strip() or "Unknown title"
     city = (job_analysis.get("job_city") or "").strip()
@@ -183,7 +183,7 @@ def _format_job_context_for_unnamed_employer(job_analysis: Dict[str, Any]) -> st
     industry = (job_analysis.get("industry") or "").strip() or "Not specified"
     team_info = (job_analysis.get("team_info") or "").strip()
     responsibilities = job_analysis.get("responsibilities") or []
-    lines: List[str] = [
+    lines: list[str] = [
         f"Job title: {title}",
         f"Location: {location}",
         f"Industry (from posting): {industry}",
@@ -239,14 +239,22 @@ class CompanyResearchAgent:
 
         # Store user API key for use in LLM calls (BYOK mode)
         self._current_user_api_key = state.get("user_api_key")
+        prefs: dict[str, Any] = state.get("workflow_preferences") or {}
+        use_local = prefs.get("ai_provider") == "local"
+        user_model: str | None = (
+            prefs.get("local_model") if use_local else prefs.get("preferred_model")
+        )
+        reasoning_effort: str | None = (
+            prefs.get("local_reasoning_effort") if use_local else None
+        )
 
         try:
             # Validate prerequisites
-            job_analysis: Optional[Dict[str, Any]] = state.get("job_analysis")
+            job_analysis: dict[str, Any] | None = state.get("job_analysis")
             if job_analysis is None:
                 raise ValueError("Job analysis is required for company research")
 
-            raw_company: Optional[str] = job_analysis.get("company_name")
+            raw_company: str | None = job_analysis.get("company_name")
             if not _has_usable_company_name(raw_company):
                 logger.info(
                     "Job analysis has no usable employer name — using unnamed-posting company research "
@@ -255,6 +263,9 @@ class CompanyResearchAgent:
                 research_result = await self._research_company_with_llm(
                     "Employer not stated in posting",
                     unnamed_job_analysis=job_analysis,
+                    user_model=user_model,
+                    force_local=use_local,
+                    local_reasoning_effort=reasoning_effort,
                 )
                 state["company_research"] = research_result.to_dict()
                 return state
@@ -262,7 +273,7 @@ class CompanyResearchAgent:
             company_name = str(raw_company).strip()
 
             # Check cache first
-            cached_result: Optional[Dict[str, Any]] = await get_cached_company_research(
+            cached_result: dict[str, Any] | None = await get_cached_company_research(
                 company_name
             )
             if cached_result:
@@ -295,7 +306,12 @@ class CompanyResearchAgent:
                 try:
                     # Perform fresh research with Gemini
                     research_result: CompanyResearchResult = (
-                        await self._research_company_with_llm(company_name)
+                        await self._research_company_with_llm(
+                            company_name,
+                            user_model=user_model,
+                            force_local=use_local,
+                            local_reasoning_effort=reasoning_effort,
+                        )
                     )
                     result_dict = research_result.to_dict()
                     await cache_company_research(company_name, result_dict)
@@ -306,7 +322,7 @@ class CompanyResearchAgent:
 
             return state
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("Company research timed out", exc_info=True)
             raise
         except Exception as e:
@@ -317,7 +333,10 @@ class CompanyResearchAgent:
         self,
         company_name: str,
         *,
-        unnamed_job_analysis: Optional[Dict[str, Any]] = None,
+        unnamed_job_analysis: dict[str, Any] | None = None,
+        user_model: str | None = None,
+        force_local: bool = False,
+        local_reasoning_effort: str | None = None,
     ) -> CompanyResearchResult:
         """
         Research company using Gemini LLM.
@@ -333,7 +352,7 @@ class CompanyResearchAgent:
             logger.info("Researching unnamed employer using job-context-only prompt")
         else:
             logger.info(f"Researching company with Gemini: {company_name}")
-        start_time: datetime = datetime.now(timezone.utc)
+        start_time: datetime = datetime.now(UTC)
 
         try:
             if unnamed_job_analysis is not None:
@@ -362,7 +381,10 @@ class CompanyResearchAgent:
                 temperature=LLM_TEMPERATURE,
                 max_tokens=LLM_MAX_TOKENS,
                 user_api_key=self._current_user_api_key,
+                model=user_model,
                 structured_output=True,
+                force_local=force_local,
+                local_reasoning_effort=local_reasoning_effort,
             )
 
             # Handle filtered response
@@ -380,9 +402,7 @@ class CompanyResearchAgent:
 
             # Convert to CompanyResearchResult
             result = self._map_to_result(research_data)
-            result.processing_time = (
-                datetime.now(timezone.utc) - start_time
-            ).total_seconds()
+            result.processing_time = (datetime.now(UTC) - start_time).total_seconds()
 
             logger.info(
                 f"Company research completed for {company_name} "
@@ -396,7 +416,7 @@ class CompanyResearchAgent:
             )
             return self._create_fallback_result(company_name, start_time)
 
-    def _map_to_result(self, data: Dict[str, Any]) -> CompanyResearchResult:
+    def _map_to_result(self, data: dict[str, Any]) -> CompanyResearchResult:
         """
         Map LLM response data to CompanyResearchResult schema.
 
@@ -454,7 +474,7 @@ class CompanyResearchAgent:
         result.confidence_assessment = data.get("confidence_assessment", {})
 
         # Record when this research was generated
-        result.research_date = datetime.now(timezone.utc).strftime("%b %Y")
+        result.research_date = datetime.now(UTC).strftime("%b %Y")
 
         return result
 
@@ -472,9 +492,7 @@ class CompanyResearchAgent:
             Minimal CompanyResearchResult with error indication
         """
         result = CompanyResearchResult()
-        result.processing_time = (
-            datetime.now(timezone.utc) - start_time
-        ).total_seconds()
+        result.processing_time = (datetime.now(UTC) - start_time).total_seconds()
         result.mission_vision = (
             f"Unable to complete research for {company_name}. Please research manually."
         )

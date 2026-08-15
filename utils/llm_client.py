@@ -49,12 +49,12 @@ RETRY_MIN_WAIT: int = 2  # seconds
 RETRY_MAX_WAIT: int = 10  # seconds
 
 # Local LLM known models — values accepted by the local endpoint.
-LOCAL_LLM_MODELS = {
-    "deepseek-r1:14b",
-    "qwen2.5:14b",
-    "llama3.1:8b",
-}
+LOCAL_LLM_MODELS = {"deepseek-r1:14b", "qwen2.5:14b", "llama3.1:8b", "gpt-oss:20b"}
 LOCAL_LLM_TRUNCATION_REASONS = {"length", "max_length", "max_tokens"}
+GPT_OSS_REASONING_TIMEOUTS = {"low": 180, "medium": 300, "high": 600}
+# High reasoning can spend more than 12k tokens before it emits the final JSON.
+# Keep this below the typical local context window once the prompt is included.
+GPT_OSS_REASONING_TOKEN_FLOORS = {"low": 4096, "medium": 8192, "high": 24576}
 
 # Configure module loggers
 logger = logging.getLogger(__name__)
@@ -282,6 +282,8 @@ class GeminiClient:
         user_api_key: str | None = None,
         user_id: str | None = None,
         structured_output: bool = False,
+        force_local: bool = False,
+        local_reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         """
         Generate a response from the Gemini model with optional caching.
@@ -299,7 +301,9 @@ class GeminiClient:
             user_id: User UUID string. When provided, scopes the cache key per user
                      to prevent cross-user hits on prompts that contain personal content
                      (resumes, cover letters, etc.). Omit only for fully public prompts.
-            structured_output: Request exactly one JSON object from the selected backend.
+        structured_output: Request exactly one JSON object from the selected backend.
+        force_local: Route to the configured local endpoint, using ``model`` if supplied.
+        local_reasoning_effort: gpt-oss reasoning level (low, medium, or high).
 
         Returns:
             Dict[str, Any]: Response from the model containing generated text
@@ -333,6 +337,8 @@ class GeminiClient:
             max_tokens=max_tokens,
             user_api_key=user_api_key,
             structured_output=structured_output,
+            force_local=force_local,
+            local_reasoning_effort=local_reasoning_effort,
         )
 
         # Cache the response if caching is enabled
@@ -362,6 +368,8 @@ class GeminiClient:
         max_tokens: int = DEFAULT_MAX_TOKENS,
         user_api_key: str | None = None,
         structured_output: bool = False,
+        force_local: bool = False,
+        local_reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         """
         Internal generate method with retry logic.
@@ -385,7 +393,7 @@ class GeminiClient:
             GeminiError: If all retries fail
         """
         # Route local model requests to the local endpoint before checking Gemini/Vertex.
-        if self._is_local_model(model):
+        if force_local or self._is_local_model(model):
             return await self._generate_with_local_llm(
                 prompt=prompt,
                 model=model,
@@ -393,6 +401,8 @@ class GeminiClient:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 structured_output=structured_output,
+                force_local=force_local,
+                local_reasoning_effort=local_reasoning_effort,
             )
 
         # Route to the configured backend
@@ -455,6 +465,8 @@ class GeminiClient:
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         structured_output: bool = False,
+        force_local: bool = False,
+        local_reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         """Generate text through an Ollama-compatible ``/api/generate`` endpoint."""
         if not self.local_llm_url:
@@ -462,42 +474,79 @@ class GeminiClient:
                 "No local LLM endpoint is configured. Set LOCAL_LLM_URL in env."
             )
 
-        model_to_use = model if self._is_local_model(model) else self.local_llm_model
+        model_to_use = (
+            model
+            if force_local and model
+            else (model if self._is_local_model(model) else self.local_llm_model)
+        )
         if not model_to_use:
             raise GeminiError(
                 "Local LLM model is not configured. Set LOCAL_LLM_MODEL in env or provide a supported local model name."
             )
 
+        is_gpt_oss = model_to_use.startswith("gpt-oss:")
+        request_url = self.local_llm_url
+        if is_gpt_oss and request_url.rstrip("/").endswith("/api/generate"):
+            request_url = f"{request_url.rsplit('/', 1)[0]}/chat"
+
+        reasoning_effort = (
+            local_reasoning_effort
+            if is_gpt_oss and local_reasoning_effort in {"low", "medium", "high"}
+            else ("medium" if is_gpt_oss else None)
+        )
+        effective_max_tokens = max(
+            max_tokens,
+            GPT_OSS_REASONING_TOKEN_FLOORS.get(reasoning_effort, 0),
+        )
         request_body: dict[str, Any] = {
             "model": model_to_use,
-            "prompt": prompt,
             "stream": False,
             "options": {
                 "temperature": temperature,
-                "num_predict": max_tokens,
+                "num_predict": effective_max_tokens,
             },
         }
-        if system:
-            request_body["system"] = system
+        if is_gpt_oss:
+            # GPT-OSS produces usable content through Ollama's chat protocol.
+            # This mirrors the validated notebook while preserving role separation.
+            request_body["messages"] = [
+                *([{"role": "system", "content": system}] if system else []),
+                {"role": "user", "content": prompt},
+            ]
+        else:
+            request_body["prompt"] = prompt
+            if system:
+                request_body["system"] = system
         if structured_output:
             request_body["format"] = "json"
+        # GPT-OSS can spend its entire generation on reasoning and return an
+        # empty ``response``.  Resume extraction only needs factual JSON, so
+        # retain a small reasoning budget, matching the working Ollama notebook.
+        if is_gpt_oss:
+            request_body["think"] = reasoning_effort
+        effective_timeout = max(
+            float(self.local_llm_timeout),
+            float(GPT_OSS_REASONING_TIMEOUTS.get(reasoning_effort, 0)),
+        )
 
         safe_model = model_to_use.replace("\r", " ").replace("\n", " ")[:128]
         logger.info(
             "[LLM] Local request model=%s prompt_chars=%d system_chars=%d "
-            "max_tokens=%d structured=%s",
+            "max_tokens=%d structured=%s reasoning=%s timeout_seconds=%d",
             safe_model,
             len(prompt),
             len(system or ""),
-            max_tokens,
+            effective_max_tokens,
             structured_output,
+            reasoning_effort or "n/a",
+            effective_timeout,
         )
         api_start_time = perf_counter()
 
         try:
-            async with httpx.AsyncClient(timeout=self.local_llm_timeout) as client:
+            async with httpx.AsyncClient(timeout=effective_timeout) as client:
                 response = await client.post(
-                    self.local_llm_url,
+                    request_url,
                     json=request_body,
                 )
 
@@ -511,9 +560,29 @@ class GeminiClient:
             if not isinstance(data, dict):
                 raise GeminiError("Local LLM response must be a JSON object.")
 
-            text = data.get("text") or data.get("response") or data.get("result")
+            # Do not use ``or`` here: Ollama legitimately returns an empty
+            # ``response`` when a reasoning model exhausts its output budget.
+            # Preserving that value lets the truncation check below report the
+            # real cause instead of claiming the response field is absent.
+            text = next(
+                (
+                    candidate
+                    for candidate in (
+                        (
+                            data.get("message", {}).get("content")
+                            if isinstance(data.get("message"), dict)
+                            else None
+                        ),
+                        data.get("text"),
+                        data.get("response"),
+                        data.get("result"),
+                    )
+                    if isinstance(candidate, str)
+                ),
+                None,
+            )
             if not isinstance(text, str):
-                raise GeminiError("Local LLM response missing text field.")
+                raise GeminiError("Local LLM response is missing generated text.")
 
             done = data.get("done", True)
             if not isinstance(done, bool):
@@ -529,6 +598,8 @@ class GeminiClient:
                 raise GeminiError(
                     "Local LLM response was truncated at the output token limit."
                 )
+            if not text.strip():
+                raise GeminiError("Local LLM returned an empty response.")
 
             api_duration_ms = (perf_counter() - api_start_time) * 1000
             logger.info(

@@ -5,23 +5,23 @@ Defines PostgreSQL table schemas using SQLAlchemy ORM with async support.
 
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional, Any
-from enum import Enum
+from enum import Enum, unique
+from typing import Any, Optional
 
 from sqlalchemy import (
-    String,
-    Boolean,
-    Integer,
     BigInteger,
-    Float,
+    Boolean,
+    CheckConstraint,
     DateTime,
-    Text,
+    Float,
     ForeignKey,
     Index,
+    Integer,
+    String,
+    Text,
     UniqueConstraint,
-    CheckConstraint,
 )
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -29,7 +29,6 @@ from sqlalchemy.orm import (
     relationship,
 )
 from sqlalchemy.sql import func
-
 
 # =============================================================================
 # ENUMS
@@ -43,6 +42,7 @@ class AuthMethod(str, Enum):
     GOOGLE = "google"
 
 
+@unique
 class ApplicationStatus(str, Enum):
     """Job application status types."""
 
@@ -57,6 +57,7 @@ class ApplicationStatus(str, Enum):
     ACCEPTED = "accepted"
 
 
+@unique
 class WorkflowStatusEnum(str, Enum):
     """Workflow status types for database."""
 
@@ -66,6 +67,7 @@ class WorkflowStatusEnum(str, Enum):
     ANALYSIS_COMPLETE = "analysis_complete"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 # =============================================================================
@@ -106,7 +108,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(
         String(255), unique=True, nullable=False, index=True
     )
-    password_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     auth_method: Mapped[str] = mapped_column(
         String(50), nullable=False, default=AuthMethod.LOCAL.value
     )
@@ -115,28 +117,28 @@ class User(Base):
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     profile_completed: Mapped[bool] = mapped_column(Boolean, default=False)
     profile_completion_percentage: Mapped[int] = mapped_column(Integer, default=0)
-    
+
     # Admin Role
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Email Verification
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
-    email_verified_at: Mapped[Optional[datetime]] = mapped_column(
+    email_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    
+
     # OAuth Fields
-    google_id: Mapped[Optional[str]] = mapped_column(
+    google_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True, unique=True, index=True
     )
-    
+
     # API Keys (encrypted)
-    gemini_api_key_encrypted: Mapped[Optional[str]] = mapped_column(
+    gemini_api_key_encrypted: Mapped[str | None] = mapped_column(
         Text, nullable=True, default=None
     )
 
     # Timestamps
-    last_login: Mapped[Optional[datetime]] = mapped_column(
+    last_login: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -162,13 +164,13 @@ class User(Base):
         lazy="selectin",
         cascade="all, delete-orphan",
     )
-    applications: Mapped[List["JobApplication"]] = relationship(
+    applications: Mapped[list["JobApplication"]] = relationship(
         "JobApplication",
         back_populates="user",
         lazy="noload",
         cascade="all, delete-orphan",
     )
-    workflow_sessions: Mapped[List["WorkflowSession"]] = relationship(
+    workflow_sessions: Mapped[list["WorkflowSession"]] = relationship(
         "WorkflowSession",
         back_populates="user",
         lazy="noload",
@@ -188,26 +190,26 @@ class User(Base):
         lazy="noload",
         cascade="all, delete-orphan",
     )
-    resume_versions: Mapped[List["ResumeVersion"]] = relationship(
+    resume_versions: Mapped[list["ResumeVersion"]] = relationship(
         "ResumeVersion",
         back_populates="user",
         lazy="noload",
         cascade="all, delete-orphan",
     )
-    job_form_answers: Mapped[List["JobFormAnswer"]] = relationship(
+    job_form_answers: Mapped[list["JobFormAnswer"]] = relationship(
         "JobFormAnswer",
         back_populates="user",
         lazy="noload",
         cascade="all, delete-orphan",
     )
-    portal_sessions: Mapped[List["PortalSession"]] = relationship(
+    portal_sessions: Mapped[list["PortalSession"]] = relationship(
         "PortalSession",
         back_populates="user",
         lazy="noload",
         cascade="all, delete-orphan",
     )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert user to dictionary for API responses."""
         return {
             "id": str(self.id),
@@ -253,53 +255,49 @@ class UserProfile(Base):
     )
 
     # Basic Information
-    city: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    state: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    country: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    professional_title: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    years_experience: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    city: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    state: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    country: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    professional_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    years_experience: Mapped[float | None] = mapped_column(Float, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_student: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Contact & application links (autofill, employer forms)
-    phone: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
-    linkedin_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    github_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    portfolio_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    linkedin_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    github_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    portfolio_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     # Profile Sections (JSONB for flexibility) - use None as default, not mutable objects
-    work_experience: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(
+    work_experience: Mapped[list[dict[str, Any]] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    education: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(
+    education: Mapped[list[dict[str, Any]] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    skills: Mapped[Optional[List[str]]] = mapped_column(
-        JSONB, nullable=True, default=None
-    )
+    skills: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True, default=None)
 
     # Job Preferences (JSONB for flexibility)
-    desired_salary_range: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+    desired_salary_range: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    desired_company_sizes: Mapped[Optional[List[str]]] = mapped_column(
+    desired_company_sizes: Mapped[list[str] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    job_types: Mapped[Optional[List[str]]] = mapped_column(
+    job_types: Mapped[list[str] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    work_arrangements: Mapped[Optional[List[str]]] = mapped_column(
+    work_arrangements: Mapped[list[str] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
     willing_to_relocate: Mapped[bool] = mapped_column(Boolean, default=False)
     requires_visa_sponsorship: Mapped[bool] = mapped_column(Boolean, default=False)
-    work_authorization: Mapped[Optional[str]] = mapped_column(
+    work_authorization: Mapped[str | None] = mapped_column(
         String(40), nullable=True, default=None
     )
     has_security_clearance: Mapped[bool] = mapped_column(Boolean, default=False)
-    max_travel_preference: Mapped[Optional[str]] = mapped_column(
-        String(50), nullable=True
-    )
+    max_travel_preference: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
@@ -312,7 +310,7 @@ class UserProfile(Base):
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="profile")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert profile to dictionary for API responses."""
         return {
             "id": str(self.id),
@@ -368,7 +366,7 @@ class UserResumeAsset(Base):
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
     byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    sha256_hex: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    sha256_hex: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -379,7 +377,7 @@ class UserResumeAsset(Base):
 
     user: Mapped["User"] = relationship("User", back_populates="resume_asset")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": str(self.id),
             "user_id": str(self.user_id),
@@ -441,13 +439,28 @@ class UserWorkflowPreferences(Base):
         String(16), nullable=False, default="concise"
     )
 
-    # Preferred Gemini model when user is in BYOK mode.
-    # NULL means "use the system default". Only honoured when the user
-    # has their own API key (Vertex AI mode always uses the server model).
-    preferred_model: Mapped[Optional[str]] = mapped_column(
+    # Provider selected for resume advice and cover-letter generation.
+    # The local endpoint remains instance-owned; users may select only its
+    # model name, never an arbitrary endpoint.
+    ai_provider: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="cloud"
+    )
+
+    # Preferred cloud model when user is in BYOK mode.
+    # NULL means "use the system default".
+    preferred_model: Mapped[str | None] = mapped_column(
         String(64), nullable=True, default=None
     )
 
+    # Optional user-selected model exposed by the configured local endpoint.
+    local_model: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, default=None
+    )
+
+    # Ollama reasoning level for gpt-oss models. Ignored by other local models.
+    local_reasoning_effort: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="medium"
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -459,14 +472,17 @@ class UserWorkflowPreferences(Base):
     # Relationship
     user: Mapped["User"] = relationship("User", back_populates="workflow_preferences")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API responses and workflow injection."""
         return {
             "workflow_gate_threshold": self.workflow_gate_threshold,
             "auto_generate_documents": self.auto_generate_documents,
             "cover_letter_tone": self.cover_letter_tone,
             "resume_length": self.resume_length,
+            "ai_provider": self.ai_provider,
             "preferred_model": self.preferred_model,
+            "local_model": self.local_model,
+            "local_reasoning_effort": self.local_reasoning_effort,
         }
 
 
@@ -504,68 +520,68 @@ class WorkflowSession(Base):
         String(50), default=WorkflowStatusEnum.INITIALIZED.value
     )
     current_phase: Mapped[str] = mapped_column(String(50), default="initialization")
-    current_agent: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    current_agent: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # Agent Status Tracking (JSONB) - use None as default
-    agent_status: Mapped[Optional[Dict[str, str]]] = mapped_column(
+    agent_status: Mapped[dict[str, str] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    completed_agents: Mapped[Optional[List[str]]] = mapped_column(
+    completed_agents: Mapped[list[str] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    failed_agents: Mapped[Optional[List[str]]] = mapped_column(
+    failed_agents: Mapped[list[str] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
 
     # Error Handling (JSONB)
-    error_messages: Mapped[Optional[List[str]]] = mapped_column(
+    error_messages: Mapped[list[str] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    warning_messages: Mapped[Optional[List[str]]] = mapped_column(
+    warning_messages: Mapped[list[str] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
 
     # Input Data (JSONB)
-    job_input_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+    job_input_data: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    user_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+    user_data: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
 
     # Agent Processing Results (JSONB for complex nested data)
-    job_analysis: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+    job_analysis: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    company_research: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+    company_research: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    profile_matching: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+    profile_matching: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    resume_recommendations: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+    resume_recommendations: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    cover_letter: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+    cover_letter: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    
+
     # Interview Prep (generated on-demand after workflow completion)
-    interview_prep: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+    interview_prep: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
 
     # Timing - Use proper DateTime instead of String for time-based queries
-    processing_start_time: Mapped[Optional[datetime]] = mapped_column(
+    processing_start_time: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    processing_end_time: Mapped[Optional[datetime]] = mapped_column(
+    processing_end_time: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    agent_start_times: Mapped[Optional[Dict[str, str]]] = mapped_column(
+    agent_start_times: Mapped[dict[str, str] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    agent_durations: Mapped[Optional[Dict[str, float]]] = mapped_column(
+    agent_durations: Mapped[dict[str, float] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
 
@@ -591,7 +607,7 @@ class WorkflowSession(Base):
         Index("ix_workflow_user_created", "user_id", "created_at"),
     )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert workflow session to dictionary for API responses."""
         return {
             "id": str(self.id),
@@ -656,7 +672,7 @@ class JobApplication(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
-    session_id: Mapped[Optional[str]] = mapped_column(
+    session_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("workflow_sessions.session_id", ondelete="SET NULL"),
         nullable=True,
@@ -664,29 +680,33 @@ class JobApplication(Base):
     )
 
     # Job Information
-    job_title: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    company_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    job_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # NEW: Original job posting URL
+    job_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    company_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    job_url: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # NEW: Original job posting URL
 
     # Match Score - store for quick access without loading full workflow
-    match_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # NEW: 0.0-1.0
+    match_score: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )  # NEW: 0.0-1.0
 
     # Application Status Tracking
     status: Mapped[str] = mapped_column(
         String(50), default=ApplicationStatus.DRAFT.value, index=True
     )
-    applied_date: Mapped[Optional[datetime]] = mapped_column(
+    applied_date: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    response_date: Mapped[Optional[datetime]] = mapped_column(
+    response_date: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
     # User Notes - personal notes about this application
-    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # NEW: User's notes
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)  # NEW: User's notes
 
     # Soft delete — set instead of hard DELETE to preserve audit history
-    deleted_at: Mapped[Optional[datetime]] = mapped_column(
+    deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None, index=True
     )
 
@@ -719,7 +739,7 @@ class JobApplication(Base):
         Index("ix_job_applications_user_score", "user_id", "match_score"),
     )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert application to dictionary for API responses."""
         return {
             "id": str(self.id),
@@ -730,7 +750,9 @@ class JobApplication(Base):
             "job_url": self.job_url,
             "match_score": self.match_score,
             "status": self.status,
-            "applied_date": self.applied_date.isoformat() if self.applied_date else None,
+            "applied_date": (
+                self.applied_date.isoformat() if self.applied_date else None
+            ),
             "response_date": (
                 self.response_date.isoformat() if self.response_date else None
             ),
@@ -738,6 +760,8 @@ class JobApplication(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
 class ResumeVersion(Base):
     __tablename__ = "resume_versions"
 
@@ -747,41 +771,32 @@ class ResumeVersion(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
-    company_name: Mapped[str] = mapped_column(
-        String(100)
-    )
-    job_title: Mapped[str] = mapped_column(
-        String(100), index=True
-    )
-    source_resume: Mapped[str] = mapped_column(
-        String(200)
-    )
-    docx_path: Mapped[Optional[str]] = mapped_column(
+    company_name: Mapped[str] = mapped_column(String(100))
+    job_title: Mapped[str] = mapped_column(String(100), index=True)
+    source_resume: Mapped[str] = mapped_column(String(200))
+    docx_path: Mapped[str | None] = mapped_column(
         String(200), nullable=True, default=None
     )
-    pdf_path: Mapped[Optional[str]] = mapped_column(
+    pdf_path: Mapped[str | None] = mapped_column(
         String(200), nullable=True, default=None
     )
     ats_score: Mapped[float] = mapped_column(
         Float, nullable=False, default=0.0, server_default="0"
     )
-    keywords_added: Mapped[Optional[List[str]]] = mapped_column(
+    keywords_added: Mapped[list[str] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
 
-    user: Mapped["User"] = relationship(
-        "User",
-        back_populates="resume_versions"
-    )
+    user: Mapped["User"] = relationship("User", back_populates="resume_versions")
     __table_args__ = (
         Index("ix_resume_user_created", "user_id", "created_at"),
         Index("ix_resume_user_company", "user_id", "company_name", "job_title"),
     )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert resume version to dictionary for API responses."""
         return {
             "id": str(self.id),
@@ -806,26 +821,19 @@ class JobFormAnswer(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
-    question: Mapped[str] = mapped_column(
-        String(200)
-    )
-    answer: Mapped[str] = mapped_column(
-        Text
-    )
+    question: Mapped[str] = mapped_column(String(200))
+    answer: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
 
-    user: Mapped["User"] = relationship(
-        "User",
-        back_populates="job_form_answers"
-    )
+    user: Mapped["User"] = relationship("User", back_populates="job_form_answers")
     __table_args__ = (
         Index("ix_form_answer_user_question", "user_id", "question"),
         Index("ix_form_answer_user_created", "user_id", "created_at"),
     )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert job form answer to dictionary for API responses."""
         return {
             "id": str(self.id),
@@ -840,43 +848,31 @@ class PortalSession(Base):
     __tablename__ = "portal_sessions"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid.uuid4
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="CASCADE")
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
     )
 
-    portal_name: Mapped[str] = mapped_column(
-        String(50)
-    )
+    portal_name: Mapped[str] = mapped_column(String(50))
 
-    storage_state_path: Mapped[str] = mapped_column(
-        String(500)
-    )
+    storage_state_path: Mapped[str] = mapped_column(String(500))
 
     last_login_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now()
+        DateTime(timezone=True), server_default=func.now()
     )
 
-    expires_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now()
+        DateTime(timezone=True), server_default=func.now()
     )
 
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now()
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
     user: Mapped["User"] = relationship("User", back_populates="portal_sessions")
@@ -887,12 +883,12 @@ class PortalSession(Base):
 # =============================================================================
 
 
-def uuid_to_str(uid: uuid.UUID) -> Optional[str]:
+def uuid_to_str(uid: uuid.UUID) -> str | None:
     """Convert UUID to string safely."""
     return str(uid) if uid else None
 
 
-def str_to_uuid(uid_str: str) -> Optional[uuid.UUID]:
+def str_to_uuid(uid_str: str) -> uuid.UUID | None:
     """Convert string to UUID safely."""
     if not uid_str:
         return None

@@ -29,12 +29,12 @@ repos:
         args: ["--fix=lf"]
       - id: trailing-whitespace
 
-  # Ruff owns lint fixes and import sorting; Black remains the only formatter.
+  # Ruff uses the repository's defect-focused baseline; Black remains the formatter.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.2
     hooks:
       - id: ruff-check
-        args: ["--fix", "--extend-select=E4,E7,F,I,UP,B"]
+        args: ["--fix"]
         types_or: [python, pyi]
 
   - repo: https://github.com/psf/black-pre-commit-mirror

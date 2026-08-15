@@ -11,21 +11,23 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.settings import get_settings
 from api.extension_autofill_rules import (
     build_deterministic_raw_assignments,
     filter_skipped_for_assigned_uids,
     merge_assignment_dicts,
 )
-from models.database import User, UserProfile as UserProfileModel
+from config.settings import get_settings
+from models.database import User
+from models.database import UserProfile as UserProfileModel
 from utils.auth import get_current_user_with_complete_profile
 from utils.cache import (
     cache_tool_result,
@@ -43,7 +45,11 @@ from utils.error_responses import (
     not_found_error,
     rate_limit_error,
 )
-from utils.llm_client import GeminiError, get_gemini_client, user_facing_message_from_llm_exception
+from utils.llm_client import (
+    GeminiError,
+    get_gemini_client,
+    user_facing_message_from_llm_exception,
+)
 from utils.llm_parsing import parse_json_from_llm_response
 from utils.security import sanitize_text
 
@@ -55,6 +61,7 @@ def _get_user_resume_asset_model():
     from models.database import UserResumeAsset
 
     return UserResumeAsset
+
 
 # =============================================================================
 # CONSTANTS
@@ -80,6 +87,7 @@ def _autofill_rate_limit() -> int:
     if get_settings().debug:
         return _RATE_LIMIT_DEBUG
     return _RATE_LIMIT
+
 
 _SYSTEM_PROMPT: str = """You map job application form fields to a user's profile data.
 
@@ -141,15 +149,17 @@ class AutofillFieldIn(BaseModel):
         description="Stable id from the extension serializer (digits only)",
     )
     tag: str = Field(..., max_length=24)
-    input_type: Optional[str] = Field(None, max_length=32)
-    name_attr: Optional[str] = Field(None, max_length=240)
-    id_attr: Optional[str] = Field(None, max_length=240)
+    input_type: str | None = Field(None, max_length=32)
+    name_attr: str | None = Field(None, max_length=240)
+    id_attr: str | None = Field(None, max_length=240)
     label_text: str = Field(default="", max_length=_MAX_LABEL_CHARS)
-    placeholder: Optional[str] = Field(None, max_length=500)
-    aria_label: Optional[str] = Field(None, max_length=500)
+    placeholder: str | None = Field(None, max_length=500)
+    aria_label: str | None = Field(None, max_length=500)
     required: bool = False
-    max_length: Optional[int] = Field(None, ge=0, le=1_000_000)
-    options: Optional[List[AutofillSelectOption]] = Field(None, max_length=_MAX_OPTIONS_PER_SELECT)
+    max_length: int | None = Field(None, ge=0, le=1_000_000)
+    options: list[AutofillSelectOption] | None = Field(
+        None, max_length=_MAX_OPTIONS_PER_SELECT
+    )
     duplicate_label_index: int = Field(
         default=0,
         ge=0,
@@ -161,9 +171,9 @@ class AutofillFieldIn(BaseModel):
 class AutofillMapRequest(BaseModel):
     """Request body for POST /extension/autofill/map."""
 
-    fields: List[AutofillFieldIn] = Field(..., min_length=1)
+    fields: list[AutofillFieldIn] = Field(..., min_length=1)
     page_url: str = Field(..., min_length=1, max_length=_MAX_PAGE_URL_LEN)
-    extras: Optional[Dict[str, str]] = Field(
+    extras: dict[str, str] | None = Field(
         default=None,
         description="Optional key/value hints stored in the extension (phone, URLs, etc.)",
     )
@@ -211,9 +221,9 @@ class AutofillAssignmentOut(BaseModel):
 class AutofillMapResponse(BaseModel):
     """LLM mapping result returned to the extension."""
 
-    assignments: List[AutofillAssignmentOut] = Field(default_factory=list)
-    skipped: List[Dict[str, str]] = Field(default_factory=list)
-    warnings: List[str] = Field(
+    assignments: list[AutofillAssignmentOut] = Field(default_factory=list)
+    skipped: list[dict[str, str]] = Field(default_factory=list)
+    warnings: list[str] = Field(
         default_factory=list,
         description="UX hints (e.g. same-document MVP, no iframes)",
     )
@@ -224,42 +234,48 @@ class AutofillMapResponse(BaseModel):
 # =============================================================================
 
 
-def _get_user_uuid(current_user: Dict[str, Any]) -> uuid.UUID:
+def _get_user_uuid(current_user: dict[str, Any]) -> uuid.UUID:
     uid = current_user.get("id") or current_user.get("_id")
     if isinstance(uid, str):
         return uuid.UUID(uid)
     return uid
 
 
-async def _get_user_api_key(db: AsyncSession, user_id: uuid.UUID) -> Optional[str]:
+async def _get_user_api_key(db: AsyncSession, user_id: uuid.UUID) -> str | None:
     try:
         result = await db.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
         if user and user.gemini_api_key_encrypted:
             return decrypt_api_key(user.gemini_api_key_encrypted)
-    except Exception as e:
-        logger.warning("Failed to decrypt user API key for autofill: %s", e, exc_info=True)
+    except Exception:
+        logger.warning(
+            "Unable to load stored provider configuration for autofill", exc_info=True
+        )
     return None
 
 
 def _server_has_llm() -> bool:
     """Read settings at call time so tests and env reloads see current config."""
     cfg = get_settings()
-    return bool(getattr(cfg, "gemini_api_key", None)) or bool(getattr(cfg, "use_vertex_ai", False))
+    return bool(getattr(cfg, "gemini_api_key", None)) or bool(
+        getattr(cfg, "use_vertex_ai", False)
+    )
 
 
 async def _load_profile_bundle(
     db: AsyncSession, user_id: uuid.UUID, user_row: User
-) -> Tuple[Dict[str, Any], Optional[str]]:
+) -> tuple[dict[str, Any], str | None]:
     """
     Build a JSON-serializable snapshot for the LLM (user + profile).
 
     Returns:
         Tuple of (snapshot dict, profile updated_at iso or None for cache keying)
     """
-    result = await db.execute(select(UserProfileModel).where(UserProfileModel.user_id == user_id))
+    result = await db.execute(
+        select(UserProfileModel).where(UserProfileModel.user_id == user_id)
+    )
     prof = result.scalar_one_or_none()
-    snap: Dict[str, Any] = {
+    snap: dict[str, Any] = {
         "email": user_row.email,
         "full_name": user_row.full_name,
     }
@@ -280,7 +296,9 @@ async def _load_profile_bundle(
         snap["profile"] = {}
 
     UserResumeAsset = _get_user_resume_asset_model()
-    ra_res = await db.execute(select(UserResumeAsset).where(UserResumeAsset.user_id == user_id))
+    ra_res = await db.execute(
+        select(UserResumeAsset).where(UserResumeAsset.user_id == user_id)
+    )
     ra = ra_res.scalar_one_or_none()
     if ra:
         snap["resume_file"] = {
@@ -295,11 +313,14 @@ async def _load_profile_bundle(
     return snap, prof_sig
 
 
-def _sanitize_field_dict(f: AutofillFieldIn) -> Dict[str, Any]:
+def _sanitize_field_dict(f: AutofillFieldIn) -> dict[str, Any]:
     opts = None
     if f.options:
         opts = [
-            {"value": sanitize_text(o.value)[:500], "text": sanitize_text(o.text)[:_MAX_OPTION_TEXT]}
+            {
+                "value": sanitize_text(o.value)[:500],
+                "text": sanitize_text(o.text)[:_MAX_OPTION_TEXT],
+            }
             for o in f.options[:_MAX_OPTIONS_PER_SELECT]
         ]
     return {
@@ -331,10 +352,10 @@ def _sanitize_form_autofill_value(val: str) -> str:
     return text
 
 
-def _sanitize_extras(extras: Optional[Dict[str, str]]) -> Dict[str, str]:
+def _sanitize_extras(extras: dict[str, str] | None) -> dict[str, str]:
     if not extras:
         return {}
-    out: Dict[str, str] = {}
+    out: dict[str, str] = {}
     for k, v in list(extras.items())[:_MAX_EXTRAS_KEYS]:
         kk = sanitize_text(str(k))[:_MAX_EXTRA_KEY_LEN]
         if not kk:
@@ -344,7 +365,10 @@ def _sanitize_extras(extras: Optional[Dict[str, str]]) -> Dict[str, str]:
 
 
 def _build_user_prompt(
-    fields_compact: List[Dict[str, Any]], profile: Dict[str, Any], extras: Dict[str, str], page_url: str
+    fields_compact: list[dict[str, Any]],
+    profile: dict[str, Any],
+    extras: dict[str, str],
+    page_url: str,
 ) -> str:
     return (
         "Page URL (context only): "
@@ -361,10 +385,10 @@ def _build_user_prompt(
 
 
 def _validate_assignments(
-    raw_assignments: List[Dict[str, Any]],
-    fields_by_uid: Dict[str, AutofillFieldIn],
-) -> List[AutofillAssignmentOut]:
-    out: List[AutofillAssignmentOut] = []
+    raw_assignments: list[dict[str, Any]],
+    fields_by_uid: dict[str, AutofillFieldIn],
+) -> list[AutofillAssignmentOut]:
+    out: list[AutofillAssignmentOut] = []
     for item in raw_assignments:
         if not isinstance(item, dict):
             continue
@@ -376,7 +400,11 @@ def _validate_assignments(
             val = str(val) if val is not None else ""
         val = _sanitize_form_autofill_value(val)
         meta = fields_by_uid[uid]
-        if meta.max_length is not None and meta.max_length > 0 and len(val) > meta.max_length:
+        if (
+            meta.max_length is not None
+            and meta.max_length > 0
+            and len(val) > meta.max_length
+        ):
             val = val[: int(meta.max_length)]
         out.append(
             AutofillAssignmentOut(
@@ -390,12 +418,12 @@ def _validate_assignments(
 
 
 def _missing_required_warnings(
-    request_fields: Sequence["AutofillFieldIn"],
+    request_fields: Sequence[AutofillFieldIn],
     assignments: Sequence[AutofillAssignmentOut],
-) -> List[str]:
+) -> list[str]:
     """Warn when required fields (except resume file) received no assignment."""
     assigned = {a.field_uid for a in assignments}
-    missing_labels: List[str] = []
+    missing_labels: list[str] = []
     for field in request_fields:
         if not field.required or field.field_uid in assigned:
             continue
@@ -415,12 +443,12 @@ def _missing_required_warnings(
 
 
 def _finalize_autofill_response(
-    llm_raw_assignments: List[Dict[str, Any]],
-    skipped: List[Dict[str, str]],
-    fields_by_uid: Dict[str, AutofillFieldIn],
-    profile_bundle: Dict[str, Any],
-    request_fields: List[AutofillFieldIn],
-) -> Tuple[List[AutofillAssignmentOut], List[Dict[str, str]]]:
+    llm_raw_assignments: list[dict[str, Any]],
+    skipped: list[dict[str, str]],
+    fields_by_uid: dict[str, AutofillFieldIn],
+    profile_bundle: dict[str, Any],
+    request_fields: list[AutofillFieldIn],
+) -> tuple[list[AutofillAssignmentOut], list[dict[str, str]]]:
     """
     Merge deterministic profile rules over LLM assignments and drop stale skips.
 
@@ -456,7 +484,7 @@ def _finalize_autofill_response(
 async def map_form_fields_to_profile(
     request: AutofillMapRequest,
     response: Response,
-    current_user: Dict[str, Any] = Depends(get_current_user_with_complete_profile),
+    current_user: dict[str, Any] = Depends(get_current_user_with_complete_profile),
     db: AsyncSession = Depends(get_database),
 ) -> AutofillMapResponse:
     """
@@ -497,7 +525,7 @@ async def map_form_fields_to_profile(
     fields_compact = [_sanitize_field_dict(f) for f in request.fields]
     page_url_clean = sanitize_text(request.page_url.strip())[:_MAX_PAGE_URL_LEN]
 
-    cache_payload: Dict[str, Any] = {
+    cache_payload: dict[str, Any] = {
         "tool": "extension_autofill",
         "user_id": str(user_id),
         "page_url": page_url_clean,
@@ -513,9 +541,11 @@ async def map_form_fields_to_profile(
     ]
 
     if cached and isinstance(cached, dict) and "assignments" in cached:
-        raw_assign = [x for x in (cached.get("assignments") or []) if isinstance(x, dict)]
+        raw_assign = [
+            x for x in (cached.get("assignments") or []) if isinstance(x, dict)
+        ]
         raw_skip = cached.get("skipped") or []
-        skipped_safe: List[Dict[str, str]] = []
+        skipped_safe: list[dict[str, str]] = []
         for s in raw_skip:
             if isinstance(s, dict) and isinstance(s.get("field_uid"), str):
                 uid = s["field_uid"]
@@ -535,9 +565,13 @@ async def map_form_fields_to_profile(
             request.fields,
         )
         warnings.extend(_missing_required_warnings(request.fields, assignments))
-        return AutofillMapResponse(assignments=assignments, skipped=skipped_safe, warnings=warnings)
+        return AutofillMapResponse(
+            assignments=assignments, skipped=skipped_safe, warnings=warnings
+        )
 
-    user_prompt = _build_user_prompt(fields_compact, profile_bundle, extras_clean, page_url_clean)
+    user_prompt = _build_user_prompt(
+        fields_compact, profile_bundle, extras_clean, page_url_clean
+    )
 
     try:
         client = await get_gemini_client()
@@ -573,10 +607,12 @@ async def map_form_fields_to_profile(
 
     # Do not use sanitize_llm_output here — it HTML-escapes strings (e.g. ' → &#x27;), which
     # must remain plain text for form input/textarea values written by the extension.
-    raw_assignments = parsed.get("assignments") if isinstance(parsed.get("assignments"), list) else []
+    raw_assignments = (
+        parsed.get("assignments") if isinstance(parsed.get("assignments"), list) else []
+    )
     skipped = parsed.get("skipped") if isinstance(parsed.get("skipped"), list) else []
 
-    skipped_safe: List[Dict[str, str]] = []
+    skipped_safe: list[dict[str, str]] = []
     for s in skipped:
         if isinstance(s, dict) and isinstance(s.get("field_uid"), str):
             sk_uid = s["field_uid"]
@@ -603,8 +639,10 @@ async def map_form_fields_to_profile(
     cache_body = {
         "assignments": [a.model_dump() for a in assignments],
         "skipped": skipped_safe,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
     }
     await cache_tool_result("extension_autofill", cache_payload, cache_body)
 
-    return AutofillMapResponse(assignments=assignments, skipped=skipped_safe, warnings=warnings)
+    return AutofillMapResponse(
+        assignments=assignments, skipped=skipped_safe, warnings=warnings
+    )

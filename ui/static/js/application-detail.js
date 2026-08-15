@@ -126,6 +126,20 @@
         return [];
     }
 
+    /** Return the first usable score without treating a missing score as zero. */
+    function getScore(...values) {
+        for (const value of values) {
+            if (typeof value === 'number' && Number.isFinite(value)) return value;
+            if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
+        }
+        return null;
+    }
+
+    /** @param {number|null} value */
+    function formatScore(value) {
+        return value === null ? '—' : `${value > 1 ? Math.round(value) : Math.round(value * 100)}%`;
+    }
+
     /** @param {string} s @returns {string} */
     function toTitleCase(s) {
         return s ? s.replace(/\w\S*/g, t => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase()) : s;
@@ -445,12 +459,12 @@
 
         // Match score
         const qa = match.quantified_assessment || match.final_scores || {};
-        const matchScore = qa.overall_match_score || match.overall_match_score || match.overall_score || 0;
-        const scorePercent = matchScore > 1 ? Math.round(matchScore) : Math.round(matchScore * 100);
+        const matchScore = getScore(qa.overall_match_score, qa.overall_score, match.overall_match_score, match.overall_score);
+        const scorePercent = matchScore === null ? 0 : (matchScore > 1 ? Math.round(matchScore) : Math.round(matchScore * 100));
 
         const msEl = document.getElementById('matchScore');
         const mcEl = document.getElementById('matchCircle');
-        if (msEl) msEl.textContent = `${scorePercent}%`;
+        if (msEl) msEl.textContent = formatScore(matchScore);
         if (mcEl) mcEl.style.setProperty('--score', String(scorePercent));
 
         // Match status
@@ -622,9 +636,9 @@
 
         // ========== SUB-PANE 2: YOUR FIT ==========
         const verdict = exec.one_line_verdict || exec.fit_assessment || match.fit_assessment || '';
-        const qualScore = qa.qualification_match_score || match.qualification_score || 0;
-        const prefScore = qa.preference_match_score || match.preference_score || 0;
-        const overallScore = qa.overall_match_score || match.overall_match_score || match.overall_score || 0;
+        const qualScore = getScore(qa.qualification_match_score, qa.qualification_score, match.qualification_score);
+        const prefScore = getScore(qa.preference_match_score, qa.preference_score, match.preference_score);
+        const overallScore = getScore(qa.overall_match_score, qa.overall_score, match.overall_match_score, match.overall_score);
         const recommendation = (exec.recommendation || '').toUpperCase();
         const confidenceLevel = (exec.confidence_level || '').toUpperCase();
 
@@ -716,9 +730,9 @@
                 <div class="match-card">
                     <div class="match-verdict">${escapeHtml(verdict)}</div>
                     <div class="match-scores">
-                        <div class="score-item"><div class="score-item-value">${toPercent(overallScore)}%</div><div class="score-item-label">Overall</div><div class="breakdown-desc">Weighted combination of all scores below</div></div>
-                        <div class="score-item"><div class="score-item-value">${toPercent(qualScore)}%</div><div class="score-item-label">Qualifications</div><div class="breakdown-desc">Skills, experience &amp; education match</div></div>
-                        <div class="score-item"><div class="score-item-value">${toPercent(prefScore)}%</div><div class="score-item-label">Preferences</div><div class="breakdown-desc">Salary, location &amp; work style fit</div></div>
+                        <div class="score-item"><div class="score-item-value">${formatScore(overallScore)}</div><div class="score-item-label">Overall</div><div class="breakdown-desc">Weighted combination of all scores below</div></div>
+                        <div class="score-item"><div class="score-item-value">${formatScore(qualScore)}</div><div class="score-item-label">Qualifications</div><div class="breakdown-desc">Skills, experience &amp; education match</div></div>
+                        <div class="score-item"><div class="score-item-value">${formatScore(prefScore)}</div><div class="score-item-label">Preferences</div><div class="breakdown-desc">Salary, location &amp; work style fit</div></div>
                     </div>
                 </div>` : ''}
 

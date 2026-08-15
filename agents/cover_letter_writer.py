@@ -5,10 +5,12 @@ Creates tailored cover letters by connecting candidate experience to job require
 
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Dict, Optional, Any
-from workflows.state_schema import WorkflowState, CoverLetterResult
+from datetime import UTC, datetime
+from typing import Any
+
+from config.constants import LLM_REASONING_TIMEOUTS
 from utils.llm_prompting import build_llm_system_prompt
+from workflows.state_schema import CoverLetterResult, WorkflowState
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +21,14 @@ logger = logging.getLogger(__name__)
 LLM_TEMPERATURE: float = 0.5  # Balanced: professional yet engaging
 LLM_MAX_TOKENS: int = 1024
 LLM_TIMEOUT: int = 60  # seconds
+
+
+def _generation_timeout(force_local: bool, reasoning_effort: str | None) -> int:
+    """Keep the outer agent timeout longer than GPT-OSS's HTTP timeout."""
+    if not force_local:
+        return LLM_TIMEOUT
+    return LLM_REASONING_TIMEOUTS.get(reasoning_effort or "", 190)
+
 
 # =============================================================================
 # PROMPTS
@@ -117,7 +127,7 @@ TONE_GUIDANCE = {
 }
 
 # User-selected tone overrides — appended to (not replacing) industry guidance
-USER_TONE_OVERRIDES: Dict[str, str] = {
+USER_TONE_OVERRIDES: dict[str, str] = {
     "professional": "",  # no override — let industry guidance fully control
     "conversational": (
         "\n\nUSER TONE PREFERENCE — CONVERSATIONAL: Write in a warm, natural, first-person voice. "
@@ -171,21 +181,26 @@ class CoverLetterWriterAgent:
             Exception: If cover letter generation fails
         """
         logger.info(f"Starting cover letter writing for session {state['session_id']}")
-        start_time = datetime.now(timezone.utc)
+        start_time = datetime.now(UTC)
 
         # Store user API key for use in LLM calls (BYOK mode)
         self._current_user_api_key = state.get("user_api_key")
 
         try:
             # Extract required data
-            user_profile: Dict[str, Any] = state.get("user_profile", {})
-            job_analysis: Dict[str, Any] = state.get("job_analysis", {})
-            profile_matching: Optional[Dict[str, Any]] = state.get("profile_matching")
-            company_research: Optional[Dict[str, Any]] = state.get("company_research")
-            prefs: Dict[str, Any] = state.get("workflow_preferences") or {}
+            user_profile: dict[str, Any] = state.get("user_profile", {})
+            job_analysis: dict[str, Any] = state.get("job_analysis", {})
+            profile_matching: dict[str, Any] | None = state.get("profile_matching")
+            company_research: dict[str, Any] | None = state.get("company_research")
+            prefs: dict[str, Any] = state.get("workflow_preferences") or {}
             user_tone: str = prefs.get("cover_letter_tone", "professional")
-            # Only use preferred_model in BYOK mode (user has their own key)
-            user_model: Optional[str] = prefs.get("preferred_model")
+            use_local = prefs.get("ai_provider") == "local"
+            user_model: str | None = (
+                prefs.get("local_model") if use_local else prefs.get("preferred_model")
+            )
+            reasoning_effort: str | None = (
+                prefs.get("local_reasoning_effort") if use_local else None
+            )
             # Validate
             if not user_profile:
                 raise ValueError("User profile is required for cover letter writing")
@@ -200,15 +215,17 @@ class CoverLetterWriterAgent:
                 company_research,
                 user_tone=user_tone,
                 user_model=user_model,
+                force_local=use_local,
+                local_reasoning_effort=reasoning_effort,
             )
 
             # Calculate processing time
-            processing_time = (datetime.now(timezone.utc) - start_time).total_seconds()
+            processing_time = (datetime.now(UTC) - start_time).total_seconds()
 
             # Create result
             result = CoverLetterResult(
                 content=cover_letter_content,
-                generated_at=datetime.now(timezone.utc).isoformat(),
+                generated_at=datetime.now(UTC).isoformat(),
                 processing_time=processing_time,
             )
 
@@ -225,12 +242,14 @@ class CoverLetterWriterAgent:
 
     async def _generate_cover_letter(
         self,
-        user_profile: Dict[str, Any],
-        job_analysis: Dict[str, Any],
-        profile_matching: Optional[Dict[str, Any]],
-        company_research: Optional[Dict[str, Any]],
+        user_profile: dict[str, Any],
+        job_analysis: dict[str, Any],
+        profile_matching: dict[str, Any] | None,
+        company_research: dict[str, Any] | None,
         user_tone: str = "professional",
-        user_model: Optional[str] = None,
+        user_model: str | None = None,
+        force_local: bool = False,
+        local_reasoning_effort: str | None = None,
     ) -> str:
         """
         Generate personalized cover letter using expert LLM consultation.
@@ -317,8 +336,10 @@ class CoverLetterWriterAgent:
                     user_api_key=self._current_user_api_key,
                     model=user_model,
                     structured_output=False,
+                    force_local=force_local,
+                    local_reasoning_effort=local_reasoning_effort,
                 ),
-                timeout=LLM_TIMEOUT,
+                timeout=_generation_timeout(force_local, local_reasoning_effort),
             )
 
             if response.get("filtered"):
@@ -331,14 +352,14 @@ class CoverLetterWriterAgent:
 
             return content
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("LLM request timed out")
             raise Exception("Cover letter generation timed out")
         except Exception as e:
             logger.error(f"LLM request failed: {e}", exc_info=True)
             raise
 
-    def _format_profile(self, profile: Dict[str, Any]) -> str:
+    def _format_profile(self, profile: dict[str, Any]) -> str:
         """Format candidate profile for cover letter generation."""
         sections = []
 
@@ -397,7 +418,7 @@ class CoverLetterWriterAgent:
 
         return "\n".join(sections)
 
-    def _format_job(self, job: Dict[str, Any]) -> str:
+    def _format_job(self, job: dict[str, Any]) -> str:
         """Format job information for cover letter generation."""
         sections = []
 
@@ -415,9 +436,7 @@ class CoverLetterWriterAgent:
         # Key requirements - these are CRITICAL for the cover letter
         required_skills = job.get("required_skills", [])
         if required_skills:
-            sections.append(
-                f"\n*** KEY TECHNICAL SKILLS REQUIRED (address these!): ***"
-            )
+            sections.append("\n*** KEY TECHNICAL SKILLS REQUIRED (address these!): ***")
             sections.append(f"{', '.join(required_skills[:12])}")
 
         soft_skills = job.get("soft_skills", [])
@@ -461,7 +480,7 @@ class CoverLetterWriterAgent:
 
         return "\n".join(sections)
 
-    def _format_matching(self, matching: Optional[Dict[str, Any]]) -> str:
+    def _format_matching(self, matching: dict[str, Any] | None) -> str:
         """Format matching insights for cover letter strategy."""
         if not matching:
             return (
@@ -519,7 +538,7 @@ class CoverLetterWriterAgent:
                         sections.append(f"  • {skill_name} ({importance})")
                         if can_learn:
                             sections.append(
-                                f"    → Note: Can be learned quickly - mention willingness to learn"
+                                "    → Note: Can be learned quickly - mention willingness to learn"
                             )
                     else:
                         sections.append(f"  • {gap}")
@@ -592,7 +611,7 @@ class CoverLetterWriterAgent:
 
         return "\n".join(sections)
 
-    def _format_company(self, company: Optional[Dict[str, Any]]) -> str:
+    def _format_company(self, company: dict[str, Any] | None) -> str:
         """Format company information for personalization."""
         if not company:
             return "No verified company facts available; use only the supplied role details"
@@ -671,7 +690,7 @@ class CoverLetterWriterAgent:
         )
 
     def _create_fallback_letter(
-        self, profile: Dict[str, Any], job: Dict[str, Any]
+        self, profile: dict[str, Any], job: dict[str, Any]
     ) -> str:
         """Create a basic fallback cover letter if LLM fails."""
         name = profile.get("full_name", "Candidate")

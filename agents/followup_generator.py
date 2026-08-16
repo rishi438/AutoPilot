@@ -169,6 +169,7 @@ class FollowUpGeneratorAgent:
         key_points: Optional[List[str]] = None,
         user_name: Optional[str] = None,
         user_api_key: Optional[str] = None,
+        llm_options: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """
         Generate a follow-up email for a specific stage.
@@ -240,6 +241,7 @@ class FollowUpGeneratorAgent:
                 max_tokens=LLM_MAX_TOKENS,
                 user_api_key=self._current_user_api_key,
                 structured_output=True,
+                **(llm_options or {}),
             )
 
             duration_ms = (

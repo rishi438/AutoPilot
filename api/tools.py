@@ -32,6 +32,7 @@ from utils.cache import (
 from utils.database import get_database
 from utils.encryption import decrypt_api_key
 from utils.error_responses import internal_error, rate_limit_error, validation_error
+from utils.llm_preferences import get_user_llm_request_options
 from utils.security import sanitize_text
 
 # =============================================================================
@@ -392,9 +393,11 @@ async def generate_thank_you_note(
             result = cached
         else:
             agent = ThankYouWriterAgent()
+            llm_options = await get_user_llm_request_options(db, user_id)
             result = await agent.generate(
                 **{k: v for k, v in sanitized_payload.items() if k != "tool"},
                 user_api_key=user_api_key,
+                llm_options=llm_options,
             )
             await cache_tool_result("thank_you", sanitized_payload, result)
 
@@ -491,9 +494,11 @@ async def analyze_rejection(
             result = cached
         else:
             agent = RejectionAnalyzerAgent()
+            llm_options = await get_user_llm_request_options(db, user_id)
             result = await agent.analyze(
                 **{k: v for k, v in sanitized_payload.items() if k != "tool"},
                 user_api_key=user_api_key,
+                llm_options=llm_options,
             )
             await cache_tool_result("rejection_analysis", sanitized_payload, result)
 
@@ -616,9 +621,11 @@ async def generate_reference_request(
             result = cached
         else:
             agent = ReferenceRequestWriterAgent()
+            llm_options = await get_user_llm_request_options(db, user_id)
             result = await agent.generate(
                 **{k: v for k, v in sanitized_payload.items() if k != "tool"},
                 user_api_key=user_api_key,
+                llm_options=llm_options,
             )
             await cache_tool_result("reference_request", sanitized_payload, result)
 
@@ -1036,10 +1043,12 @@ async def compare_jobs(
             result = cached
         else:
             agent = JobComparisonAgent()
+            llm_options = await get_user_llm_request_options(db, user_id)
             result = await agent.compare(
                 jobs=jobs_data,
                 user_context=user_context,
                 user_api_key=user_api_key,
+                llm_options=llm_options,
             )
             await cache_tool_result("job_comparison", sanitized_payload, result)
 
@@ -1186,9 +1195,11 @@ async def generate_followup(
             result = cached
         else:
             agent = FollowUpGeneratorAgent()
+            llm_options = await get_user_llm_request_options(db, user_id)
             result = await agent.generate(
                 **{k: v for k, v in sanitized_payload.items() if k != "tool"},
                 user_api_key=user_api_key,
+                llm_options=llm_options,
             )
             await cache_tool_result("followup", sanitized_payload, result)
 
@@ -1363,9 +1374,11 @@ async def get_salary_coaching(
             result = cached
         else:
             agent = SalaryCoachAgent()
+            llm_options = await get_user_llm_request_options(db, user_id)
             result = await agent.generate_strategy(
                 **{k: v for k, v in sanitized_payload.items() if k != "tool"},
                 user_api_key=user_api_key,
+                llm_options=llm_options,
             )
             await cache_tool_result("salary_coach", sanitized_payload, result)
 

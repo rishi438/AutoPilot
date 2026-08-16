@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Saved Job - Autopilot{% endblock %}
+{% block navbar %}{% include "partials/navbar_subpage.html" %}{% endblock %}
+{% block content %}
+<main class="page-container" data-application-id="{{ application_id }}">
+    <div id="savedJobLoading" class="loading-container"><div class="loading-spinner"></div><p class="mt-3 text-muted">Loading saved job...</p></div>
+    <div id="savedJobError" class="is-hidden error-alert"><i class="fas fa-exclamation-circle fa-2x"></i><div><strong>Could not load saved job</strong><p class="mb-0" id="savedJobErrorText"></p></div></div>
+    <section id="savedJobContent" class="is-hidden">
+        <a href="/dashboard" class="btn btn-secondary btn-sm mb-4"><i class="fas fa-arrow-left me-2"></i>Dashboard</a>
+        <div class="card p-4 mb-4">
+            <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap"><div><h1 class="h3 mb-1" id="savedJobTitle"></h1><p class="text-muted mb-0" id="savedJobCompany"></p></div><div class="d-flex gap-2"><a id="savedJobAuditLink" class="btn btn-secondary" href="#"><i class="fas fa-list me-2"></i>Audit log</a><button id="analyzeSavedJob" class="btn btn-primary"><i class="fas fa-search me-2"></i>Analyze job</button></div></div>
+            <div class="d-flex flex-wrap gap-3 mt-3 text-muted small" id="savedJobMetadata"></div>
+            <p class="small text-muted mt-3 mb-0">Analysis starts only when you click Analyze job. Saved and queued jobs do not use AI processing.</p>
+        </div>
+        <div class="card p-4"><h2 class="h5">Saved job description</h2><pre id="savedJobDescription" class="mb-0 text-wrap" style="white-space: pre-wrap;"></pre></div>
+    </section>
+</main>
+{% endblock %}
+{% block page_scripts %}
+<script src="{{ asset_url('js/profile-completion-sync.js') }}"></script>
+<script src="{{ asset_url('js/saved-job-detail.js') }}?v=20260816-saved-job-confirm"></script>
+{% endblock %}

@@ -144,6 +144,7 @@ class JobComparisonAgent:
         jobs: List[Dict[str, Any]],
         user_context: Optional[Dict[str, Any]] = None,
         user_api_key: Optional[str] = None,
+        llm_options: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """
         Compare multiple job opportunities.
@@ -217,6 +218,7 @@ class JobComparisonAgent:
                 max_tokens=LLM_MAX_TOKENS,
                 user_api_key=self._current_user_api_key,
                 structured_output=True,
+                **(llm_options or {}),
             )
 
             duration_ms = (

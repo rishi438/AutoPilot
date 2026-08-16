@@ -76,14 +76,25 @@ DEFAULT_WORKFLOW_PREFERENCES: dict = {
 def _resolve_workflow_preferences(user_data: dict[str, Any]) -> dict[str, Any]:
     """Merge workflow defaults with the user's persisted preferences.
 
-    Provider selection is intentionally left untouched: a saved model preference
-    may select a hosted model, while an absent preference lets LLM configuration
-    choose the provider.
+    A local-model preference is valid only while the instance still exposes that
+    model through ``LOCAL_LLM_MODELS``. Fall back to ``LOCAL_LLM_MODEL`` when a
+    saved preference becomes stale after the instance configuration changes.
     """
-    return {
+    preferences = {
         **DEFAULT_WORKFLOW_PREFERENCES,
         **(user_data.get("application_preferences") or {}),
     }
+    if preferences.get("ai_provider") == "local":
+        settings = get_settings()
+        configured_local_models = set(settings.local_llm_models)
+        selected_local_model = preferences.get("local_model")
+        if selected_local_model and selected_local_model not in configured_local_models:
+            logger.warning(
+                "Saved local model is no longer configured; using the instance default."
+            )
+            preferences["local_model"] = settings.local_llm_model
+
+    return preferences
 
 
 from agents.company_research import CompanyResearchAgent
@@ -315,7 +326,7 @@ class JobApplicationWorkflow:
             "gate_decision",
             self._route_gate_decision,
             {
-                "continue": NodeName.COMPANY_RESEARCH.value,
+                "continue": NodeName.ANALYSIS_COMPLETE.value,
                 "await_confirmation": END,  # Stops here, frontend will handle
             },
         )
@@ -367,7 +378,7 @@ class JobApplicationWorkflow:
         workflow.add_node(NodeName.ERROR_HANDLER.value, self._error_handler_node)
 
         # Set entry point for continuation
-        workflow.set_entry_point(NodeName.COMPANY_RESEARCH.value)
+        workflow.set_entry_point(NodeName.ANALYSIS_COMPLETE.value)
 
         # Company Research → Document Generation OR Analysis Complete OR failure
         workflow.add_conditional_edges(
@@ -602,6 +613,30 @@ class JobApplicationWorkflow:
             return self._state_to_dict(state)
         finally:
             clear_request_context(context_tokens)
+
+    async def run_company_research(
+        self, session_id: str, user_api_key: str | None = None
+    ) -> dict[str, Any]:
+        """Run company research only after a user explicitly requests it."""
+        await self.initialize()
+        state = await self._load_workflow_state(session_id, user_api_key=user_api_key)
+        if state is None:
+            raise ValueError(f"Workflow session not found: {session_id}")
+        if state.get("workflow_status") not in [
+            WorkflowStatus.ANALYSIS_COMPLETE,
+            WorkflowStatus.IN_PROGRESS,
+        ]:
+            raise ValueError("Company research requires completed initial analysis.")
+
+        state["workflow_status"] = WorkflowStatus.IN_PROGRESS
+        state = await self._company_research_node(state)
+        if (
+            state["agent_status"].get(Agent.COMPANY_RESEARCH.value)
+            != AgentStatus.COMPLETED
+        ):
+            raise ValueError("Company research failed.")
+        state = await self._analysis_complete_node(state)
+        return self._state_to_dict(state)
 
     def _state_to_dict(self, state: WorkflowState) -> dict[str, Any]:
         """Convert workflow state to serializable dictionary with XSS sanitization."""

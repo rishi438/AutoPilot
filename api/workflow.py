@@ -75,6 +75,7 @@ from utils.error_responses import (
     validation_error,
 )
 from utils.logging_config import mask_email as _mask_email
+from utils.llm_preferences import get_user_llm_request_options
 from utils.resume_parser import extract_text_from_docx, extract_text_from_pdf
 from utils.security import sanitize_llm_output
 from workflows.job_application_workflow import JobApplicationWorkflow
@@ -149,6 +150,22 @@ def cancel_local_workflow_task(session_id: str) -> bool:
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
+
+
+def _resolve_regeneration_preferences(preferences: dict[str, Any]) -> dict[str, Any]:
+    """Replace stale local-model preferences before calling a regeneration agent."""
+    resolved = dict(preferences)
+    if resolved.get("ai_provider") != "local":
+        return resolved
+
+    selected_model = resolved.get("local_model")
+    configured_settings = get_settings()
+    if selected_model and selected_model not in configured_settings.local_llm_models:
+        logger.warning(
+            "Saved local model is no longer configured; using the instance default."
+        )
+        resolved["local_model"] = configured_settings.local_llm_model
+    return resolved
 
 
 def _job_text_from_uploaded_file(file_content: bytes, matched_ext: str) -> str:
@@ -473,6 +490,10 @@ class WorkflowStartRequest(BaseModel):
         max_length=200,
         description="Company name detected by the extension",
     )
+    application_id: uuid.UUID | None = Field(
+        None,
+        description="Existing saved application to analyze from its stored job-description snapshot",
+    )
 
     @validator("job_url")
     def validate_url(cls, v):
@@ -579,6 +600,31 @@ class RegenerateAgentResponse(BaseModel):
 # =============================================================================
 
 
+@router.post(
+    "/analyze-saved-job/{application_id}", response_model=WorkflowStartResponse
+)
+async def analyze_saved_job(
+    application_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    response: Response,
+    current_user: dict[str, Any] = Depends(get_current_user_with_complete_profile),
+    db: AsyncSession = Depends(get_database),
+) -> WorkflowStartResponse:
+    """Start analysis from an owned, saved job snapshot."""
+    return await start_workflow(
+        background_tasks=background_tasks,
+        response=response,
+        request=WorkflowStartRequest(application_id=application_id),
+        job_file=None,
+        job_url=None,
+        job_text=None,
+        detected_title_form=None,
+        detected_company_form=None,
+        current_user=current_user,
+        db=db,
+    )
+
+
 @router.post("/start", response_model=WorkflowStartResponse)
 async def start_workflow(
     background_tasks: BackgroundTasks,
@@ -595,6 +641,29 @@ async def start_workflow(
     """Start a new job application workflow with rate limiting."""
     try:
         user_id = get_user_uuid(current_user)
+        saved_application: JobApplication | None = None
+        if request and request.application_id:
+            saved_application = (
+                await db.execute(
+                    select(JobApplication).where(
+                        JobApplication.id == request.application_id,
+                        JobApplication.user_id == user_id,
+                        JobApplication.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if saved_application is None:
+                raise not_found_error("Saved job not found")
+            if not saved_application.job_description:
+                raise validation_error(
+                    "This saved job has no job-description snapshot to analyze."
+                )
+            if saved_application.session_id:
+                raise APIError(
+                    error_code=ErrorCode.RESOURCE_ALREADY_EXISTS,
+                    message="This saved job has already been sent for analysis.",
+                    status_code=status.HTTP_409_CONFLICT,
+                )
 
         # Rate limiting: 30 workflows per hour per user (with headers).
         # Identifier includes policy version so Redis counters reset when the limit changes.
@@ -639,6 +708,9 @@ async def start_workflow(
         # Resolve input from multiple sources
         resolved_url = job_url or (request.job_url if request else None)
         resolved_text = job_text or (request.job_text if request else None)
+        if saved_application:
+            resolved_url = saved_application.job_url
+            resolved_text = saved_application.job_description
         file_content = None
         file_name = None
         matched_ext: str | None = None
@@ -748,12 +820,23 @@ async def start_workflow(
         detected_company = (
             request.detected_company if request else None
         ) or detected_company_form
+        if saved_application:
+            source = "saved_job"
+            detected_title = saved_application.job_title
+            detected_company = saved_application.company_name
 
         effective_job_url = resolved_url if resolved_url else source_url
 
         # Resolve input method and job text before duplicate check so we can fingerprint
         # pasted job descriptions (manual / file / extension) even without a URL.
-        if resolved_url:
+        # Saved browser jobs keep a captured description. Analyze that snapshot,
+        # rather than treating its source URL as a URL-only input (the analyzer
+        # intentionally processes captured browser content as extension text).
+        if saved_application and resolved_text:
+            input_method = InputMethod.EXTENSION.value
+            job_input = resolved_text
+            content_fingerprint = _fingerprint_job_content(resolved_text)
+        elif resolved_url:
             input_method = InputMethod.URL.value
             job_input = resolved_url
             content_fingerprint: str | None = None
@@ -772,14 +855,16 @@ async def start_workflow(
             job_input = resolved_text
             content_fingerprint = _fingerprint_job_content(resolved_text)
 
-        dup_row = await _find_duplicate_active_application(
-            db,
-            user_id,
-            effective_job_url,
-            detected_title,
-            detected_company,
-            content_fingerprint,
-        )
+        dup_row = None
+        if saved_application is None:
+            dup_row = await _find_duplicate_active_application(
+                db,
+                user_id,
+                effective_job_url,
+                detected_title,
+                detected_company,
+                content_fingerprint,
+            )
         if dup_row:
             dup_details: list[dict[str, Any]] = [
                 {
@@ -844,18 +929,21 @@ async def start_workflow(
 
         # Create job application entry with job_url if available
         # For extension, use source_url as job_url (effective_job_url set above)
-        job_application = JobApplication(
-            id=uuid.uuid4(),
-            user_id=user_id,
-            session_id=session_id,
-            status=ApplicationStatus.PROCESSING.value,
-            job_url=effective_job_url,
-            # Seed with detected values so the dashboard card shows something real
-            # immediately. The Job Analyzer will overwrite these with AI-extracted
-            # values once it completes (~4 s into the workflow).
-            job_title=detected_title or None,
-            company_name=detected_company or None,
-        )
+        if saved_application:
+            # This explicit action reuses the saved card and its metadata.
+            job_application = saved_application
+            job_application.session_id = session_id
+            job_application.status = ApplicationStatus.PROCESSING.value
+        else:
+            job_application = JobApplication(
+                id=uuid.uuid4(),
+                user_id=user_id,
+                session_id=session_id,
+                status=ApplicationStatus.PROCESSING.value,
+                job_url=effective_job_url,
+                job_title=detected_title or None,
+                company_name=detected_company or None,
+            )
 
         # Add both records and commit in a single transaction so a failure
         # cannot leave an orphaned WorkflowSession without a JobApplication.
@@ -926,6 +1014,16 @@ async def start_workflow(
         )
 
     except HTTPException:
+        # Validation/auth failures can happen after acquiring the short-lived
+        # creation lock. Release it so a corrected user retry is immediate.
+        try:
+            from utils.redis_client import get_redis_client as _get_wf_rc_http
+
+            _http_rc = await _get_wf_rc_http()
+            if _http_rc:
+                await _http_rc.delete(f"workflow_creating:{user_id}")
+        except Exception:
+            logger.debug("Failed to release workflow creation lock after HTTP error")
         raise
     except Exception as e:
         # Ensure lock is released on any failure path
@@ -1199,7 +1297,9 @@ async def regenerate_cover_letter(
             )
         )
         prefs_row = prefs_result.scalar_one_or_none()
-        workflow_preferences = prefs_row.to_dict() if prefs_row else {}
+        workflow_preferences = _resolve_regeneration_preferences(
+            prefs_row.to_dict() if prefs_row else {}
+        )
 
         # Build minimal workflow state for the cover letter agent
         from agents.cover_letter_writer import CoverLetterWriterAgent
@@ -1331,7 +1431,9 @@ async def regenerate_resume(
             )
         )
         prefs_row = prefs_result.scalar_one_or_none()
-        workflow_preferences = prefs_row.to_dict() if prefs_row else {}
+        workflow_preferences = _resolve_regeneration_preferences(
+            prefs_row.to_dict() if prefs_row else {}
+        )
 
         from agents.resume_advisor import ResumeAdvisorAgent
         from utils.llm_client import get_gemini_client
@@ -1463,6 +1565,7 @@ async def generate_interview_prep(
         from utils.llm_client import get_gemini_client
 
         gemini_client = await get_gemini_client()
+        llm_options = await get_user_llm_request_options(db, user_id)
 
         job = workflow_session.job_analysis or {}
         company = workflow_session.company_research or {}
@@ -1546,6 +1649,7 @@ Generate 4-6 interview stages, 8-10 likely questions with personalized suggested
                 temperature=0.7,
                 max_tokens=16000,
                 user_api_key=user_api_key,
+                **llm_options,
             ),
             timeout=180.0,
         )
@@ -1685,6 +1789,43 @@ async def continue_workflow_after_gate(
     except Exception as e:
         logger.error(f"Failed to continue workflow: {e}", exc_info=True)
         raise internal_error("Failed to continue workflow")
+
+
+@router.post(
+    "/generate-company-research/{session_id}", response_model=WorkflowContinueResponse
+)
+async def generate_company_research(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: dict[str, Any] = Depends(get_current_user),
+    db: AsyncSession = Depends(get_database),
+) -> WorkflowContinueResponse:
+    """Run company research only after the user requests it."""
+    user_id = get_user_uuid(current_user)
+    workflow_session = (
+        await db.execute(
+            select(WorkflowSession).where(
+                WorkflowSession.session_id == session_id,
+                WorkflowSession.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if workflow_session is None:
+        raise not_found_error("Workflow session not found")
+    if workflow_session.workflow_status != WorkflowStatus.ANALYSIS_COMPLETE.value:
+        raise validation_error("Company research requires completed initial analysis.")
+    if workflow_session.company_research:
+        raise validation_error("Company research is already available for this job.")
+    workflow_session.workflow_status = WorkflowStatus.IN_PROGRESS.value
+    await db.commit()
+    background_tasks.add_task(
+        _generate_company_research_background, session_id, str(user_id)
+    )
+    return WorkflowContinueResponse(
+        session_id=session_id,
+        status=WorkflowStatus.IN_PROGRESS.value,
+        message="Company research started.",
+    )
 
 
 @router.post(
@@ -2134,6 +2275,29 @@ async def _continue_workflow_background(
                 f"Workflow {session_id}: failed to set FAILED status after top-level continuation error: {_update_err}",
                 exc_info=True,
             )
+
+
+async def _generate_company_research_background(
+    session_id: str, user_id: str | None = None
+) -> None:
+    """Persist an explicitly requested company-research result."""
+    try:
+        async with get_session() as db:
+            workflow = JobApplicationWorkflow(db)
+            final_state = await workflow.run_company_research(session_id)
+            await _update_workflow_session_with_state(db, session_id, final_state)
+            await _update_job_application_with_final_state(db, session_id, final_state)
+            await invalidate_workflow_state(session_id)
+    except Exception as e:
+        logger.error("Company research failed for %s", session_id, exc_info=True)
+        async with get_session() as db:
+            await db.execute(
+                update(WorkflowSession)
+                .where(WorkflowSession.session_id == session_id)
+                .values(workflow_status=WorkflowStatus.ANALYSIS_COMPLETE.value)
+            )
+            await db.commit()
+        await invalidate_workflow_state(session_id)
 
 
 async def _generate_documents_background(

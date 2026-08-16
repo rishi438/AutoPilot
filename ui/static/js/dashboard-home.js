@@ -164,6 +164,95 @@
         return localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN) || localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN_LEGACY);
     }
 
+    /** Render only server-provided hold text through escapeHtml. */
+    function renderApplicationHolds(holds) {
+        const section = document.getElementById('applicationHoldsSection');
+        const list = document.getElementById('applicationHoldsList');
+        if (!section || !list) return;
+        section.classList.toggle('is-hidden', holds.length === 0);
+        if (!holds.length) {
+            list.replaceChildren();
+            return;
+        }
+        list.innerHTML = holds.map((hold) => {
+            const title = [hold.job_title, hold.company_name].filter(Boolean).join(' at ') || 'Application';
+            const canAnswer = Boolean(hold.question);
+            const reloginUrl = hold.hold_code === 'expired_session' && /^https:\/\//i.test(String(hold.relogin_url || ''))
+                ? escapeHtml(hold.relogin_url)
+                : '';
+            const reloginAction = reloginUrl ? `<p class="mb-2"><a class="btn btn-outline-primary btn-sm" href="${reloginUrl}" target="_blank" rel="noopener noreferrer">Sign in again</a></p>
+                <button class="btn btn-primary btn-sm" type="button" data-action="retry-after-relogin" data-hold-id="${escapeHtml(hold.id)}">I signed in — retry this job</button>` : '';
+            return `<article class="application-card mb-3" role="listitem">
+                <div class="application-card-body">
+                    <h5 class="mb-1">${escapeHtml(title)}</h5>
+                    <p class="mb-2"><strong>${escapeHtml(hold.hold_code.replaceAll('_', ' '))}</strong></p>
+                    ${hold.question ? `<p class="mb-2">${escapeHtml(hold.question)}</p>` : ''}
+                    <p class="text-muted mb-3">${escapeHtml(hold.remediation)}</p>
+                    ${reloginAction || (canAnswer ? `<form data-hold-answer-form data-hold-id="${escapeHtml(hold.id)}">
+                        <label class="form-label" for="hold-answer-${escapeHtml(hold.id)}">Your answer</label>
+                        <textarea class="form-control mb-2" id="hold-answer-${escapeHtml(hold.id)}" name="answer" rows="2" required maxlength="5000"></textarea>
+                        <label class="form-check mb-2"><input class="form-check-input" type="checkbox" name="approved_for_reuse"> Reuse this answer for an identical question</label>
+                        <button class="btn btn-primary btn-sm" type="submit">Save answer and retry</button>
+                    </form>` : '<p class="mb-0 text-muted">Complete the remediation above, then retry from the portal worker.</p>')}
+                </div>
+            </article>`;
+        }).join('');
+    }
+
+    async function loadApplicationHolds() {
+        try {
+            const response = await fetch(`${API_BASE}/automation/holds`, {
+                headers: { Authorization: `Bearer ${getAuthToken()}` },
+            });
+            if (!response.ok) throw new Error('Could not load application holds.');
+            renderApplicationHolds(await response.json());
+        } catch (error) {
+            console.error('Error loading application holds:', error);
+        }
+    }
+
+    async function resolveApplicationHold(form) {
+        const holdId = form.dataset.holdId;
+        const answer = new FormData(form).get('answer');
+        if (typeof answer !== 'string' || !answer.trim()) return;
+        const button = form.querySelector('button[type="submit"]');
+        if (button) button.disabled = true;
+        try {
+            const response = await fetch(`${API_BASE}/automation/holds/${encodeURIComponent(holdId)}/answer`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${getAuthToken()}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    answer: answer.trim(),
+                    approved_for_reuse: Boolean(new FormData(form).get('approved_for_reuse')),
+                }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || 'Could not resolve application hold.');
+            notify('Answer saved. The application is queued for retry.', 'success');
+            await Promise.all([loadApplicationHolds(), loadApplications(true)]);
+        } catch (error) {
+            notify(error instanceof Error ? error.message : 'Could not resolve application hold.', 'error');
+            if (button) button.disabled = false;
+        }
+    }
+
+    async function retryAfterRelogin(holdId, button) {
+        button.disabled = true;
+        try {
+            const response = await fetch(`${API_BASE}/automation/holds/${encodeURIComponent(holdId)}/retry`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${getAuthToken()}` },
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || 'Could not queue the retry.');
+            notify('Session renewed. The application is queued for retry.', 'success');
+            await Promise.all([loadApplicationHolds(), loadApplications(true)]);
+        } catch (error) {
+            notify(error instanceof Error ? error.message : 'Could not queue the retry.', 'error');
+            button.disabled = false;
+        }
+    }
+
     /** @param {string|null} token */
     function setAuthToken(token) {
         if (!token) {
@@ -270,6 +359,7 @@
             draft: 'Draft', processing: 'Processing', ready: 'Ready',
             completed: 'Completed', applied: 'Applied', interview: 'Interview',
             rejected: 'Rejected', accepted: 'Accepted', failed: 'Failed',
+            queued: 'Queued', retrying: 'Retrying', blocked: 'On hold', skipped: 'Skipped',
             DRAFT: 'Draft', PROCESSING: 'Processing', READY: 'Ready',
             COMPLETED: 'Completed', APPLIED: 'Applied', INTERVIEW: 'Interview',
             REJECTED: 'Rejected', ACCEPTED: 'Accepted', FAILED: 'Failed',
@@ -292,6 +382,9 @@
         if (status === 'draft') {
             return `<span class="card-ai-badge ai-draft">Draft</span>`;
         }
+        if (status === 'queued') {
+            return `<span class="card-ai-badge ai-draft"><i class="fas fa-clock me-1" aria-hidden="true"></i>Queued</span>`;
+        }
         // analysis complete (completed, applied, interview, accepted, rejected, etc.)
         return `<span class="card-ai-badge ai-ready"><i class="fas fa-check me-1" aria-hidden="true"></i>Ready</span>`;
     }
@@ -303,7 +396,7 @@
      * @param {string} appId
      */
     function trackingButtonsHtml(status, appId) {
-        const systemStatuses = ['draft', 'processing', 'failed'];
+        const systemStatuses = ['draft', 'processing', 'failed', 'queued', 'retrying', 'blocked', 'skipped'];
         if (systemStatuses.includes(status)) return '';
 
         const safeId = escapeHtml(appId);
@@ -425,10 +518,8 @@
     /** @param {Record<string,unknown>} app */
     function renderCard(app) {
         const appId      = String(app['id'] ?? '');
-        const detailId   = String(app['workflow_session_id'] || app['id'] || '');
         const status     = String(app['status'] ?? '').toLowerCase();
         const safeAppId  = escapeHtml(appId);
-        const safeDetail = escapeHtml(detailId);
 
         const createdAt = String(app['created_at'] ?? '');
         const relTime   = createdAt ? relativeTime(createdAt) : '';
@@ -453,13 +544,20 @@
             : isProcessing
                 ? `<div class="skeleton-line skeleton-subtitle" aria-hidden="true"></div>`
                 : `<div class="company-name">Unknown</div>`;
+        const portal = String(app['portal'] ?? '').trim();
+        const queueMeta = status === 'queued' ? `
+                <div class="application-meta">
+                    ${portal ? `<span><i class="fas fa-globe me-1" aria-hidden="true"></i>${escapeHtml(portal)}</span>` : ''}
+                    ${app['has_job_description'] === true ? `<span><i class="fas fa-file-alt me-1" aria-hidden="true"></i>JD saved</span>` : ''}
+                </div>` : '';
 
         return `
-<div class="application-card border-status-${escapeHtml(status)} cursor-pointer" data-card-id="${safeDetail}" role="listitem">
+<div class="application-card border-status-${escapeHtml(status)} cursor-pointer" data-card-id="${safeAppId}" role="listitem">
     <div class="card-layout">
         <div class="card-left">
             ${titleHtml}
             ${companyHtml}
+            ${queueMeta}
             <div class="application-meta">
                 <span title="${escapeHtml(absTime)}"><i class="fas fa-calendar me-1" aria-hidden="true"></i>${escapeHtml(relTime)}</span>
                 ${matchScore}
@@ -1043,13 +1141,20 @@
 
     /** @param {string} id */
     function viewApplication(id) {
-        const app = _loadedApps.find(a => String(a['workflow_session_id'] || a['id']) === id);
+        const app = _loadedApps.find(a => String(a['id']) === id);
+        if (!app) return;
         if (app && String(app['status'] ?? '').toLowerCase() === 'processing') {
             notify('Still analyzing — we\'ll notify you here when it\'s ready.', 'info');
             return;
         }
+        const workflowSessionId = String(app['workflow_session_id'] || '');
+        if (!workflowSessionId) {
+            saveFilterState();
+            window.location.href = `/dashboard/job/${encodeURIComponent(id)}`;
+            return;
+        }
         saveFilterState();
-        window.location.href = `/dashboard/application/${encodeURIComponent(id)}`;
+        window.location.href = `/dashboard/application/${encodeURIComponent(workflowSessionId)}`;
     }
 
     /**
@@ -1354,6 +1459,7 @@
 
         // Initial load — use restored filters
         await loadApplications(true);
+        await loadApplicationHolds();
 
         // After first render, scroll to saved position
         if (savedScrollY > 0) {
@@ -1392,7 +1498,15 @@
                 case 'load-more':      loadApplications(false); break;
                 case 'bulk-delete':    bulkDelete();     break;
                 case 'logout':         e.preventDefault(); logout(); break;
+                case 'retry-after-relogin': retryAfterRelogin(actionEl.dataset.holdId || '', actionEl); break;
             }
+        });
+
+        document.getElementById('applicationHoldsList')?.addEventListener('submit', function (e) {
+            const form = /** @type {HTMLFormElement|null} */ (/** @type {Element} */ (e.target).closest('[data-hold-answer-form]'));
+            if (!form) return;
+            e.preventDefault();
+            resolveApplicationHold(form);
         });
 
         // ── Delegated clicks on dynamically rendered cards ────────────────────────

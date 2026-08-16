@@ -815,3 +815,25 @@ body {
 .autofill-match-btn {
   margin-top: 10px;
 }
+
+.portal-queue {
+  border-top: 1px solid var(--border-color);
+  margin-top: 16px;
+  padding-top: 14px;
+}
+
+.portal-queue-header, .portal-queue-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.portal-queue-header h3 { font-size: 14px; margin: 0; }
+.portal-queue-header p, .portal-queue-meta { color: var(--text-muted); font-size: 11px; margin: 3px 0 0; }
+.portal-queue-list { display: grid; gap: 8px; margin-top: 10px; max-height: 180px; overflow-y: auto; }
+.portal-queue-item { background: rgba(255, 255, 255, 0.04); border: 1px solid var(--border-color); border-radius: var(--radius-sm); display: grid; gap: 4px; padding: 9px; }
+.portal-queue-item strong { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn-queue-secondary, .btn-queue-danger { border-radius: var(--radius-sm); cursor: pointer; font-size: 11px; padding: 5px 8px; }
+.btn-queue-secondary { background: transparent; border: 1px solid var(--border-color); color: var(--text-secondary); }
+.btn-queue-danger { background: transparent; border: 1px solid rgba(248, 113, 113, 0.45); color: #f87171; }

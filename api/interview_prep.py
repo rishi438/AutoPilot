@@ -27,8 +27,16 @@ from utils.cache import (
     check_rate_limit,
 )
 from utils.encryption import decrypt_api_key
+from utils.llm_preferences import get_user_llm_request_options
 from utils.security import sanitize_llm_output
-from utils.error_responses import APIError, ErrorCode, internal_error, not_found_error, rate_limit_error, validation_error
+from utils.error_responses import (
+    APIError,
+    ErrorCode,
+    internal_error,
+    not_found_error,
+    rate_limit_error,
+    validation_error,
+)
 from models.database import WorkflowSession, User, WorkflowStatusEnum
 from agents.interview_prep import InterviewPrepAgent
 from api.websocket import (
@@ -58,39 +66,32 @@ RATE_LIMIT_WINDOW_SECONDS = 3600  # 1 hour
 
 class InterviewPrepResponse(BaseModel):
     """Response model for getting interview prep."""
-    
+
     session_id: str = Field(..., description="Workflow session ID")
     has_interview_prep: bool = Field(..., description="Whether interview prep exists")
     interview_prep: Optional[Dict[str, Any]] = Field(
         None, description="Interview preparation materials"
     )
-    generated_at: Optional[str] = Field(
-        None, description="When the prep was generated"
-    )
+    generated_at: Optional[str] = Field(None, description="When the prep was generated")
 
 
 class InterviewPrepGenerateResponse(BaseModel):
     """Response model for interview prep generation request."""
-    
+
     session_id: str = Field(..., description="Workflow session ID")
     status: str = Field(
-        ..., 
-        description="Generation status: generating, exists, or completed"
+        ..., description="Generation status: generating, exists, or completed"
     )
     message: str = Field(..., description="Status message")
 
 
 class InterviewPrepStatusResponse(BaseModel):
     """Response model for checking interview prep generation status."""
-    
+
     session_id: str = Field(..., description="Workflow session ID")
     has_interview_prep: bool = Field(..., description="Whether interview prep exists")
-    is_generating: bool = Field(
-        False, description="Whether generation is in progress"
-    )
-    generated_at: Optional[str] = Field(
-        None, description="When the prep was generated"
-    )
+    is_generating: bool = Field(False, description="Whether generation is in progress")
+    generated_at: Optional[str] = Field(None, description="When the prep was generated")
 
 
 # =============================================================================
@@ -111,12 +112,12 @@ async def _get_user_api_key(db: AsyncSession, user_id: uuid.UUID) -> Optional[st
     try:
         result = await db.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
-        
+
         if user and user.gemini_api_key_encrypted:
             return decrypt_api_key(user.gemini_api_key_encrypted)
     except Exception as e:
         logger.warning(f"Failed to decrypt user API key: {e}")
-    
+
     return None
 
 
@@ -126,9 +127,9 @@ async def _check_api_key_available(db: AsyncSession, user_id: uuid.UUID) -> bool
     user_api_key = await _get_user_api_key(db, user_id)
     if user_api_key:
         return True
-    
+
     # Check for server API key
-    server_has_key = getattr(settings, 'gemini_api_key', None) is not None
+    server_has_key = getattr(settings, "gemini_api_key", None) is not None
     return server_has_key
 
 
@@ -145,23 +146,23 @@ async def get_interview_prep(
 ) -> InterviewPrepResponse:
     """
     Get interview preparation materials for a workflow session.
-    
+
     Returns cached interview prep if available, otherwise checks database.
-    
+
     Args:
         session_id: Workflow session ID
         current_user: Authenticated user from JWT
         db: Database session
-        
+
     Returns:
         InterviewPrepResponse with interview prep data if available
-        
+
     Raises:
         HTTPException: 404 if session not found
     """
     try:
         user_id = _get_user_uuid(current_user)
-        
+
         # Check cache first
         cached = await get_cached_interview_prep(session_id)
         if cached and "data" in cached:
@@ -171,7 +172,7 @@ async def get_interview_prep(
                 interview_prep=cached["data"],
                 generated_at=cached.get("cached_at"),
             )
-        
+
         # Query database
         result = await db.execute(
             select(WorkflowSession).where(
@@ -182,25 +183,25 @@ async def get_interview_prep(
             )
         )
         workflow_session = result.scalar_one_or_none()
-        
+
         if not workflow_session:
             raise not_found_error("Workflow session not found")
-        
+
         interview_prep = workflow_session.interview_prep
         generated_at = None
-        
+
         if interview_prep:
             generated_at = interview_prep.get("generated_at")
             # Cache it for future requests
             await cache_interview_prep(session_id, interview_prep)
-        
+
         return InterviewPrepResponse(
             session_id=session_id,
             has_interview_prep=interview_prep is not None,
             interview_prep=interview_prep,
             generated_at=generated_at,
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -216,23 +217,23 @@ async def get_interview_prep_status(
 ) -> InterviewPrepStatusResponse:
     """
     Check the status of interview prep for a session.
-    
+
     Useful for polling after starting generation.
-    
+
     Args:
         session_id: Workflow session ID
         current_user: Authenticated user from JWT
         db: Database session
-        
+
     Returns:
         InterviewPrepStatusResponse with current status
-        
+
     Raises:
         HTTPException: 404 if session not found
     """
     try:
         user_id = _get_user_uuid(current_user)
-        
+
         # Query database
         result = await db.execute(
             select(WorkflowSession).where(
@@ -243,10 +244,10 @@ async def get_interview_prep_status(
             )
         )
         workflow_session = result.scalar_one_or_none()
-        
+
         if not workflow_session:
             raise not_found_error("Workflow session not found")
-        
+
         interview_prep = workflow_session.interview_prep
         has_prep = interview_prep is not None
         generated_at = interview_prep.get("generated_at") if interview_prep else None
@@ -258,7 +259,7 @@ async def get_interview_prep_status(
             is_generating=generating,
             generated_at=generated_at,
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -276,26 +277,26 @@ async def generate_interview_prep(
 ) -> InterviewPrepGenerateResponse:
     """
     Generate interview preparation materials for a workflow session.
-    
+
     Generates personalized interview prep including predicted questions,
     answer frameworks, and preparation tips. Generation happens in background.
-    
+
     Args:
         session_id: Workflow session ID
         background_tasks: FastAPI background tasks
         regenerate: If True, regenerate even if prep already exists
         current_user: Authenticated user from JWT
         db: Database session
-        
+
     Returns:
         InterviewPrepGenerateResponse with generation status
-        
+
     Raises:
         HTTPException: 400 if workflow not ready, 404 if not found, 429 if rate limited
     """
     try:
         user_id = _get_user_uuid(current_user)
-        
+
         # Rate limiting
         is_allowed, remaining = await check_rate_limit(
             identifier=f"{user_id}:interview_prep",
@@ -303,8 +304,10 @@ async def generate_interview_prep(
             window_seconds=RATE_LIMIT_WINDOW_SECONDS,
         )
         if not is_allowed:
-            raise rate_limit_error(f"Rate limit exceeded. Maximum {RATE_LIMIT_INTERVIEW_PREP} generations per hour.")
-        
+            raise rate_limit_error(
+                f"Rate limit exceeded. Maximum {RATE_LIMIT_INTERVIEW_PREP} generations per hour."
+            )
+
         # Query workflow session
         result = await db.execute(
             select(WorkflowSession).where(
@@ -315,14 +318,16 @@ async def generate_interview_prep(
             )
         )
         workflow_session = result.scalar_one_or_none()
-        
+
         if not workflow_session:
             raise not_found_error("Workflow session not found")
-        
+
         # Verify workflow has required data
         if not workflow_session.job_analysis:
-            raise validation_error("Workflow must have job analysis before generating interview prep. Please complete the workflow first.")
-        
+            raise validation_error(
+                "Workflow must have job analysis before generating interview prep. Please complete the workflow first."
+            )
+
         # Check if already exists (unless regenerating)
         if workflow_session.interview_prep and not regenerate:
             return InterviewPrepGenerateResponse(
@@ -330,14 +335,16 @@ async def generate_interview_prep(
                 status="exists",
                 message="Interview prep already exists. Use regenerate=true to regenerate.",
             )
-        
+
         # Check API key availability
         if not await _check_api_key_available(db, user_id):
-            raise validation_error("No API key configured. Please add your Gemini API key in Settings.")
-        
+            raise validation_error(
+                "No API key configured. Please add your Gemini API key in Settings."
+            )
+
         # Get user API key for BYOK
         user_api_key = await _get_user_api_key(db, user_id)
-        
+
         # Invalidate cache if regenerating
         if regenerate:
             await invalidate_interview_prep(session_id)
@@ -345,7 +352,11 @@ async def generate_interview_prep(
         # Atomically claim the generating slot — returns False if another request already holds it
         claimed = await set_interview_prep_generating(session_id)
         if not claimed:
-            raise APIError(ErrorCode.RESOURCE_CONFLICT, "Interview prep generation is already in progress for this session.", status_code=409)
+            raise APIError(
+                ErrorCode.RESOURCE_CONFLICT,
+                "Interview prep generation is already in progress for this session.",
+                status_code=409,
+            )
 
         # Generate in background
         background_tasks.add_task(
@@ -354,15 +365,15 @@ async def generate_interview_prep(
             user_id=str(user_id),
             user_api_key=user_api_key,
         )
-        
+
         logger.info(f"Started interview prep generation for session {session_id}")
-        
+
         return InterviewPrepGenerateResponse(
             session_id=session_id,
             status="generating",
             message="Interview prep generation started. Check status endpoint for completion.",
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -378,20 +389,20 @@ async def delete_interview_prep(
 ) -> None:
     """
     Delete interview preparation materials for a workflow session.
-    
+
     Removes interview prep from both database and cache.
-    
+
     Args:
         session_id: Workflow session ID
         current_user: Authenticated user from JWT
         db: Database session
-        
+
     Raises:
         HTTPException: 404 if session not found
     """
     try:
         user_id = _get_user_uuid(current_user)
-        
+
         # Query workflow session
         result = await db.execute(
             select(WorkflowSession).where(
@@ -402,20 +413,20 @@ async def delete_interview_prep(
             )
         )
         workflow_session = result.scalar_one_or_none()
-        
+
         if not workflow_session:
             raise not_found_error("Workflow session not found")
-        
+
         # Clear from database
         workflow_session.interview_prep = None
         flag_modified(workflow_session, "interview_prep")
         await db.commit()
-        
+
         # Clear from cache
         await invalidate_interview_prep(session_id)
-        
+
         logger.info(f"Deleted interview prep for session {session_id}")
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -450,7 +461,9 @@ async def _generate_interview_prep_background(
             workflow_session = result.scalar_one_or_none()
 
             if not workflow_session:
-                logger.error(f"Workflow session {session_id} not found for interview prep")
+                logger.error(
+                    f"Workflow session {session_id} not found for interview prep"
+                )
                 return
 
             ws_user_id = user_id or str(workflow_session.user_id)
@@ -460,6 +473,9 @@ async def _generate_interview_prep_background(
 
             # Initialize agent
             agent = InterviewPrepAgent()
+            llm_options = await get_user_llm_request_options(
+                db, workflow_session.user_id
+            )
 
             # Generate interview prep
             interview_prep = await agent.generate(
@@ -468,6 +484,7 @@ async def _generate_interview_prep_background(
                 profile_matching=workflow_session.profile_matching or {},
                 user_profile=workflow_session.user_data or {},
                 user_api_key=user_api_key,
+                llm_options=llm_options,
             )
 
             # Sanitize all string values before storing to prevent XSS when rendered
@@ -484,13 +501,18 @@ async def _generate_interview_prep_background(
             # Cache result
             await cache_interview_prep(session_id, interview_prep)
 
-            logger.info(f"Interview prep generated successfully for session {session_id}")
+            logger.info(
+                f"Interview prep generated successfully for session {session_id}"
+            )
 
             # Notify clients that generation completed
             await broadcast_interview_prep_complete(ws_user_id, session_id)
 
     except Exception as e:
-        logger.error(f"Interview prep generation failed for session {session_id}: {e}", exc_info=True)
+        logger.error(
+            f"Interview prep generation failed for session {session_id}: {e}",
+            exc_info=True,
+        )
         await report_exception(e, user_id=user_id)
         # Mark session as errored so it can be retried
         try:
@@ -510,9 +532,14 @@ async def _generate_interview_prep_background(
             )
         try:
             ws_user_id = user_id or session_id
-            await broadcast_interview_prep_error(ws_user_id, session_id, "Interview prep generation failed")
+            await broadcast_interview_prep_error(
+                ws_user_id, session_id, "Interview prep generation failed"
+            )
         except Exception as broadcast_err:
-            logger.debug("Failed to broadcast interview prep error (WebSocket may be closed): %s", broadcast_err)
+            logger.debug(
+                "Failed to broadcast interview prep error (WebSocket may be closed): %s",
+                broadcast_err,
+            )
     finally:
         # Always clear the generating flag so clients don't get stuck on is_generating=True
         await clear_interview_prep_generating(session_id)

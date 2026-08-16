@@ -152,6 +152,10 @@
         if (localModel) localModel.dataset.selectedModel = prefs.local_model ?? '';
         const reasoning = /** @type {HTMLSelectElement|null} */ (document.getElementById('localReasoningEffortSelect'));
         if (reasoning) reasoning.value = prefs.local_reasoning_effort ?? 'medium';
+        // The status request builds the option list independently. Rebuild it
+        // after preferences arrive so its selection cannot overwrite the saved
+        // local model when these requests complete in either order.
+        if (_apiKeyStatus) updateApiKeyStatusUI(_apiKeyStatus);
         _updateAIProviderUI(prefs.ai_provider ?? 'cloud');
     }
 
@@ -217,6 +221,80 @@
     }
 
     // =============================================================================
+    // JOB SEARCH PREFERENCES
+    // =============================================================================
+
+    function splitJobSearchTerms(value) {
+        return value.split(',').map(item => item.trim()).filter(Boolean);
+    }
+
+    function showJobSearchMissing(missing) {
+        const el = document.getElementById('jobSearchMissing');
+        if (!el) return;
+        el.classList.toggle('d-none', !missing.length);
+        el.textContent = missing.length
+            ? `Before search can start, add: ${missing.join(', ')}.`
+            : '';
+    }
+
+    async function loadJobSearchPreferences() {
+        try {
+            const res = await fetch(`${API_BASE}/job-search/preferences`, { headers: { 'Authorization': `Bearer ${getAuthToken()}` } });
+            if (!res.ok) return;
+            const prefs = await res.json();
+            const setValue = (id, values) => { const el = document.getElementById(id); if (el) el.value = (values || []).join(', '); };
+            setValue('jobSearchPrimarySkills', prefs.primary_skills);
+            setValue('jobSearchSecondarySkills', prefs.secondary_skills);
+            setValue('jobSearchRoles', prefs.roles);
+            document.querySelectorAll('input[name="companyTier"]').forEach(el => { el.checked = (prefs.company_tiers || []).includes(el.value); });
+            const source = prefs.sources?.[0];
+            if (source) {
+                document.getElementById('jobBoardKind').value = source.kind;
+                document.getElementById('jobBoardCompany').value = source.company_name;
+                document.getElementById('jobBoardName').value = source.board;
+                document.getElementById('jobBoardTier').value = source.company_tier;
+            }
+            showJobSearchMissing(prefs.missing || []);
+        } catch (err) { console.error('Error loading job-search preferences:', err); }
+    }
+
+    async function saveJobSearchPreferences(event) {
+        event.preventDefault();
+        const primary_skills = splitJobSearchTerms(document.getElementById('jobSearchPrimarySkills').value);
+        const secondary_skills = splitJobSearchTerms(document.getElementById('jobSearchSecondarySkills').value);
+        const roles = splitJobSearchTerms(document.getElementById('jobSearchRoles').value);
+        const company_tiers = [...document.querySelectorAll('input[name="companyTier"]:checked')].map(el => el.value);
+        const company_name = document.getElementById('jobBoardCompany').value.trim();
+        const board = document.getElementById('jobBoardName').value.trim();
+        if (!primary_skills.length || !roles.length || !company_tiers.length) {
+            showJobSearchMissing([
+                ...(!primary_skills.length ? ['primary skills'] : []),
+                ...(!roles.length ? ['target roles'] : []),
+                ...(!company_tiers.length ? ['company tiers'] : []),
+            ]);
+            return;
+        }
+        if (Boolean(company_name) !== Boolean(board)) { showAlert('Enter both company name and board name, or leave both blank.', 'danger'); return; }
+        const sources = company_name ? [{ kind: document.getElementById('jobBoardKind').value, company_name, board, company_tier: document.getElementById('jobBoardTier').value }] : [];
+        try {
+            const res = await fetch(`${API_BASE}/job-search/preferences`, { method: 'PUT', headers: { 'Authorization': `Bearer ${getAuthToken()}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ primary_skills, secondary_skills, roles, company_tiers, sources, min_match_score: 0.65, require_review_before_apply: true }) });
+            if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || 'Could not save job-search preferences'); }
+            showJobSearchMissing([]);
+            const indicator = document.getElementById('jobSearchSaved');
+            indicator.style.opacity = '1'; setTimeout(() => { indicator.style.opacity = '0'; }, 2000);
+        } catch (err) { showAlert(err.message || 'Could not save job-search preferences.', 'danger'); }
+    }
+
+    async function refreshJobSearch() {
+        try {
+            const res = await fetch(`${API_BASE}/job-search/refresh`, { method: 'POST', headers: { 'Authorization': `Bearer ${getAuthToken()}` } });
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(body.detail || 'Could not search jobs');
+            showAlert(`${body.length} matching job${body.length === 1 ? '' : 's'} found. Review them before applying.`, 'success');
+        } catch (err) { showAlert(err.message || 'Could not search jobs.', 'danger'); }
+    }
+
+    // =============================================================================
     // INIT
     // =============================================================================
 
@@ -238,9 +316,12 @@
         loadApiKeyStatus();
         loadGoogleAccountStatus();
         loadWorkflowPreferences();
+        loadJobSearchPreferences();
 
         document.getElementById('passwordForm')?.addEventListener('submit', handlePasswordChange);
         document.getElementById('apiKeyForm')?.addEventListener('submit', handleApiKeySave);
+        document.getElementById('jobSearchPreferencesForm')?.addEventListener('submit', saveJobSearchPreferences);
+        document.getElementById('refreshJobSearchBtn')?.addEventListener('click', refreshJobSearch);
 
         // Resume file input change (replaces inline onchange="handleResumeUpload(this)")
         const resumeInput = document.getElementById('resumeUploadInput');
@@ -774,6 +855,9 @@
                 body: JSON.stringify({ ai_provider: 'local', local_model: model, local_reasoning_effort: reasoning?.value ?? 'medium' })
             });
             if (!res.ok) { const data = await res.json().catch(() => ({})); throw new Error(data.message || 'Could not save local model'); }
+            // Keep the local UI state in sync before the status-driven render.
+            // Otherwise a stale dataset value can restore the previous model.
+            select.dataset.selectedModel = model;
             const provider = /** @type {HTMLSelectElement|null} */ (document.getElementById('aiProviderSelect'));
             if (provider) provider.value = 'local';
             _updateAIProviderUI('local');

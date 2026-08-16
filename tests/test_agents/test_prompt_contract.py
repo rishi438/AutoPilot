@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import workflows.job_application_workflow as workflow_module
 from config.settings import Settings
 from utils.llm_prompting import PROMPT_CONTRACT_MARKER, build_llm_system_prompt
 from workflows.job_application_workflow import _resolve_workflow_preferences
@@ -108,6 +109,32 @@ def test_workflow_preserves_configured_model_preference() -> None:
 
     assert preferences["preferred_model"] == "gemini-2.5-flash"
     assert _resolve_workflow_preferences({}).get("preferred_model") is None
+
+
+def test_workflow_replaces_a_stale_local_model_with_the_instance_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saved local preferences cannot request models removed from `.env`."""
+    monkeypatch.setattr(
+        workflow_module,
+        "get_settings",
+        lambda: _settings(
+            local_llm_url="http://127.0.0.1:11434/api/generate",
+            local_llm_model="qwen2.5:14b-instruct-q5_K_M",
+            local_llm_models={"qwen2.5:14b-instruct-q5_K_M": "Qwen 2.5 14B (Q5 KM)"},
+        ),
+    )
+
+    preferences = _resolve_workflow_preferences(
+        {
+            "application_preferences": {
+                "ai_provider": "local",
+                "local_model": "Qwen3-14B-GGUF:Q5_K_M",
+            }
+        }
+    )
+
+    assert preferences["local_model"] == "qwen2.5:14b-instruct-q5_K_M"
 
 
 def _settings(**overrides: object) -> Settings:

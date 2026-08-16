@@ -77,6 +77,12 @@ When the job analyzer omits an employer or returns placeholder text (for example
 
 ### Fixed
 
+#### Database - application-managed IST timestamps
+
+- Replaced SQLAlchemy `func.now()` timestamp expressions in `models/database.py`
+  with the timezone-aware `ist_now()` factory (`Asia/Kolkata`). ORM-created and
+  ORM-updated records now receive a fresh India Standard Time timestamp.
+
 #### Dashboard — duplicate application rows on "Load more"
 
 Applications list API uses **`EXISTS`** for workflow-session visibility instead of **`LEFT JOIN`**, so **OFFSET** pagination cannot return duplicate **`job_applications`** rows. Stable **`ORDER BY`** with an **`id`** tie-breaker. **`dashboard-home.js`** dedupes merged pages by **`id`** as a client-side safeguard.

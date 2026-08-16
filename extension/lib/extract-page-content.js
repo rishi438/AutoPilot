@@ -13,7 +13,7 @@
   var MAX_EXTRACT_CHARS = 50000;
 
   /** Bump when extractor behavior changes (shown in diagnostics to confirm reload). */
-  var EXTRACTOR_BUILD_ID = 'li-guest-api-v12';
+  var EXTRACTOR_BUILD_ID = 'company-connectors-v1';
 
   /** Last LinkedIn jobs-guest attempt (shown in diagnostics when debug on). */
   var lastLinkedInGuestApiDiag = null;
@@ -105,6 +105,144 @@
     { re: /^(www\.)?monster\.com$/i, selectors: ['[data-testid="job-description"]', '#JobDescription', 'main'] },
     { re: /^(www\.)?careerbuilder\.com$/i, selectors: ['[data-testid="job-description"]', '.job-description', 'main'] }
   ];
+
+  /**
+   * Company selectors are deliberately centralised: portal markup changes often,
+   * but every caller receives the same safe, best-effort company value.
+   */
+  var COMPANY_CONNECTORS = [
+    {
+      re: /(^|\.)naukri\.com$/i,
+      selectors: [
+        '.jd-header-comp-name a',
+        '[class*="jd-header-comp-name"] a',
+        '[class*="jd-header-comp-name"]',
+        'a[href*="/company/"][title]',
+        'a[href*="company"][title]',
+        '[class*="about-company"] a',
+        '[class*="aboutCompany"] a'
+      ]
+    },
+    {
+      re: /(^|\.)instahyre\.com$/i,
+      selectors: [
+        '[class*="company-name"] a',
+        '[class*="company-name"]',
+        '[class*="employer-name"]',
+        '[class*="companyName"]'
+      ]
+    },
+    {
+      re: /(^|\.)hirist\.com$/i,
+      selectors: [
+        '[class*="company-name"] a',
+        '[class*="company-name"]',
+        '[class*="companyName"]',
+        '[data-testid*="company"]'
+      ]
+    },
+    {
+      re: /(^|\.)foundit\.in$/i,
+      selectors: [
+        '[class*="companyName"] a',
+        '[class*="companyName"]',
+        '[class*="company-name"] a',
+        '[class*="company-name"]',
+        '[data-testid*="company"]'
+      ]
+    },
+    {
+      re: /(^|\.)linkedin\.com$/i,
+      selectors: [
+        '.jobs-unified-top-card__company-name a',
+        '[class*="jobs-unified-top-card__company-name"] a',
+        '[class*="job-details-jobs-unified-top-card__company-name"] a',
+        '[class*="company-name"] a'
+      ]
+    }
+  ];
+
+  function cleanCompanyName(value) {
+    var text = normalizeWs(String(value || ''));
+    if (!text || text.length > 180) return '';
+    var lower = text.toLowerCase();
+    if (/^(about( the)? company|company overview|company info|follow|view all jobs|apply|read more)$/i.test(text)) return '';
+    if (/\b(followers|reviews|ratings|jobs|vacancies)\b/i.test(text)) return '';
+    if (lower === 'naukri' || lower === 'linkedin' || lower === 'foundit') return '';
+    return text;
+  }
+
+  function companyFromJsonLd() {
+    var scripts = document.querySelectorAll('script[type="application/ld+json"]');
+    var postings = [];
+    var i;
+    for (i = 0; i < scripts.length; i++) {
+      try {
+        collectJobPostingObjects(JSON.parse(scripts[i].textContent), postings);
+      } catch (e) {
+        /* invalid JSON */
+      }
+    }
+    for (i = 0; i < postings.length; i++) {
+      var organization = postings[i].hiringOrganization;
+      var name = organization && (organization.name || organization.legalName);
+      var company = cleanCompanyName(name);
+      if (company) return company;
+    }
+    return '';
+  }
+
+  function companyFromConnectorSelectors(host) {
+    var i;
+    var j;
+    for (i = 0; i < COMPANY_CONNECTORS.length; i++) {
+      var connector = COMPANY_CONNECTORS[i];
+      if (!connector.re.test(host || '')) continue;
+      for (j = 0; j < connector.selectors.length; j++) {
+        try {
+          var elements = document.querySelectorAll(connector.selectors[j]);
+          var k;
+          for (k = 0; k < elements.length; k++) {
+            var element = elements[k];
+            var company = cleanCompanyName(
+              element.getAttribute('title') || element.innerText || element.textContent
+            );
+            if (company) return company;
+          }
+        } catch (e) {
+          /* selector no longer supported by this portal */
+        }
+      }
+    }
+    return '';
+  }
+
+  function companyFromAboutSection() {
+    var headings = document.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"], strong, b');
+    var i;
+    for (i = 0; i < headings.length; i++) {
+      var heading = normalizeWs(headings[i].innerText || headings[i].textContent || '');
+      if (!/^(about( the)? company|company overview|company information)$/i.test(heading)) continue;
+      var section = headings[i].closest('section, article, [class*="about"], [class*="company"], div');
+      if (!section) continue;
+      var named = section.querySelector('[class*="company-name"], [class*="companyName"], a[title]');
+      var company = cleanCompanyName(named && (named.getAttribute('title') || named.innerText || named.textContent));
+      if (company) return company;
+    }
+    return '';
+  }
+
+  function companyFromExtractedContent(content) {
+    var match = String(content || '').match(/^Company:\s*([^\n]+)/im);
+    return cleanCompanyName(match && match[1]);
+  }
+
+  function extractCompanyName(content) {
+    return companyFromJsonLd() ||
+      companyFromConnectorSelectors(window.location.hostname || '') ||
+      companyFromAboutSection() ||
+      companyFromExtractedContent(content);
+  }
 
   var JOB_KEYWORDS = [
     'responsibilit',
@@ -2677,6 +2815,7 @@
   }
 
   function finalizeExtractResult(result) {
+    result.company = cleanCompanyName(result.company) || extractCompanyName(result.content);
     result.confidence = computeExtractionConfidence(result.content, result.source);
     return result;
   }

@@ -51,6 +51,7 @@ from utils.llm_client import (
     user_facing_message_from_llm_exception,
 )
 from utils.llm_parsing import parse_json_from_llm_response
+from utils.llm_preferences import get_user_llm_request_options
 from utils.security import sanitize_text
 
 logger = logging.getLogger(__name__)
@@ -575,6 +576,7 @@ async def map_form_fields_to_profile(
 
     try:
         client = await get_gemini_client()
+        llm_options = await get_user_llm_request_options(db, user_id)
         # Tool-level Redis cache (get_cached_tool_result) is sufficient; avoid a second
         # LLM-response cache layer that can drift from this endpoint's validation rules.
         gen = await client.generate(
@@ -583,6 +585,7 @@ async def map_form_fields_to_profile(
             temperature=0.15,
             max_tokens=8192,
             use_cache=False,
+            **llm_options,
             user_api_key=user_api_key,
             user_id=str(user_id),
         )

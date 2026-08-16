@@ -406,7 +406,11 @@ const elements = {
 
   authMainFlow: document.getElementById('authMainFlow'),
   primaryActionsBlock: document.getElementById('primaryActionsBlock'),
-  matchProfileBtn: document.getElementById('matchProfileBtn')
+  matchProfileBtn: document.getElementById('matchProfileBtn'),
+  portalQueueSection: document.getElementById('portalQueueSection'),
+  portalQueueSummary: document.getElementById('portalQueueSummary'),
+  portalQueueList: document.getElementById('portalQueueList'),
+  clearPortalQueueBtn: document.getElementById('clearPortalQueueBtn')
 };
 
 // =============================================================================
@@ -442,10 +446,83 @@ async function initialize() {
   // If authenticated, detect job on current page
   if (state.isAuthenticated) {
     await detectJobOnCurrentPage();
+    await loadPortalQueue();
   }
 
   // Setup event listeners
   setupEventListeners();
+}
+
+function sendQueueMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      if (!response || response.success !== true) {
+        reject(new Error(response?.error || 'Could not update saved jobs.'));
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+function queueJobLabel(job) {
+  const title = typeof job.title === 'string' && job.title.trim() ? job.title.trim() : 'Untitled job';
+  const company = typeof job.companyName === 'string' && job.companyName.trim() ? ` at ${job.companyName.trim()}` : '';
+  return `${title}${company}`;
+}
+
+function renderPortalQueue(jobs) {
+  const queue = Array.isArray(jobs) ? jobs : [];
+  elements.portalQueueList.replaceChildren();
+  if (!queue.length) {
+    elements.portalQueueSection.classList.add('hidden');
+    return;
+  }
+  elements.portalQueueSection.classList.remove('hidden');
+  elements.portalQueueSummary.textContent = `${queue.length} saved job${queue.length === 1 ? '' : 's'} in this browser`;
+  queue.forEach((job) => {
+    if (!job || typeof job.id !== 'string') return;
+    const card = document.createElement('article');
+    card.className = 'portal-queue-item';
+    const title = document.createElement('strong');
+    title.textContent = queueJobLabel(job);
+    const meta = document.createElement('span');
+    meta.className = 'portal-queue-meta';
+    meta.textContent = `${job.portal || 'portal'} · ${job.status || 'saved'}`;
+    const actions = document.createElement('div');
+    actions.className = 'portal-queue-actions';
+    const keep = document.createElement('button');
+    keep.type = 'button'; keep.className = 'btn btn-queue-secondary'; keep.textContent = 'Keep only this'; keep.dataset.jobId = job.id; keep.dataset.action = 'keep';
+    const setCompany = document.createElement('button');
+    setCompany.type = 'button'; setCompany.className = 'btn btn-queue-secondary'; setCompany.textContent = 'Set company'; setCompany.dataset.jobId = job.id; setCompany.dataset.action = 'company'; setCompany.dataset.companyName = typeof job.companyName === 'string' ? job.companyName : '';
+    const remove = document.createElement('button');
+    remove.type = 'button'; remove.className = 'btn btn-queue-danger'; remove.textContent = 'Remove'; remove.dataset.jobId = job.id; remove.dataset.action = 'remove';
+    actions.append(keep, setCompany, remove); card.append(title, meta, actions); elements.portalQueueList.append(card);
+  });
+}
+
+async function loadPortalQueue() {
+  try {
+    const response = await sendQueueMessage({ type: 'GET_PORTAL_JOB_QUEUE' });
+    renderPortalQueue(response.jobs);
+  } catch (error) {
+    console.error('Could not load saved portal jobs:', error);
+  }
+}
+
+async function updatePortalQueue(message, confirmation) {
+  if (confirmation && !window.confirm(confirmation)) return;
+  try {
+    await sendQueueMessage(message);
+    await loadPortalQueue();
+    showToast('Saved portal jobs updated.', 'success');
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : 'Could not update saved jobs.', 'error');
+  }
 }
 
 // =============================================================================
@@ -1084,9 +1161,12 @@ async function extractAndSubmitJob() {
 
     const formData = new FormData();
     formData.append('job_text', content);
-    // Do NOT send detected_title / detected_company — page titles (e.g. "(5) LinkedIn")
-    // are unreliable. The dashboard shows skeleton shimmers until the Job Analyzer
-    // extracts the correct title and company from the job text.
+    if (typeof extracted.company === 'string' && extracted.company.trim()) {
+      formData.append('detected_company', extracted.company.trim());
+    }
+    // Do not send the page title: it is unreliable on portal and LinkedIn tabs.
+    // are unreliable. The centralized extractor sends a company only when it
+    // found a validated value; the Job Analyzer remains authoritative.
 
     const response = await fetch(`${CONFIG.API_BASE_URL}/workflow/start`, {
       method: 'POST',
@@ -1228,6 +1308,36 @@ function setupEventListeners() {
   if (elements.matchProfileBtn) {
     elements.matchProfileBtn.addEventListener('click', () => matchFormToProfile());
   }
+
+  elements.portalQueueList.addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-action]');
+    if (!button || !button.dataset.jobId) return;
+    if (button.dataset.action === 'keep') {
+      updatePortalQueue(
+        { type: 'KEEP_ONLY_PORTAL_JOB', jobId: button.dataset.jobId },
+        'Keep only this saved job? All other saved portal jobs will be removed from this browser.'
+      );
+    } else if (button.dataset.action === 'company') {
+      const companyName = window.prompt('Company name', button.dataset.companyName || '');
+      if (companyName == null) return;
+      updatePortalQueue({
+        type: 'UPDATE_PORTAL_JOB_COMPANY',
+        jobId: button.dataset.jobId,
+        companyName
+      });
+    } else if (button.dataset.action === 'remove') {
+      updatePortalQueue(
+        { type: 'REMOVE_PORTAL_JOB', jobId: button.dataset.jobId },
+        'Remove this saved portal job from this browser?'
+      );
+    }
+  });
+  elements.clearPortalQueueBtn.addEventListener('click', () => {
+    updatePortalQueue(
+      { type: 'CLEAR_PORTAL_JOB_QUEUE' },
+      'Clear every saved portal job from this browser?'
+    );
+  });
 }
 
 // =============================================================================

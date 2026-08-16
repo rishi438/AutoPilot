@@ -34,7 +34,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-
+  adminer:
+    image: adminer
+    container_name: autopilot_adminer
+    restart: unless-stopped
+    ports:
+      - 9004:8080
   # ---------------------------------------------------------------------------
   # Redis — caching, rate limiting, JWT revocation, auth tokens
   # ---------------------------------------------------------------------------

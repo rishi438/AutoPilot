@@ -26,8 +26,18 @@ def _make_client(
     client.api_key = api_key
     client.local_llm_url = "http://local.test:11434/api/generate"
     client.local_llm_model = model
+    client.local_llm_models = {model}
     client.local_llm_timeout = 30
     return client
+
+
+def test_is_local_model_uses_the_configured_model_list() -> None:
+    """Configured `.env` names, rather than a source-code allowlist, route locally."""
+    client = _make_client(model="fallback-local:latest")
+    client.local_llm_models = {"qwen2.5:14b-instruct-q5_K_M"}
+
+    assert client._is_local_model("qwen2.5:14b-instruct-q5_K_M") is True
+    assert client._is_local_model("qwen2.5:14b") is False
 
 
 def _install_http_transport(

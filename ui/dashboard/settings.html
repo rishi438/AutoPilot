@@ -856,6 +856,11 @@
                     </a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link" href="#" data-section="jobSearch">
+                        <i class="fas fa-search me-2"></i>Job Search
+                    </a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link" href="#" data-section="privacy">
                         <i class="fas fa-shield-alt me-2"></i>Privacy
                     </a>
@@ -1126,6 +1131,51 @@
                     </div>
                 </div>
 
+            </div>
+
+            <div id="jobSearchSection" class="settings-section">
+                <h4 class="section-title">Job Search Preferences</h4>
+                <p class="text-muted">After resume parsing, confirm these choices so Autopilot searches only the jobs you want. Primary skills, roles, and company tiers are required.</p>
+                <div id="jobSearchMissing" class="alert alert-warning d-none" role="alert"></div>
+                <form id="jobSearchPreferencesForm">
+                    <div class="account-card mb-3">
+                        <label class="form-label" for="jobSearchPrimarySkills">Primary skills <span class="text-danger">*</span></label>
+                        <input class="form-control" id="jobSearchPrimarySkills" required placeholder="Python, Rust">
+                        <small class="text-muted">Comma-separated. These must appear in the job description.</small>
+                    </div>
+                    <div class="account-card mb-3">
+                        <label class="form-label" for="jobSearchSecondarySkills">Secondary skills</label>
+                        <input class="form-control" id="jobSearchSecondarySkills" placeholder="Docker, Kubernetes, AWS">
+                    </div>
+                    <div class="account-card mb-3">
+                        <label class="form-label" for="jobSearchRoles">Target roles <span class="text-danger">*</span></label>
+                        <input class="form-control" id="jobSearchRoles" required placeholder="Software Engineer, SDE, DevOps, DevSecOps, Full Stack">
+                    </div>
+                    <div class="account-card mb-3">
+                        <div class="form-label">Company types <span class="text-danger">*</span></div>
+                        <div class="d-flex flex-wrap gap-3">
+                            <label><input type="checkbox" name="companyTier" value="mnc"> MNC</label>
+                            <label><input type="checkbox" name="companyTier" value="indian_mnc"> Indian MNC</label>
+                            <label><input type="checkbox" name="companyTier" value="startup"> Startup</label>
+                            <label><input type="checkbox" name="companyTier" value="mid_startup"> Mid-size startup</label>
+                        </div>
+                    </div>
+                    <div class="account-card mb-3">
+                        <div class="account-title mb-2">Public company boards (optional)</div>
+                        <p class="account-subtitle mb-3">Add a company board to search now. For Greenhouse/Lever, enter the board name from its careers URL.</p>
+                        <div class="row g-2">
+                            <div class="col-md-3"><select id="jobBoardKind" class="form-select"><option value="greenhouse">Greenhouse</option><option value="lever">Lever</option></select></div>
+                            <div class="col-md-3"><input id="jobBoardCompany" class="form-control" placeholder="Company name"></div>
+                            <div class="col-md-3"><input id="jobBoardName" class="form-control" placeholder="Board name, e.g. acme"></div>
+                            <div class="col-md-3"><select id="jobBoardTier" class="form-select"><option value="mnc">MNC</option><option value="indian_mnc">Indian MNC</option><option value="startup">Startup</option><option value="mid_startup">Mid startup</option></select></div>
+                        </div>
+                    </div>
+                    <div class="d-flex gap-2 align-items-center">
+                        <button class="btn btn-primary" type="submit"><i class="fas fa-save me-1"></i>Save job search</button>
+                        <button id="refreshJobSearchBtn" class="btn btn-outline-primary" type="button">Find matching jobs</button>
+                        <span id="jobSearchSaved" class="save-indicator"><i class="fas fa-check-circle"></i> Saved</span>
+                    </div>
+                </form>
             </div>
 
             <!-- Privacy Section -->

@@ -20,7 +20,8 @@ const CONFIG = {
   STORAGE_KEYS: {
     TOKEN: 'jaa_token',
     USER: 'jaa_user',
-    API_URL: 'jaa_api_url'
+    API_URL: 'jaa_api_url',
+    PORTAL_JOB_QUEUE: 'jaa_portal_job_queue'
   },
   // Token refresh interval (55 minutes)
   TOKEN_REFRESH_INTERVAL: 55 * 60 * 1000
@@ -41,6 +42,172 @@ let state = {
   user: null,
   refreshTimer: null
 };
+
+// Portal sessions stay in the user's browser. Queue entries contain safe job
+// metadata and cleaned job-description text; sync never sends credentials,
+// cookies, tokens, or page HTML.
+const BROWSER_SESSION_PORTALS = Object.freeze({
+  'www.naukri.com': 'naukri',
+  'www.instahyre.com': 'instahyre',
+  'www.hirist.com': 'hirist',
+  'www.foundit.in': 'foundit'
+});
+const PORTAL_QUEUE_LIMIT = 500;
+const JOB_DESCRIPTION_LIMIT = 50000;
+
+function portalForUrl(url) {
+  try {
+    return BROWSER_SESSION_PORTALS[new URL(url).hostname.toLowerCase()] || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function savePortalJobToBrowserQueue(job) {
+  const portal = portalForUrl(job.url);
+  if (!portal) {
+    throw new Error('This job must be from Naukri, Instahyre, Hirist, or Foundit.');
+  }
+
+  const stored = await chrome.storage.local.get(CONFIG.STORAGE_KEYS.PORTAL_JOB_QUEUE);
+  const queue = Array.isArray(stored[CONFIG.STORAGE_KEYS.PORTAL_JOB_QUEUE])
+    ? stored[CONFIG.STORAGE_KEYS.PORTAL_JOB_QUEUE]
+    : [];
+  const description = String(job.description || '').replace(/\s+/g, ' ').trim().slice(0, JOB_DESCRIPTION_LIMIT);
+  const title = String(job.title || '').trim().slice(0, 500);
+  const companyName = String(job.companyName || '').trim().slice(0, 500) || null;
+  const existing = queue.find((item) => item.url === job.url);
+  if (existing) {
+    const snapshotChanged = description && description !== existing.description;
+    const metadataChanged =
+      (title && title !== existing.title) ||
+      (companyName && companyName !== existing.companyName);
+    if (snapshotChanged || metadataChanged) {
+      if (snapshotChanged) {
+        existing.description = description;
+        existing.descriptionCapturedAt = new Date().toISOString();
+      }
+      if (title) existing.title = title;
+      if (companyName) existing.companyName = companyName;
+      // Re-sync refreshed metadata without starting analysis.
+      existing.status = 'queued';
+      await chrome.storage.local.set({ [CONFIG.STORAGE_KEYS.PORTAL_JOB_QUEUE]: queue });
+    }
+    return { added: false, refreshed: snapshotChanged || metadataChanged, job: existing };
+  }
+
+  const entry = {
+    id: crypto.randomUUID(),
+    portal,
+    url: job.url,
+    title,
+    companyName,
+    description: description || null,
+    descriptionCapturedAt: description ? new Date().toISOString() : null,
+    savedAt: new Date().toISOString(),
+    status: 'queued'
+  };
+  queue.unshift(entry);
+  await chrome.storage.local.set({
+    [CONFIG.STORAGE_KEYS.PORTAL_JOB_QUEUE]: queue.slice(0, PORTAL_QUEUE_LIMIT)
+  });
+  return { added: true, job: entry };
+}
+
+async function externalJobId(url) {
+  const bytes = new TextEncoder().encode(url);
+  const hash = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function syncPortalJobQueue() {
+  // The popup and service worker have separate runtime state. Reload the
+  // persisted extension login before each manual sync so a recent popup login
+  // is immediately usable here.
+  await loadCredentials();
+  if (!state.token) throw new Error('Sign in to Autopilot before syncing jobs.');
+  const stored = await chrome.storage.local.get(CONFIG.STORAGE_KEYS.PORTAL_JOB_QUEUE);
+  const queue = Array.isArray(stored[CONFIG.STORAGE_KEYS.PORTAL_JOB_QUEUE])
+    ? stored[CONFIG.STORAGE_KEYS.PORTAL_JOB_QUEUE]
+    : [];
+  const pending = queue.filter(job => job.status === 'queued' && job.url && job.title);
+  if (!pending.length) return { synced: 0, skipped: queue.length };
+
+  const batchResponse = await apiCall('/automation/batches', 'POST', { worker_kind: 'extension' });
+  const batch = await batchResponse.json().catch(() => ({}));
+  if (!batchResponse.ok || !batch.id) throw new Error(batch.detail || 'Could not create an automation batch.');
+
+  let synced = 0;
+  const errors = [];
+  for (const job of pending) {
+    const response = await apiCall('/automation/queue/jobs', 'POST', {
+      batch_id: batch.id,
+      portal: job.portal,
+      external_job_id: await externalJobId(job.url),
+      job_title: job.title,
+      company_name: job.companyName,
+      job_url: job.url,
+      job_description: job.description || null,
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      errors.push(result.detail || result.message || `API error: ${response.status}`);
+      continue;
+    }
+    job.status = 'synced';
+    job.syncedAt = new Date().toISOString();
+    job.applicationId = result.id;
+    synced += 1;
+  }
+  await chrome.storage.local.set({ [CONFIG.STORAGE_KEYS.PORTAL_JOB_QUEUE]: queue });
+  if (!synced && errors.length) throw new Error(errors[0]);
+  return { synced, skipped: pending.length - synced, errors };
+}
+
+async function getPortalJobQueue() {
+  const stored = await chrome.storage.local.get(CONFIG.STORAGE_KEYS.PORTAL_JOB_QUEUE);
+  return Array.isArray(stored[CONFIG.STORAGE_KEYS.PORTAL_JOB_QUEUE])
+    ? stored[CONFIG.STORAGE_KEYS.PORTAL_JOB_QUEUE]
+    : [];
+}
+
+async function writePortalJobQueue(queue) {
+  await chrome.storage.local.set({ [CONFIG.STORAGE_KEYS.PORTAL_JOB_QUEUE]: queue });
+  return queue;
+}
+
+async function removePortalJobQueueEntry(jobId) {
+  const queue = await getPortalJobQueue();
+  const next = queue.filter((job) => job && job.id !== jobId);
+  if (next.length === queue.length) throw new Error('Saved job not found.');
+  await writePortalJobQueue(next);
+  return { remaining: next.length };
+}
+
+async function keepOnlyPortalJobQueueEntry(jobId) {
+  const queue = await getPortalJobQueue();
+  const kept = queue.filter((job) => job && job.id === jobId);
+  if (kept.length !== 1) throw new Error('Saved job not found.');
+  await writePortalJobQueue(kept);
+  return { remaining: 1 };
+}
+
+async function clearPortalJobQueue() {
+  await chrome.storage.local.remove(CONFIG.STORAGE_KEYS.PORTAL_JOB_QUEUE);
+  return { remaining: 0 };
+}
+
+async function updatePortalJobCompany(jobId, companyName) {
+  const company = String(companyName || '').trim().slice(0, 500);
+  if (!company) throw new Error('Company name is required.');
+  const queue = await getPortalJobQueue();
+  const job = queue.find((item) => item && item.id === jobId);
+  if (!job) throw new Error('Saved job not found.');
+  job.companyName = company;
+  job.status = 'queued';
+  await writePortalJobQueue(queue);
+  return { remaining: queue.length };
+}
 
 // =============================================================================
 // INITIALIZATION
@@ -344,6 +511,43 @@ async function handleMessage(message, sender) {
         data: responseData
       };
 
+    // Browser-session-only portal queue. Credentials, cookies, and queue items
+    // remain in Chrome local storage and are not proxied to the backend.
+    case 'SAVE_PORTAL_JOB':
+      return {
+        success: true,
+        ...(await savePortalJobToBrowserQueue({
+          url: message.url || sender.tab?.url,
+          title: message.title,
+          companyName: message.companyName,
+          description: message.description
+        }))
+      };
+
+    case 'GET_PORTAL_JOB_QUEUE':
+      return { success: true, jobs: await getPortalJobQueue() };
+
+    case 'REMOVE_PORTAL_JOB':
+      return { success: true, ...(await removePortalJobQueueEntry(String(message.jobId || ''))) };
+
+    case 'KEEP_ONLY_PORTAL_JOB':
+      return { success: true, ...(await keepOnlyPortalJobQueueEntry(String(message.jobId || ''))) };
+
+    case 'CLEAR_PORTAL_JOB_QUEUE':
+      return { success: true, ...(await clearPortalJobQueue()) };
+
+    case 'UPDATE_PORTAL_JOB_COMPANY':
+      return {
+        success: true,
+        ...(await updatePortalJobCompany(
+          String(message.jobId || ''),
+          message.companyName
+        ))
+      };
+
+    case 'SYNC_PORTAL_JOB_QUEUE':
+      return { success: true, ...(await syncPortalJobQueue()) };
+
     default:
       throw new Error(`Unknown message type: ${message.type}`);
   }
@@ -407,10 +611,94 @@ chrome.runtime.onInstalled.addListener(() => {
     title: 'Extract job with Job Assistant',
     contexts: ['page', 'selection']
   });
+  chrome.contextMenus.create({
+    id: 'jaa-save-portal-job',
+    title: 'Save job to browser queue',
+    contexts: ['page']
+  });
+  chrome.contextMenus.create({
+    id: 'jaa-sync-portal-jobs',
+    title: 'Sync saved portal jobs to Autopilot',
+    contexts: ['page']
+  });
 });
 
 // Handle context menu clicks
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === 'jaa-sync-portal-jobs') {
+    try {
+      const result = await syncPortalJobQueue();
+      chrome.notifications.create({
+        type: 'basic',
+        iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+        title: 'Portal jobs synced',
+        message: result.skipped
+          ? `${result.synced} queued; ${result.skipped} failed.`
+          : `${result.synced} job${result.synced === 1 ? '' : 's'} queued in Autopilot.`,
+        priority: 2
+      });
+    } catch (error) {
+      chrome.notifications.create({
+        type: 'basic',
+        iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+        title: 'Could not sync portal jobs',
+        message: error.message || 'Sign in and try again.',
+        priority: 2
+      });
+    }
+    return;
+  }
+
+  if (info.menuItemId === 'jaa-save-portal-job') {
+    if (!tab?.id || !tab.url || !portalForUrl(tab.url)) {
+      chrome.notifications.create({
+        type: 'basic',
+        iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+        title: 'Open a supported job page',
+        message: 'This queue supports Naukri, Instahyre, Hirist, and Foundit job pages.',
+        priority: 2
+      });
+      return;
+    }
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: [JAA_EXTRACT_FILE]
+    });
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: async () => {
+        const extract = window.__jaaExtractPageContentAsync || window.__jaaExtractPageContent;
+        const result = typeof extract === 'function' ? await extract() : {};
+        return {
+          title: result.title || document.title || '',
+          company: result.company || '',
+          description: result.content || ''
+        };
+      }
+    });
+    const extracted = results[0]?.result || {};
+    console.info('[JAA] Portal job extraction', {
+      host: new URL(tab.url).hostname,
+      title: String(extracted.title || '').slice(0, 200),
+      company: String(extracted.company || '').slice(0, 200),
+      hasDescription: Boolean(extracted.description)
+    });
+    const saved = await savePortalJobToBrowserQueue({
+      url: tab.url,
+      title: extracted.title || '',
+      companyName: extracted.company || '',
+      description: extracted.description || ''
+    });
+    chrome.notifications.create({
+      type: 'basic',
+      iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+      title: saved.added ? 'Job saved in browser queue' : (saved.refreshed ? 'Job snapshot refreshed' : 'Job already queued'),
+      message: saved.job.title || saved.job.url,
+      priority: 2
+    });
+    return;
+  }
+
   if (info.menuItemId === 'jaa-extract') {
     if (!state.token) {
       // Open login page
@@ -482,7 +770,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
           return {
             content: r.content,
             title: r.title,
-            company: '',
+            company: r.company || '',
             url: window.location.href,
             diagnostics: r.diagnostics
           };

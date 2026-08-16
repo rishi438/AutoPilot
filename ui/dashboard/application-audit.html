@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Application Audit - Autopilot{% endblock %}
+{% block navbar %}{% include "partials/navbar_subpage.html" %}{% endblock %}
+{% block content %}
+<main class="page-container" data-application-id="{{ application_id }}">
+    <a href="/dashboard" class="btn btn-secondary btn-sm mb-4"><i class="fas fa-arrow-left me-2"></i>Dashboard</a>
+    <div id="auditLoading" class="loading-container"><div class="loading-spinner"></div><p class="mt-3 text-muted">Loading audit log...</p></div>
+    <div id="auditError" class="is-hidden error-alert"><i class="fas fa-exclamation-circle fa-2x"></i><div><strong>Could not load audit log</strong><p class="mb-0" id="auditErrorText"></p></div></div>
+    <section id="auditContent" class="is-hidden">
+        <div class="card p-4 mb-4"><h1 class="h3 mb-1" id="auditTitle"></h1><p class="text-muted mb-0" id="auditSummary"></p></div>
+        <div class="card p-4 mb-4"><h2 class="h5">Material used</h2><dl class="mb-0" id="auditMaterials"></dl></div>
+        <div class="card p-4 mb-4"><h2 class="h5">Submitted answers</h2><p class="text-muted small">Answers from profile, approved rules, AI, or manual input are shown with review flags. Browser credentials and session data are never shown.</p><div id="auditAnswers"></div></div>
+        <div class="card p-4 mb-4"><h2 class="h5">Holds and errors</h2><div id="auditHolds"></div></div>
+        <div class="card p-4"><h2 class="h5">Lifecycle</h2><div id="auditEvents"></div></div>
+    </section>
+</main>
+{% endblock %}
+{% block page_scripts %}<script src="{{ asset_url('js/application-audit.js') }}"></script>{% endblock %}

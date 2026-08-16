@@ -16,6 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
 from models.database import (
+    ApplicationAutomationEvent,
+    ApplicationHold,
+    ApplicationSubmittedAnswer,
     ApplicationStatus,
     JobApplication,
     UserProfile,
@@ -64,6 +67,10 @@ SORT_ASCENDING: str = "asc"
 SORT_DESCENDING: str = "desc"
 DEFAULT_SORT_FIELD: str = "created_at"
 DEFAULT_SORT_ORDER: str = SORT_DESCENDING
+AUDIT_SECRET_MARKERS = re.compile(
+    r"password|passcode|cookie|session(?:[_ -]?id)?|token|authorization|bearer|otp",
+    re.IGNORECASE,
+)
 
 
 # =============================================================================
@@ -94,6 +101,13 @@ def get_user_uuid(current_user: dict[str, Any]) -> uuid.UUID:
     if isinstance(user_id, str):
         return uuid.UUID(user_id)
     return user_id
+
+
+def _safe_audit_detail(value: str | None) -> str | None:
+    """Never render browser-session material from legacy worker event details."""
+    if value is None:
+        return None
+    return "[redacted]" if AUDIT_SECRET_MARKERS.search(value) else value
 
 
 def _dashboard_application_visibility_filter(user_id: uuid.UUID):
@@ -136,6 +150,12 @@ class ApplicationResponse(BaseModel):
     job_title: str = Field(..., description="Job title or position name")
     company_name: str = Field(..., description="Company or organization name")
     job_url: str | None = Field(None, description="Original job posting URL")
+    portal: str | None = Field(
+        None, description="Source portal for extension-queued jobs"
+    )
+    has_job_description: bool = Field(
+        False, description="Whether a saved job-description snapshot is available"
+    )
     match_score: float | None = Field(None, description="Profile match score (0.0-1.0)")
     status: str = Field(..., description="Current application status")
     applied_date: datetime | None = Field(
@@ -170,6 +190,32 @@ class ApplicationListResponse(BaseModel):
     has_prev: bool = Field(
         ..., description="Whether there are previous pages available"
     )
+
+
+class SavedJobDetailResponse(BaseModel):
+    """A safe, user-owned preview of a saved portal job."""
+
+    id: str
+    job_title: str
+    company_name: str | None
+    status: str
+    portal: str | None
+    job_url: str | None
+    external_ats_url: str | None
+    job_description: str
+    job_description_hash: str | None
+    job_description_captured_at: datetime | None
+    workflow_session_id: str | None
+
+
+class ApplicationAuditResponse(BaseModel):
+    """Safe, user-owned audit trail for one application."""
+
+    application: dict[str, Any]
+    materials: dict[str, Any]
+    answers: list[dict[str, Any]]
+    holds: list[dict[str, Any]]
+    events: list[dict[str, Any]]
 
 
 class ApplicationStatsResponse(BaseModel):
@@ -347,6 +393,152 @@ async def list_applications(
     except Exception as e:
         logger.error(f"Failed to list applications: {e}", exc_info=True)
         raise internal_error("Failed to list applications")
+
+
+@router.get("/{application_id}/job-detail", response_model=SavedJobDetailResponse)
+async def get_saved_job_detail(
+    application_id: uuid.UUID,
+    current_user: dict[str, Any] = Depends(get_current_user_with_complete_profile),
+    db: AsyncSession = Depends(get_database),
+) -> SavedJobDetailResponse:
+    """Return the saved JD snapshot and capture metadata for one owned job."""
+    application = (
+        await db.execute(
+            select(JobApplication).where(
+                JobApplication.id == application_id,
+                JobApplication.user_id == get_user_uuid(current_user),
+                JobApplication.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if application is None:
+        raise not_found_error("Application not found")
+    if not application.job_description:
+        raise not_found_error("No saved job-description snapshot is available")
+    return SavedJobDetailResponse(
+        id=str(application.id),
+        job_title=application.job_title or "Job Application",
+        company_name=application.company_name,
+        status=application.status,
+        portal=application.portal,
+        job_url=application.job_url,
+        external_ats_url=application.external_ats_url,
+        job_description=application.job_description,
+        job_description_hash=application.job_description_hash,
+        job_description_captured_at=application.job_description_captured_at,
+        workflow_session_id=application.session_id,
+    )
+
+
+@router.get("/{application_id}/audit", response_model=ApplicationAuditResponse)
+async def get_application_audit(
+    application_id: uuid.UUID,
+    current_user: dict[str, Any] = Depends(get_current_user_with_complete_profile),
+    db: AsyncSession = Depends(get_database),
+) -> ApplicationAuditResponse:
+    """Return a credential-free lifecycle and submission audit for one job."""
+    application = (
+        await db.execute(
+            select(JobApplication).where(
+                JobApplication.id == application_id,
+                JobApplication.user_id == get_user_uuid(current_user),
+            )
+        )
+    ).scalar_one_or_none()
+    if application is None:
+        raise not_found_error("Application not found")
+
+    answers = (
+        (
+            await db.execute(
+                select(ApplicationSubmittedAnswer)
+                .where(ApplicationSubmittedAnswer.application_id == application.id)
+                .order_by(ApplicationSubmittedAnswer.submitted_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    holds = (
+        (
+            await db.execute(
+                select(ApplicationHold)
+                .where(ApplicationHold.application_id == application.id)
+                .order_by(ApplicationHold.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    events = (
+        (
+            await db.execute(
+                select(ApplicationAutomationEvent)
+                .where(ApplicationAutomationEvent.application_id == application.id)
+                .order_by(ApplicationAutomationEvent.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return ApplicationAuditResponse(
+        application={
+            "id": str(application.id),
+            "job_title": application.job_title,
+            "company_name": application.company_name,
+            "portal": application.portal,
+            "status": application.status,
+            "created_at": application.created_at,
+            "updated_at": application.updated_at,
+            "applied_date": application.applied_date,
+        },
+        materials={
+            "job_description_captured": bool(application.job_description),
+            "job_description_hash": application.job_description_hash,
+            "job_description_captured_at": application.job_description_captured_at,
+            "source_url": next(
+                (
+                    url
+                    for url in (application.job_url, application.external_ats_url)
+                    if url and url.startswith("https://")
+                ),
+                None,
+            ),
+            "workflow_session_id": application.session_id,
+        },
+        answers=[
+            {
+                "question": answer.question,
+                "answer": answer.answer,
+                "answer_source": answer.answer_source,
+                "review_reasons": answer.review_reasons or [],
+                "submitted_at": answer.submitted_at,
+            }
+            for answer in answers
+        ],
+        holds=[
+            {
+                "hold_code": hold.hold_code,
+                "portal": hold.portal,
+                "question": hold.question,
+                "remediation": hold.remediation,
+                "error_detail": _safe_audit_detail(hold.error_detail),
+                "status": hold.status,
+                "retry_count": hold.retry_count,
+                "created_at": hold.created_at,
+                "resolved_at": hold.resolved_at,
+            }
+            for hold in holds
+        ],
+        events=[
+            {
+                "event_type": event.event_type,
+                "detail": _safe_audit_detail(event.detail),
+                "created_at": event.created_at,
+            }
+            for event in events
+        ],
+    )
 
 
 @router.patch("/{application_id}/status", response_model=ApplicationResponse)
@@ -787,6 +979,8 @@ async def _format_application_response(
         job_title=job_title or "",
         company_name=company_name or "",
         job_url=application.job_url,
+        portal=application.portal,
+        has_job_description=bool(application.job_description_hash),
         match_score=match_score,
         status=app_status,
         applied_date=application.applied_date,

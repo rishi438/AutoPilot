@@ -626,13 +626,15 @@
                         </button>` : ''}
                     </div>`;
             } else {
-                companyHtml = '<div class="empty-state"><i class="fas fa-building"></i><p>Company information not available.</p></div>';
+                companyHtml = `<div class="empty-state"><i class="fas fa-building"></i><p class="empty-state-title">Company research is optional</p><p class="empty-state-desc">Run it only if you want deeper company context for this job.</p>${currentSessionId && workflowStatus === 'analysis_complete' ? '<button class="regen-btn" id="generateCompanyResearchBtn"><span class="btn-text">Research company</span></button>' : ''}</div>`;
             }
         }
         const ccEl = document.getElementById('companyContent');
         if (ccEl) ccEl.innerHTML = companyHtml;
         const continueBtn = document.getElementById('continueWorkflowBtn');
         if (continueBtn) continueBtn.addEventListener('click', continueWorkflow);
+        const companyResearchBtn = document.getElementById('generateCompanyResearchBtn');
+        if (companyResearchBtn) companyResearchBtn.addEventListener('click', () => generateCompanyResearch(companyResearchBtn));
 
         // ========== SUB-PANE 2: YOUR FIT ==========
         const verdict = exec.one_line_verdict || exec.fit_assessment || match.fit_assessment || '';
@@ -2177,6 +2179,23 @@
             showToast(err.message || 'Generation failed', 'error');
             btn.disabled = false;
             btn.classList.remove('loading');
+        }
+    }
+
+    async function generateCompanyResearch(btn) {
+        if (!currentSessionId) return;
+        btn.disabled = true;
+        try {
+            const res = await fetch(`${API_BASE}/workflow/generate-company-research/${currentSessionId}`, {
+                method: 'POST', headers: { Authorization: `Bearer ${getAuthToken()}` },
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || data.message || 'Could not start company research.');
+            showToast('Company research started.');
+            loadApplicationData();
+        } catch (error) {
+            btn.disabled = false;
+            showToast(error instanceof Error ? error.message : 'Could not start company research.', 'error');
         }
     }
 

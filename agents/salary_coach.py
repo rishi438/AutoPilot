@@ -177,6 +177,7 @@ class SalaryCoachAgent:
         non_negotiables: list[str] | None = None,
         style_preference: str | None = None,
         user_api_key: str | None = None,
+        llm_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Generate a comprehensive salary negotiation strategy.
@@ -298,6 +299,7 @@ class SalaryCoachAgent:
                 max_tokens=LLM_MAX_TOKENS,
                 user_api_key=self._current_user_api_key,
                 structured_output=True,
+                **(llm_options or {}),
             )
 
             duration_ms = (datetime.now(UTC) - start_time).total_seconds() * 1000

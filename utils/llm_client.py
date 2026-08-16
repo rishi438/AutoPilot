@@ -48,8 +48,6 @@ MAX_RETRIES: int = 3
 RETRY_MIN_WAIT: int = 2  # seconds
 RETRY_MAX_WAIT: int = 10  # seconds
 
-# Local LLM known models — values accepted by the local endpoint.
-LOCAL_LLM_MODELS = {"deepseek-r1:14b", "qwen2.5:14b", "llama3.1:8b", "gpt-oss:20b"}
 LOCAL_LLM_TRUNCATION_REASONS = {"length", "max_length", "max_tokens"}
 GPT_OSS_REASONING_TIMEOUTS = {"low": 180, "medium": 300, "high": 600}
 # High reasoning can spend more than 12k tokens before it emits the final JSON.
@@ -233,6 +231,7 @@ class GeminiClient:
         # Local LLM fallback settings
         self.local_llm_url = getattr(settings, "local_llm_url", None)
         self.local_llm_model = getattr(settings, "local_llm_model", None)
+        self.local_llm_models = set(getattr(settings, "local_llm_models", {}))
         self.local_llm_timeout = getattr(settings, "local_llm_timeout", DEFAULT_TIMEOUT)
 
         # Validate Vertex AI config
@@ -260,7 +259,7 @@ class GeminiClient:
         """Return True when the requested model should be routed to a local LLM endpoint."""
         if not model:
             return False
-        return model == self.local_llm_model or model in LOCAL_LLM_MODELS
+        return model == self.local_llm_model or model in self.local_llm_models
 
     def _should_fallback_to_local(self, exc: GeminiError) -> bool:
         """Return True when a Gemini failure should be retried against local LLM."""
@@ -485,6 +484,7 @@ class GeminiClient:
             )
 
         is_gpt_oss = model_to_use.startswith("gpt-oss:")
+        is_qwen3 = model_to_use.startswith("qwen3:")
         request_url = self.local_llm_url
         if is_gpt_oss and request_url.rstrip("/").endswith("/api/generate"):
             request_url = f"{request_url.rsplit('/', 1)[0]}/chat"
@@ -519,8 +519,12 @@ class GeminiClient:
                 request_body["system"] = system
         if structured_output:
             request_body["format"] = "json"
+        # Qwen3 separates its reasoning from generated text. Structured agents
+        # need the final JSON directly, so disable thinking for that model.
+        if is_qwen3:
+            request_body["think"] = False
         # GPT-OSS can spend its entire generation on reasoning and return an
-        # empty ``response``.  Resume extraction only needs factual JSON, so
+        # empty ``response``. Resume extraction only needs factual JSON, so
         # retain a small reasoning budget, matching the working Ollama notebook.
         if is_gpt_oss:
             request_body["think"] = reasoning_effort
@@ -600,6 +604,8 @@ class GeminiClient:
                 )
             if not text.strip():
                 raise GeminiError("Local LLM returned an empty response.")
+            if structured_output and text.strip() in {"{}", "[]"}:
+                raise GeminiError("Local LLM returned an empty structured response.")
 
             api_duration_ms = (perf_counter() - api_start_time) * 1000
             logger.info(

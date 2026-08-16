@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime
 from enum import Enum, unique
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     BigInteger,
@@ -28,7 +29,15 @@ from sqlalchemy.orm import (
     mapped_column,
     relationship,
 )
-from sqlalchemy.sql import func
+
+
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def ist_now() -> datetime:
+    """Return the current timezone-aware IST time for ORM-managed timestamps."""
+    return datetime.now(IST)
+
 
 # =============================================================================
 # ENUMS
@@ -55,6 +64,13 @@ class ApplicationStatus(str, Enum):
     INTERVIEW = "interview"
     REJECTED = "rejected"
     ACCEPTED = "accepted"
+    DISCOVERED = "discovered"
+    QUEUED = "queued"
+    PREPARING = "preparing"
+    APPLYING = "applying"
+    BLOCKED = "blocked"
+    SKIPPED = "skipped"
+    RETRYING = "retrying"
 
 
 @unique
@@ -142,10 +158,10 @@ class User(Base):
         DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True), default=ist_now
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
     )
 
     __table_args__ = (
@@ -204,6 +220,31 @@ class User(Base):
     )
     portal_sessions: Mapped[list["PortalSession"]] = relationship(
         "PortalSession",
+        back_populates="user",
+        lazy="noload",
+        cascade="all, delete-orphan",
+    )
+    job_search_preferences: Mapped[Optional["UserJobSearchPreference"]] = relationship(
+        "UserJobSearchPreference",
+        back_populates="user",
+        uselist=False,
+        lazy="noload",
+        cascade="all, delete-orphan",
+    )
+    job_discoveries: Mapped[list["JobDiscovery"]] = relationship(
+        "JobDiscovery",
+        back_populates="user",
+        lazy="noload",
+        cascade="all, delete-orphan",
+    )
+    automation_batches: Mapped[list["ApplicationAutomationBatch"]] = relationship(
+        "ApplicationAutomationBatch",
+        back_populates="user",
+        lazy="noload",
+        cascade="all, delete-orphan",
+    )
+    application_holds: Mapped[list["ApplicationHold"]] = relationship(
+        "ApplicationHold",
         back_populates="user",
         lazy="noload",
         cascade="all, delete-orphan",
@@ -301,10 +342,10 @@ class UserProfile(Base):
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True), default=ist_now
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
     )
 
     # Relationships
@@ -369,10 +410,10 @@ class UserResumeAsset(Base):
     sha256_hex: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True), default=ist_now
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
     )
 
     user: Mapped["User"] = relationship("User", back_populates="resume_asset")
@@ -463,10 +504,10 @@ class UserWorkflowPreferences(Base):
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True), default=ist_now
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
     )
 
     # Relationship
@@ -587,10 +628,10 @@ class WorkflowSession(Base):
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True), default=ist_now
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
     )
 
     # Relationships
@@ -685,6 +726,26 @@ class JobApplication(Base):
     job_url: Mapped[str | None] = mapped_column(
         Text, nullable=True
     )  # NEW: Original job posting URL
+    portal: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    external_job_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    external_ats_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    job_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    job_description_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    job_description_captured_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    automation_batch_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("application_automation_batches.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    automation_lease_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+    automation_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
     # Match Score - store for quick access without loading full workflow
     match_score: Mapped[float | None] = mapped_column(
@@ -712,16 +773,31 @@ class JobApplication(Base):
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), index=True
+        DateTime(timezone=True), default=ist_now, index=True
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
     )
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="applications")
     workflow_session: Mapped[Optional["WorkflowSession"]] = relationship(
         "WorkflowSession", back_populates="application"
+    )
+    automation_batch: Mapped[Optional["ApplicationAutomationBatch"]] = relationship(
+        "ApplicationAutomationBatch", back_populates="applications"
+    )
+    holds: Mapped[list["ApplicationHold"]] = relationship(
+        "ApplicationHold",
+        back_populates="application",
+        lazy="noload",
+        cascade="all, delete-orphan",
+    )
+    automation_events: Mapped[list["ApplicationAutomationEvent"]] = relationship(
+        "ApplicationAutomationEvent",
+        back_populates="application",
+        lazy="noload",
+        cascade="all, delete-orphan",
     )
 
     # Constraints and Indexes
@@ -748,6 +824,16 @@ class JobApplication(Base):
             "job_title": self.job_title,
             "company_name": self.company_name,
             "job_url": self.job_url,
+            "portal": self.portal,
+            "external_job_id": self.external_job_id,
+            "external_ats_url": self.external_ats_url,
+            "job_description": self.job_description,
+            "job_description_hash": self.job_description_hash,
+            "job_description_captured_at": (
+                self.job_description_captured_at.isoformat()
+                if self.job_description_captured_at
+                else None
+            ),
             "match_score": self.match_score,
             "status": self.status,
             "applied_date": (
@@ -787,7 +873,7 @@ class ResumeVersion(Base):
         JSONB, nullable=True, default=None
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), index=True
+        DateTime(timezone=True), default=ist_now, index=True
     )
 
     user: Mapped["User"] = relationship("User", back_populates="resume_versions")
@@ -823,8 +909,23 @@ class JobFormAnswer(Base):
     )
     question: Mapped[str] = mapped_column(String(200))
     answer: Mapped[str] = mapped_column(Text)
+    normalized_question: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    field_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    sensitivity: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="standard"
+    )
+    approved_for_reuse: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    source_portal: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
+    )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), index=True
+        DateTime(timezone=True), default=ist_now, index=True
     )
 
     user: Mapped["User"] = relationship("User", back_populates="job_form_answers")
@@ -840,8 +941,147 @@ class JobFormAnswer(Base):
             "user_id": str(self.user_id),
             "question": self.question,
             "answer": self.answer,
+            "normalized_question": self.normalized_question,
+            "field_type": self.field_type,
+            "sensitivity": self.sensitivity,
+            "approved_for_reuse": self.approved_for_reuse,
+            "source_portal": self.source_portal,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class ApplicationAutomationBatch(Base):
+    """A worker-neutral group of queued application work for one user."""
+
+    __tablename__ = "application_automation_batches"
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    worker_kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="queued", index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="automation_batches")
+    applications: Mapped[list["JobApplication"]] = relationship(
+        "JobApplication", back_populates="automation_batch", lazy="noload"
+    )
+    __table_args__ = (Index("ix_automation_batch_user_status", "user_id", "status"),)
+
+
+class ApplicationHold(Base):
+    """A safe, user-resolvable blocker for exactly one application."""
+
+    __tablename__ = "application_holds"
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("job_applications.id", ondelete="CASCADE"),
+        index=True,
+    )
+    portal: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    normalized_question: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    hold_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    remediation: Mapped[str] = mapped_column(Text, nullable=False)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="open", index=True
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="application_holds")
+    application: Mapped["JobApplication"] = relationship(
+        "JobApplication", back_populates="holds"
+    )
+    __table_args__ = (Index("ix_application_hold_user_status", "user_id", "status"),)
+
+
+class ApplicationAutomationEvent(Base):
+    """Append-only safe audit metadata; never includes browser session material."""
+
+    __tablename__ = "application_automation_events"
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("job_applications.id", ondelete="CASCADE"),
+        index=True,
+    )
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("application_automation_batches.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, index=True
+    )
+
+    application: Mapped["JobApplication"] = relationship(
+        "JobApplication", back_populates="automation_events"
+    )
+
+
+class ApplicationSubmittedAnswer(Base):
+    """An exact, application-scoped answer recorded after a portal submission.
+
+    This table deliberately contains no browser-session data.  It is separate
+    from ``JobFormAnswer``, which is an answer-library entry that may be reused
+    by more than one application.
+    """
+
+    __tablename__ = "application_submitted_answers"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("job_applications.id", ondelete="CASCADE"),
+        index=True,
+    )
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    answer_source: Mapped[str] = mapped_column(String(30), nullable=False)
+    review_reasons: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    submitted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, index=True
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_submitted_answer_application_created", "application_id", "submitted_at"
+        ),
+    )
 
 
 class PortalSession(Base):
@@ -860,7 +1100,7 @@ class PortalSession(Base):
     storage_state_path: Mapped[str] = mapped_column(String(500))
 
     last_login_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True), default=ist_now
     )
 
     expires_at: Mapped[datetime | None] = mapped_column(
@@ -868,14 +1108,95 @@ class PortalSession(Base):
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True), default=ist_now
     )
 
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
     )
 
     user: Mapped["User"] = relationship("User", back_populates="portal_sessions")
+
+
+class UserJobSearchPreference(Base):
+    """Per-user job-search rules and explicitly configured public job boards."""
+
+    __tablename__ = "user_job_search_preferences"
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    primary_skills: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    secondary_skills: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    roles: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    company_tiers: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    sources: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    min_match_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.65)
+    require_review_before_apply: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
+    )
+    user: Mapped["User"] = relationship("User", back_populates="job_search_preferences")
+
+
+class JobDiscovery(Base):
+    """A deduplicated vacancy discovered from a public ATS board."""
+
+    __tablename__ = "job_discoveries"
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    source: Mapped[str] = mapped_column(String(30), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    company_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    company_tier: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    location: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    job_url: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    match_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    match_reasons: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="discovered", index=True
+    )
+    failure_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    failure_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    discovered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
+    )
+    user: Mapped["User"] = relationship("User", back_populates="job_discoveries")
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "source", "external_id", name="uq_user_job_discovery_source_id"
+        ),
+        Index("ix_discovery_user_status_score", "user_id", "status", "match_score"),
+    )
 
 
 # =============================================================================

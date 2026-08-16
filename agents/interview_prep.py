@@ -80,7 +80,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
         "preparation_time_needed": "<how long to prepare>",
         "format_prediction": "<virtual, onsite, or hybrid based on company/role>"
     }},
-    
+
     "predicted_questions": {{
         "behavioral": [
             {{
@@ -122,7 +122,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
             }}
         ]
     }},
-    
+
     "addressing_concerns": [
         {{
             "concern": "<specific concern based on profile gaps>",
@@ -133,7 +133,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
             "when_to_bring_up": "<proactively or only if asked>"
         }}
     ],
-    
+
     "questions_for_them": {{
         "for_recruiter": [
             {{
@@ -164,7 +164,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
             }}
         ]
     }},
-    
+
     "logistics": {{
         "dress_code": "<recommendation based on company culture>",
         "what_to_bring": ["<item 1>", "<item 2>"],
@@ -181,7 +181,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
             "follow_up_timeline": "<when to follow up if no response>"
         }}
     }},
-    
+
     "quick_reference_card": {{
         "elevator_pitch": "<30-second pitch tailored to this role>",
         "three_key_selling_points": [
@@ -203,7 +203,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
         }},
         "closing_statement": "<strong closing for end of interview>"
     }},
-    
+
     "day_before_checklist": [
         "<preparation task 1>",
         "<preparation task 2>",
@@ -211,7 +211,7 @@ IMPORTANT: Your response must be ONLY the JSON object below. No explanations, no
         "<preparation task 4>",
         "<preparation task 5>"
     ],
-    
+
     "confidence_boosters": [
         "<reminder of strength 1>",
         "<reminder of strength 2>",
@@ -269,6 +269,7 @@ class InterviewPrepAgent:
         profile_matching: Dict[str, Any],
         user_profile: Dict[str, Any],
         user_api_key: Optional[str] = None,
+        llm_options: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """
         Generate interview preparation materials.
@@ -310,6 +311,7 @@ class InterviewPrepAgent:
                 max_tokens=LLM_MAX_TOKENS,
                 user_api_key=self._current_user_api_key,
                 structured_output=True,
+                **(llm_options or {}),
             )
 
             # Handle filtered response

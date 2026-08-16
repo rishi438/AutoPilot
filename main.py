@@ -21,13 +21,21 @@ from fastapi.templating import Jinja2Templates
 
 from api.admin import router as admin_router
 from api.applications import router as applications_router
+from api.automation import router as automation_router
 from api.auth import router as auth_router
 from api.extension_autofill import router as extension_autofill_router
 from api.interview_prep import router as interview_prep_router
+from api.job_search import router as job_search_router
 from api.profile import router as profile_router
 from api.tools import router as tools_router
 from api.websocket import router as websocket_router
 from api.workflow import router as workflow_router
+from config.constants import (
+    CSP_SCRIPT_SOURCE_TEMPLATE,
+    CSP_STATIC_DIRECTIVES,
+    CSP_STYLE_SOURCE_TEMPLATE,
+    CSP_SWAGGER_DOCS_SCRIPT_SOURCE,
+)
 from config.settings import get_settings
 from utils.bcrypt_patch import apply_bcrypt_patch
 from utils.database import (
@@ -334,6 +342,10 @@ def create_app() -> FastAPI:
         version=settings.app_version,
         docs_url="/api/docs" if settings.debug else None,
         redoc_url="/api/redoc" if settings.debug else None,
+        openapi_url="/api/openapi.json" if settings.debug else None,
+        swagger_ui_oauth2_redirect_url=(
+            "/api/docs/oauth2-redirect" if settings.debug else None
+        ),
         lifespan=lifespan,
         default_response_class=CustomJSONResponse,
     )
@@ -408,18 +420,17 @@ def configure_middleware(app: FastAPI):
         # All inline <script> and <style> blocks across all templates carry
         # nonce="{{ request.state.csp_nonce | default('') }}", generated above before
         # call_next() so the template can embed it.
+        swagger_docs = settings.debug and request.url.path == "/api/docs"
+        script_source = (
+            CSP_SWAGGER_DOCS_SCRIPT_SOURCE
+            if swagger_docs
+            else CSP_SCRIPT_SOURCE_TEMPLATE.format(nonce=nonce)
+        )
         csp_directives = [
-            "default-src 'self'",
-            f"script-src 'self' 'nonce-{nonce}' https://cdn.jsdelivr.net "
-            "https://us-assets.i.posthog.com https://eu-assets.i.posthog.com",
-            f"style-src 'self' 'nonce-{nonce}' https://fonts.googleapis.com https://cdn.jsdelivr.net",
-            "font-src 'self' https://fonts.gstatic.com",
-            "img-src 'self' data: https:",
-            "connect-src 'self' wss: https://us.i.posthog.com https://eu.i.posthog.com",
-            "frame-src 'none'",
-            "object-src 'none'",
-            "base-uri 'self'",
-            "form-action 'self'",
+            CSP_STATIC_DIRECTIVES[0],
+            script_source,
+            CSP_STYLE_SOURCE_TEMPLATE.format(nonce=nonce),
+            *CSP_STATIC_DIRECTIVES[1:],
         ]
         if settings.is_production:
             csp_directives.append("upgrade-insecure-requests")
@@ -658,6 +669,14 @@ def include_routers(app: FastAPI):
         tags=["Job Applications"],
     )
     app.include_router(
+        automation_router,
+        prefix=f"{API_V1_PREFIX}/automation",
+        tags=["Application Automation"],
+    )
+    app.include_router(
+        job_search_router, prefix=f"{API_V1_PREFIX}/job-search", tags=["Job Search"]
+    )
+    app.include_router(
         workflow_router, prefix=f"{API_V1_PREFIX}/workflow", tags=["Workflow"]
     )
     app.include_router(
@@ -694,6 +713,18 @@ def include_routers(app: FastAPI):
         applications_router,
         prefix="/api/applications",
         tags=["Job Applications (Legacy)"],
+        include_in_schema=False,
+    )
+    app.include_router(
+        automation_router,
+        prefix="/api/automation",
+        tags=["Application Automation (Legacy)"],
+        include_in_schema=False,
+    )
+    app.include_router(
+        job_search_router,
+        prefix="/api/job-search",
+        tags=["Job Search (Legacy)"],
         include_in_schema=False,
     )
     app.include_router(
@@ -1245,6 +1276,49 @@ def add_custom_routes(app: FastAPI):
                 content="<h1>Application</h1><p>Service temporarily unavailable</p>",
                 status_code=503,
             )
+
+    @app.get("/dashboard/job/{application_id}", response_class=HTMLResponse)
+    async def saved_job_detail_page(request: Request, application_id: str):
+        """Serve the saved-job preview before a user elects to analyze it."""
+        if templates is None:
+            return HTMLResponse(
+                content="<h1>Saved job</h1><p>Service initializing...</p>",
+                status_code=503,
+            )
+        try:
+            return templates.TemplateResponse(
+                "dashboard/saved-job.html",
+                {
+                    "request": request,
+                    "app_name": settings.app_name,
+                    "application_id": application_id,
+                },
+            )
+        except Exception as e:
+            logger.error(f"Error serving saved job detail page: {e}", exc_info=True)
+            return HTMLResponse(
+                content="<h1>Saved job</h1><p>Service temporarily unavailable</p>",
+                status_code=503,
+            )
+
+    @app.get(
+        "/dashboard/application/{application_id}/audit", response_class=HTMLResponse
+    )
+    async def application_audit_page(request: Request, application_id: str):
+        """Serve the credential-free application audit page."""
+        if templates is None:
+            return HTMLResponse(
+                content="<h1>Application audit</h1><p>Service initializing...</p>",
+                status_code=503,
+            )
+        return templates.TemplateResponse(
+            "dashboard/application-audit.html",
+            {
+                "request": request,
+                "app_name": settings.app_name,
+                "application_id": application_id,
+            },
+        )
 
     # /.well-known/security.txt — standard responsible disclosure policy
     @app.get("/.well-known/security.txt", include_in_schema=False)

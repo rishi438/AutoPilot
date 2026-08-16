@@ -546,9 +546,9 @@ class WorkExperienceItem(BaseModel):
 
     @field_validator("is_current")
     @classmethod
-    def validate_is_current(cls, v: bool, values: dict) -> bool:
+    def validate_is_current(cls, v: bool, info: ValidationInfo) -> bool:
         if v:
-            end_date = values.get("end_date")
+            end_date = info.data.get("end_date")
             if end_date and end_date.strip().lower() not in ["present", ""]:
                 raise ValueError(
                     'If this is your current position, end date should be empty or "Present"'
@@ -692,12 +692,12 @@ class EducationItem(BaseModel):
 
     @field_validator("is_current")
     @classmethod
-    def validate_edu_is_current(cls, v: bool, values: dict) -> bool:
+    def validate_edu_is_current(cls, v: bool, info: ValidationInfo) -> bool:
         """_summary_
 
         Args:
             v (bool): _description_
-            values (dict): _description_
+            info (ValidationInfo): Validated fields available to this validator.
 
         Raises:
             ValueError: _description_
@@ -706,7 +706,7 @@ class EducationItem(BaseModel):
             bool: _description_
         """
         if v:
-            end_date = values.get("end_date")
+            end_date = info.data.get("end_date")
             if end_date and str(end_date).strip():
                 raise ValueError("If currently enrolled, leave end date empty")
         return v

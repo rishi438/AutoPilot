@@ -164,7 +164,7 @@
         // This eliminates the polling delay — the page updates the instant the backend
         // fires; the 3-second poll in showProcessing() acts only as a fallback when WS
         // is unavailable (e.g. proxy stripping upgrade headers).
-        window.addEventListener('applypilot:ws', (/** @type {CustomEvent} */ e) => {
+        window.addEventListener('autopilot:ws', (/** @type {CustomEvent} */ e) => {
             const msg       = /** @type {Record<string,any>} */ (e.detail || {});
             const type      = String(msg['type']       || '');
             const sessionId = String(msg['session_id'] || '');

@@ -781,13 +781,29 @@ async def start_workflow(
                 logger.warning(f"Failed to decrypt user API key: {e}")
                 # Continue without user key - will use server default if available
 
-        # Check if we have an API key available (either user's or server's)
+        # Load workflow preferences before validating the configured provider.
+        # A user who selected Local should not need a Gemini API key.
+        prefs_result = await db.execute(
+            select(UserWorkflowPreferences).where(
+                UserWorkflowPreferences.user_id == user_id
+            )
+        )
+        prefs_row = prefs_result.scalar_one_or_none()
+        preferences = prefs_row.to_dict() if prefs_row else {}
+
+        # Check whether the selected provider is usable. Cloud needs either a
+        # user or server Gemini key; Local needs the instance endpoint/model.
         from config.settings import get_settings
 
         settings = get_settings()
         server_has_key = getattr(settings, "gemini_api_key", None) is not None
+        local_provider_configured = (
+            preferences.get("ai_provider") == "local"
+            and bool(settings.local_llm_url)
+            and bool(settings.local_llm_model)
+        )
 
-        if not user_api_key and not server_has_key:
+        if not user_api_key and not server_has_key and not local_provider_configured:
             raise no_api_key_error()
 
         # Prepare input data for workflow
@@ -802,13 +818,7 @@ async def start_workflow(
         )
 
         # Load workflow preferences and inject under the key the workflow reads
-        prefs_result = await db.execute(
-            select(UserWorkflowPreferences).where(
-                UserWorkflowPreferences.user_id == user_id
-            )
-        )
-        prefs_row = prefs_result.scalar_one_or_none()
-        user_data["application_preferences"] = prefs_row.to_dict() if prefs_row else {}
+        user_data["application_preferences"] = preferences
 
         # Get extension-specific metadata (JSON body takes priority; Form fields are the
         # extension path where request is None)

@@ -51,10 +51,10 @@ start-local:
 	@brew services start redis 2>/dev/null || true
 	@sleep 2
 	@echo "Setting up database..."
-	@psql postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='applypilot'" 2>/dev/null | grep -q 1 || \
-		psql postgres -c "CREATE ROLE applypilot WITH LOGIN PASSWORD 'applypilot';" 2>/dev/null || true
-	@psql postgres -tc "SELECT 1 FROM pg_database WHERE datname='applypilot'" 2>/dev/null | grep -q 1 || \
-		psql postgres -c "CREATE DATABASE applypilot OWNER applypilot;" 2>/dev/null || true
+	@psql postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='autopilot'" 2>/dev/null | grep -q 1 || \
+		psql postgres -c "CREATE ROLE autopilot WITH LOGIN PASSWORD 'autopilot';" 2>/dev/null || true
+	@psql postgres -tc "SELECT 1 FROM pg_database WHERE datname='autopilot'" 2>/dev/null | grep -q 1 || \
+		psql postgres -c "CREATE DATABASE autopilot OWNER autopilot;" 2>/dev/null || true
 	@echo "Running migrations..."
 	@$(MAKE) migrate
 	@echo ""

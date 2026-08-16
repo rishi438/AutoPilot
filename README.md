@@ -78,16 +78,16 @@ Three ways to run it — pick the one that suits you:
 **macOS / Linux** — `make` is pre-installed:
 
 ```bash
-git clone https://github.com/eliornl/applypilot.git
-cd applypilot
+git clone https://github.com/eliornl/autopilot.git
+cd autopilot
 make start
 ```
 
 **Windows** — install [just](https://just.systems) (`winget install Casey.Just`) instead of `make`. It works natively in PowerShell and cmd — no WSL2 needed, and **no Git for Windows / `cygpath` required** for `just start` (only Docker Desktop + `just`).
 
 ```powershell
-git clone https://github.com/eliornl/applypilot.git
-cd applypilot
+git clone https://github.com/eliornl/autopilot.git
+cd autopilot
 just start
 ```
 
@@ -113,8 +113,8 @@ make docker-reset / just docker-reset  # stop and wipe all data
 **What you need:** macOS. No Docker, no manual installs — `make start-local` installs everything it needs (Homebrew, Python 3, Node.js, PostgreSQL, Redis) automatically on the first run. If Homebrew isn't installed yet, you'll be prompted for your **sudo password** once in the terminal — this is normal and required to install Homebrew.
 
 ```bash
-git clone https://github.com/eliornl/applypilot.git
-cd applypilot
+git clone https://github.com/eliornl/autopilot.git
+cd autopilot
 make start-local
 ```
 
@@ -145,16 +145,16 @@ Use this if you already have PostgreSQL and Redis running (any platform, any set
 macOS / Linux:
 
 ```bash
-git clone https://github.com/eliornl/applypilot.git
-cd applypilot
+git clone https://github.com/eliornl/autopilot.git
+cd autopilot
 make setup          # creates venv, installs deps, builds frontend, generates .env
 ```
 
 Windows — install [just](https://just.systems) (`winget install Casey.Just`) first:
 
 ```powershell
-git clone https://github.com/eliornl/applypilot.git
-cd applypilot
+git clone https://github.com/eliornl/autopilot.git
+cd autopilot
 just setup
 ```
 
@@ -163,20 +163,20 @@ just setup
 Connect to PostgreSQL as a superuser (usually `postgres`) and run:
 
 ```sql
-CREATE USER applypilot WITH PASSWORD 'applypilot';
-CREATE DATABASE applypilot OWNER applypilot;
+CREATE USER autopilot WITH PASSWORD 'autopilot';
+CREATE DATABASE autopilot OWNER autopilot;
 ```
 
 You can run these with `psql -U postgres` or any PostgreSQL client (pgAdmin, TablePlus, etc.).
 
-> **Tip:** Using `applypilot` as the password matches the default in `.env` — you can skip Step 3 entirely. If you choose a different password, update `DATABASE_URL` in Step 3.
+> **Tip:** Using `autopilot` as the password matches the default in `.env` — you can skip Step 3 entirely. If you choose a different password, update `DATABASE_URL` in Step 3.
 
 **Step 3 — Edit `.env` with your connection strings** _(skip if you used the default password above)_
 
 Open `.env` and update `DATABASE_URL` to match the password you chose:
 
 ```bash
-DATABASE_URL=postgresql+asyncpg://applypilot:yourpassword@localhost:5432/applypilot
+DATABASE_URL=postgresql+asyncpg://autopilot:yourpassword@localhost:5432/autopilot
 REDIS_URL=redis://localhost:6379/0
 ```
 

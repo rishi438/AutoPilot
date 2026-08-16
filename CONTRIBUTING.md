@@ -107,15 +107,15 @@ If you discover a security issue (auth bypass, data exposure, injection, etc.), 
 
 **macOS / Linux:**
 ```bash
-git clone https://github.com/eliornl/applypilot.git
-cd applypilot
+git clone https://github.com/eliornl/autopilot.git
+cd autopilot
 make start
 ```
 
 **Windows** — install [`just`](https://just.systems) (`winget install Casey.Just`), then:
 ```powershell
-git clone https://github.com/eliornl/applypilot.git
-cd applypilot
+git clone https://github.com/eliornl/autopilot.git
+cd autopilot
 just start
 ```
 
@@ -138,8 +138,8 @@ make docker-reset / just docker-reset  # stop + wipe all data
 One command installs PostgreSQL and Redis via Homebrew, creates the database, and starts the app:
 
 ```bash
-git clone https://github.com/eliornl/applypilot.git
-cd applypilot
+git clone https://github.com/eliornl/autopilot.git
+cd autopilot
 make start-local
 ```
 
@@ -156,8 +156,8 @@ make dev            # restart just the app (services already running)
 Use this if you already have PostgreSQL and Redis running. **Windows users:** use `just` instead of `make` (`winget install Casey.Just`).
 
 ```bash
-git clone https://github.com/eliornl/applypilot.git
-cd applypilot
+git clone https://github.com/eliornl/autopilot.git
+cd autopilot
 make setup       # or: just setup   (Windows)
 ```
 

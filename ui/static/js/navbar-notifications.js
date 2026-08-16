@@ -11,16 +11,16 @@
  *      the user is browsing another page. No polling needed.
  *
  * localStorage keys:
- *   applypilot_tracked_sessions  — [{sessionId}] added on submit, removed on completion
- *   applypilot_badge             — '1' while a completed analysis hasn't been toasted yet
- *   applypilot_notified_analyses — managed by dashboard-home.js; read-only here
+ *   autopilot_tracked_sessions  — [{sessionId}] added on submit, removed on completion
+ *   autopilot_badge             — '1' while a completed analysis hasn't been toasted yet
+ *   autopilot_notified_analyses — managed by dashboard-home.js; read-only here
  */
 (function () {
     'use strict';
 
-    var TRACKED_KEY  = 'applypilot_tracked_sessions';
-    var BADGE_KEY    = 'applypilot_badge';
-    var NOTIFIED_KEY = 'applypilot_notified_analyses';
+    var TRACKED_KEY  = 'autopilot_tracked_sessions';
+    var BADGE_KEY    = 'autopilot_badge';
+    var NOTIFIED_KEY = 'autopilot_notified_analyses';
 
     var WS_MAX_RECONNECT = 5;
     var _ws = null;
@@ -140,7 +140,7 @@
 
                 // Broadcast every WS message as a CustomEvent so other page scripts
                 // (e.g. application-detail.js) can react in real-time without polling.
-                window.dispatchEvent(new CustomEvent('applypilot:ws', { detail: msg }));
+                window.dispatchEvent(new CustomEvent('autopilot:ws', { detail: msg }));
 
                 var type      = String(msg['type']       || '');
                 var sessionId = String(msg['session_id'] || '');

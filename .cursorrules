@@ -1,6 +1,6 @@
 # Autopilot — Cursor Rules Index
 
-**Product name:** Autopilot (repo folder: `applypilot`).
+**Product name:** Autopilot (repo folder: `autopilot`).
 
 All detailed coding rules live in `.cursor/rules/`. This file is the index.
 
@@ -10,7 +10,7 @@ All detailed coding rules live in `.cursor/rules/`. This file is the index.
 
 | File | Covers |
 |------|--------|
-| `applypilot-core.mdc` | App name, error system (`APIError`/`ErrorCode`, `CFG_6xxx` no-API-key, **`RES_3002` duplicate workflow**, post-start duplicate / `uq_user_job_company`, content fingerprint NFKC + `utils/application_dedupe.py`), **`POST /workflow/start` job file uploads** (`.pdf`/`.txt`/`.docx`, 5 MB, `_JOB_FILE_MAGIC`), background task DB, **workflow failure (no partial outputs, applications list join)** |
+| `autopilot-core.mdc` | App name, error system (`APIError`/`ErrorCode`, `CFG_6xxx` no-API-key, **`RES_3002` duplicate workflow**, post-start duplicate / `uq_user_job_company`, content fingerprint NFKC + `utils/application_dedupe.py`), **`POST /workflow/start` job file uploads** (`.pdf`/`.txt`/`.docx`, 5 MB, `_JOB_FILE_MAGIC`), background task DB, **workflow failure (no partial outputs, applications list join)** |
 | `python-conventions.mdc` | Python style, file sections, FastAPI endpoint template |
 | `database-patterns.mdc` | SQLAlchemy JSONB, `flag_modified()`, soft delete, **partial indexes**, race conditions, migrations, `UserWorkflowPreferences` upsert |
 | `auth-patterns.mdc` | JWT structure, `_make_jwt`, all auth endpoints, token revocation, lockout, timing attack fix |
@@ -116,6 +116,6 @@ All detailed coding rules live in `.cursor/rules/`. This file is the index.
 69. **The `.percentile-marker` position must be set via JavaScript after `innerHTML` — never with `style="left: X%"` inside an HTML string** — set a `data-pct` attribute in the template string, then after assignment do `marker.style.left = marker.dataset['pct'] + '%'`; the inline style approach is unreliable in dynamically injected HTML.
 70. **All subpage navbars (Help, Terms, Privacy, Settings, application detail) must use `navbar_subpage.html` or identical CSS** — `.navbar` padding `1rem 0`, `.brand-icon` `36×36px / 1rem`, `.brand-text` `1.2rem`; this matches the dashboard exactly. The landing page logo also uses these same values (`landing.css`). Never let any page use a custom floating back-link element.
 71. **The Help page link in the dashboard navbar must be `/help?from=dashboard`** — the Help page reads this parameter and switches the back button to "← Back to Dashboard"; without it the button always returns to the landing page regardless of where the user came from.
-72. **`POST /api/v1/workflow/start` returns `RES_3002` (409) when the user already has a non-deleted application for the same job** — matched by canonical URL, normalized title+company, or content fingerprint (≥80 chars of normalized text); dashboard and extension must show a **warning/info** message, not a generic error; see `applypilot-core.mdc` (`RES_3002`)
+72. **`POST /api/v1/workflow/start` returns `RES_3002` (409) when the user already has a non-deleted application for the same job** — matched by canonical URL, normalized title+company, or content fingerprint (≥80 chars of normalized text); dashboard and extension must show a **warning/info** message, not a generic error; see `autopilot-core.mdc` (`RES_3002`)
 73. **`profile-setup.js` must `PUT` empty `work_experience` when “no relevant experience” is checked** — skipping the API call leaves `user_profiles.work_experience` as SQL `NULL`, so `POST /profile/complete` fails with “Work Experience” incomplete; `[]` in JSONB means the user explicitly completed step 2 with no roles (`_check_work_experience_completion` treats `NULL` as incomplete and non-null `[]` as complete).
-74. **Duplicate job after start (not only `RES_3002`)** — when start-time dedupe misses, the workflow fails after the Job Analyzer if another application already has the same normalized title+company (`utils/application_dedupe.py`, aligned with list API fallbacks); `_update_job_application_with_final_state` must not “succeed” on `uq_user_job_company` by dropping title/company (revert session + soft-delete). Dashboard `notifyReady` dedupes completion vs failure with `c:{session_id}` / `f:{session_id}` in `applypilot_notified_analyses`. See `applypilot-core.mdc` and `dashboard-home.mdc`.
+74. **Duplicate job after start (not only `RES_3002`)** — when start-time dedupe misses, the workflow fails after the Job Analyzer if another application already has the same normalized title+company (`utils/application_dedupe.py`, aligned with list API fallbacks); `_update_job_application_with_final_state` must not “succeed” on `uq_user_job_company` by dropping title/company (revert session + soft-delete). Dashboard `notifyReady` dedupes completion vs failure with `c:{session_id}` / `f:{session_id}` in `autopilot_notified_analyses`. See `autopilot-core.mdc` and `dashboard-home.mdc`.

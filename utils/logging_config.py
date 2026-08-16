@@ -25,7 +25,7 @@ from uuid import uuid4
 # Injected into every JSON log record so aggregators (DataDog, CloudWatch,
 # Splunk, ELK) can filter/group by service, version, and environment.
 _SERVICE_META: Dict[str, str] = {
-    "service": "applypilot",
+    "service": "autopilot",
     "version": "unknown",
     "environment": "development",
     "host": "",
@@ -388,7 +388,7 @@ class LoggingConfig:
         max_bytes: int = DEFAULT_MAX_BYTES,
         backup_count: int = DEFAULT_BACKUP_COUNT,
         redact_sensitive: bool = True,
-        app_name: str = "applypilot",
+        app_name: str = "autopilot",
     ):
         self.log_level = getattr(logging, log_level.upper(), logging.INFO)
         self.log_format = log_format.lower()
@@ -971,9 +971,9 @@ def setup_logging(
     max_bytes: int = DEFAULT_MAX_BYTES,
     backup_count: int = DEFAULT_BACKUP_COUNT,
     redact_sensitive: bool = True,
-    app_name: str = "applypilot",
+    app_name: str = "autopilot",
     # Service identity fields embedded in every JSON log line
-    service_name: str = "applypilot",
+    service_name: str = "autopilot",
     service_version: str = "unknown",
     environment: str = "development",
 ) -> LoggingConfig:

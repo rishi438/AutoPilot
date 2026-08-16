@@ -1276,7 +1276,7 @@ test.describe('23. Footer Details', () => {
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     const footer = page.locator('footer');
     const text = await footer.textContent();
-    expect(text).toMatch(/©|copyright|applypilot/i);
+    expect(text).toMatch(/©|copyright|autopilot/i);
   });
 
   test('footer has privacy policy link', async ({ page }) => {

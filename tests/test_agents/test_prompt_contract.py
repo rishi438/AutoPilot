@@ -140,7 +140,7 @@ def test_workflow_replaces_a_stale_local_model_with_the_instance_default(
 def _settings(**overrides: object) -> Settings:
     values = {
         "jwt_secret": "Strong-Local-Test-Secret-123456789!",
-        "database_url": "postgresql+asyncpg://user:pass@localhost/applypilot",
+        "database_url": "postgresql+asyncpg://user:pass@localhost/autopilot",
         "encryption_key": None,
         "gemini_api_key": None,
         "local_llm_url": None,

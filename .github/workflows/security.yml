@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Build the application image
-        run: docker build --tag applypilot:${{ github.sha }} .
+        run: docker build --tag autopilot:${{ github.sha }} .
       - name: Block fixable high and critical image vulnerabilities
         run: >-
           docker run --rm
@@ -33,7 +33,7 @@ jobs:
           --exit-code 1
           --severity HIGH,CRITICAL
           --ignore-unfixed
-          applypilot:${{ github.sha }}
+          autopilot:${{ github.sha }}
 
   sonarqube:
     name: SonarQube quality and code scan

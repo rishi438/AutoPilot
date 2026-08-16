@@ -1,4 +1,4 @@
-applypilot/
+auto/
 ├── job_adapters/
 │   ├── base.py                     ← abstract interface all portals must implement (login/search/apply)
 │   ├── linkedin/

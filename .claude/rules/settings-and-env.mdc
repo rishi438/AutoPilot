@@ -162,5 +162,5 @@ Set `CORS_ORIGINS` to an explicit comma-separated list of allowed origins.
 CORS_ORIGINS=http://localhost:3000,http://localhost:8000
 
 # Production (example)
-CORS_ORIGINS=https://applypilot.yourdomain.com
+CORS_ORIGINS=https://autopilot.yourdomain.com
 ```

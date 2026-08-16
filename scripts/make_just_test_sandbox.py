@@ -2,7 +2,7 @@
 """
 Create a sibling copy of the repo for safe Just / Docker tests.
 
-Default destination: <parent>/applypilot-just-sandbox
+Default destination: <parent>/autopilot-just-sandbox
   - Separate folder from your main clone
   - Fresh .env (does not touch your real .env)
   - `just start` there uses a different Docker Compose project name → separate DB volumes
@@ -34,7 +34,7 @@ _SKIP_NAMES = frozenset(
         ".env.local",
         ".coverage",
         ".DS_Store",
-        "applypilot-just-sandbox",
+        "autopilot-just-sandbox",
         "sandbox-just-test",
     }
 )
@@ -99,13 +99,13 @@ def main() -> None:
         "--dest",
         type=Path,
         default=None,
-        help="Destination directory (default: sibling applypilot-just-sandbox)",
+        help="Destination directory (default: sibling autopilot-just-sandbox)",
     )
     args = parser.parse_args()
 
     repo = Path(__file__).resolve().parent.parent
     dest = (
-        args.dest if args.dest is not None else repo.parent / "applypilot-just-sandbox"
+        args.dest if args.dest is not None else repo.parent / "autopilot-just-sandbox"
     )
 
     print(f"Source: {repo}")

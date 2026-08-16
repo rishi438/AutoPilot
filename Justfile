@@ -37,7 +37,7 @@ _create-env:
 _create-env:
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create_dotenv_if_missing.ps1
 
-# Sibling clone at ../applypilot-just-sandbox + SANDBOX_README.md (does not touch this repo's .env or DB).
+# Sibling clone at ../autopilot-just-sandbox + SANDBOX_README.md (does not touch this repo's .env or DB).
 [unix]
 sandbox-for-testing:
     {{python_cmd}} scripts/make_just_test_sandbox.py

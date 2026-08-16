@@ -101,7 +101,7 @@ This applies everywhere: login, registration, lockout, OAuth callback, password 
 setup_logging(
     log_level=settings.log_level,
     log_format="json",          # "text" for dev, "json" for prod
-    service_name="applypilot",
+    service_name="autopilot",
     service_version=settings.app_version,
     environment="production",   # or "development"
 )
@@ -124,7 +124,7 @@ Every record includes standard aggregator fields:
   "timestamp": "2026-02-23T13:24:05.123Z",
   "level": "INFO",
   "message": "POST /api/v1/workflow/start -> 202  (5ms)",
-  "service": "applypilot",
+  "service": "autopilot",
   "version": "1.0.0",
   "environment": "production",
   "host": "server-hostname",

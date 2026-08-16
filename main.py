@@ -72,8 +72,8 @@ setup_logging(
     max_bytes=settings.log_max_bytes,
     backup_count=settings.log_backup_count,
     redact_sensitive=settings.log_redact_sensitive,
-    app_name="applypilot",
-    service_name="applypilot",
+    app_name="autopilot",
+    service_name="autopilot",
     service_version=settings.app_version,
     environment="production" if settings.is_production else "development",
 )
@@ -492,7 +492,7 @@ def configure_middleware(app: FastAPI):
     # API rate limiting middleware
     @app.middleware("http")
     async def api_rate_limit_middleware(request: Request, call_next):
-        """Apply rate limiting to API endpoints."""
+        """auto rate limiting to API endpoints."""
         from utils.cache import check_rate_limit_with_headers
 
         path = str(request.url.path)

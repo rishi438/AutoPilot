@@ -1324,7 +1324,7 @@
 
                             <form id="basic-info-form">
                                 <div class="row mb-3">
-                                    <div class="col-md-4">
+                                    <div class="col-md-2">
                                         <div class="form-floating">
                                             <input
                                                 type="text"
@@ -1338,7 +1338,7 @@
                                             <label for="city">City *</label>
                                         </div>
                                     </div>
-                                    <div class="col-md-4">
+                                    <div class="col-md-2">
                                         <div class="form-floating">
                                             <input
                                                 type="text"
@@ -1352,7 +1352,7 @@
                                             <label for="state">State *</label>
                                         </div>
                                     </div>
-                                    <div class="col-md-4">
+                                    <div class="col-md-3">
                                         <div class="form-floating">
                                             <input
                                                 type="text"
@@ -1361,9 +1361,41 @@
                                                 name="country"
                                                 placeholder="Country"
                                                 autocomplete="country-name"
+                                                list="country-options"
                                                 required
                                             />
+                                            <datalist id="country-options"></datalist>
                                             <label for="country">Country *</label>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="form-floating">
+                                            <input
+                                                type="text"
+                                                class="form-control"
+                                                id="country-phone-code"
+                                                name="country_phone_code"
+                                                placeholder="Calling Code"
+                                                autocomplete="tel-country-code"
+                                                readonly
+                                                required
+                                            />
+                                            <label for="country-phone-code">Calling Code *</label>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <div class="form-floating">
+                                            <input
+                                                type="text"
+                                                class="form-control"
+                                                id="postal-code"
+                                                name="postal_code"
+                                                placeholder="Postal / PIN Code"
+                                                autocomplete="postal-code"
+                                                maxlength="32"
+                                                required
+                                            />
+                                            <label for="postal-code">Postal / PIN Code *</label>
                                         </div>
                                     </div>
                                 </div>

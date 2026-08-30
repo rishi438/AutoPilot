@@ -111,12 +111,86 @@
       if (block instanceof HTMLElement && visible(block)) return true;
     }
     if (tag === 'input' && inputType === 'file' && isResumeFileInput(el)) {
-      var resumeBlock = el.closest(
+      var resumeBlock = closestComposed(
+        el,
         'fieldset, [class*="field"], [class*="Field"], [class*="question"], [class*="application"], form, main'
       );
       if (resumeBlock instanceof HTMLElement && visible(resumeBlock)) return true;
     }
     return false;
+  }
+
+  /** Query light DOM plus every recursively reachable open shadow root. */
+  function deepQuerySelectorAll(selector, startRoot) {
+    var pending = [startRoot || document];
+    var seenRoots = new Set();
+    var seenNodes = new Set();
+    var results = [];
+    for (var ri = 0; ri < pending.length; ri++) {
+      var root = pending[ri];
+      if (!root || seenRoots.has(root) || typeof root.querySelectorAll !== 'function') continue;
+      seenRoots.add(root);
+      var matches;
+      var descendants;
+      try {
+        matches = root.querySelectorAll(selector);
+        descendants = root.querySelectorAll('*');
+      } catch (eQuery) {
+        continue;
+      }
+      for (var mi = 0; mi < matches.length; mi++) {
+        if (seenNodes.has(matches[mi])) continue;
+        seenNodes.add(matches[mi]);
+        results.push(matches[mi]);
+      }
+      if (root instanceof HTMLElement && root.shadowRoot && !seenRoots.has(root.shadowRoot)) {
+        pending.push(root.shadowRoot);
+      }
+      for (var di = 0; di < descendants.length; di++) {
+        var host = descendants[di];
+        if (host.shadowRoot && !seenRoots.has(host.shadowRoot)) pending.push(host.shadowRoot);
+      }
+    }
+    return results;
+  }
+
+  function deepQuerySelector(selector, startRoot) {
+    var matches = deepQuerySelectorAll(selector, startRoot);
+    return matches.length ? matches[0] : null;
+  }
+
+  function deepGetElementById(id) {
+    var wanted = String(id || '').trim();
+    if (!wanted) return null;
+    try {
+      return deepQuerySelector('#' + CSS.escape(wanted));
+    } catch (eSelector) {
+      var nodes = deepQuerySelectorAll('[id]');
+      for (var i = 0; i < nodes.length; i++) {
+        if (nodes[i].id === wanted) return nodes[i];
+      }
+      return null;
+    }
+  }
+
+  function composedParentElement(el) {
+    if (!(el instanceof HTMLElement)) return null;
+    if (el.parentElement instanceof HTMLElement) return el.parentElement;
+    var root = typeof el.getRootNode === 'function' ? el.getRootNode() : null;
+    return root && root.host instanceof HTMLElement ? root.host : null;
+  }
+
+  function closestComposed(el, selector) {
+    var current = el;
+    while (current instanceof HTMLElement) {
+      try {
+        if (current.matches(selector)) return current;
+      } catch (eSelector) {
+        return null;
+      }
+      current = composedParentElement(current);
+    }
+    return null;
   }
 
   /** Greenhouse and similar ATS use react-select style comboboxes (text input + listbox). */
@@ -125,7 +199,8 @@
     if (el.getAttribute('role') === 'combobox') return true;
     if (el.getAttribute('aria-haspopup') === 'listbox') return true;
     if (el.getAttribute('aria-autocomplete') === 'list') return true;
-    var parent = el.closest(
+    var parent = closestComposed(
+      el,
       '[class*="select__"], [class*="Select__"], [class*="select-control"], [class*="Select-control"], [class*="combobox"], [class*="Combobox"]'
     );
     return !!parent;
@@ -226,7 +301,7 @@
       report.minimal_pair_containers = [{ error: String(eMin && eMin.message ? eMin.message : eMin) }];
     }
     try {
-      var clickables = document.querySelectorAll(
+      var clickables = deepQuerySelectorAll(
         'button, [role="button"], [role="radio"], input[type="radio"], label'
       );
       for (var bi = 0; bi < clickables.length && report.yes_no_clickables_sample.length < 16; bi++) {
@@ -247,7 +322,7 @@
       report.yes_no_clickables_sample = [{ error: String(eClick && eClick.message ? eClick.message : eClick) }];
     }
     try {
-      var textNodes = document.querySelectorAll(
+      var textNodes = deepQuerySelectorAll(
         'label, legend, p, span, h3, h4, h5, [class*="question"], [class*="field"]'
       );
       for (var ti = 0; ti < textNodes.length && report.sponsorship_text_hits.length < 8; ti++) {
@@ -272,7 +347,7 @@
       report.sponsorship_text_hits = [{ error: String(eText && eText.message ? eText.message : eText) }];
     }
     try {
-      var groups = document.querySelectorAll('[role="radiogroup"]');
+      var groups = deepQuerySelectorAll('[role="radiogroup"]');
       for (var gi = 0; gi < groups.length && gi < 10; gi++) {
         var g = groups[gi];
         if (!(g instanceof HTMLElement) || !visible(g)) continue;
@@ -385,7 +460,7 @@
     var hiddenRoots = new Set();
     var fileInputs;
     try {
-      fileInputs = document.querySelectorAll('input[type="file"]');
+      fileInputs = deepQuerySelectorAll('input[type="file"]');
     } catch (eFiles) {
       fileInputs = [];
     }
@@ -401,7 +476,7 @@
 
     var nodes;
     try {
-      nodes = document.querySelectorAll('p, span, div, label, h2, h3, h4');
+      nodes = deepQuerySelectorAll('p, span, div, label, h2, h3, h4');
     } catch (eQuery) {
       return { hidden_sections: hiddenSections, hidden_banners: hiddenBanners };
     }
@@ -436,7 +511,7 @@
     if (!isAshbyHost()) return 0;
     var nodes;
     try {
-      nodes = document.querySelectorAll('[data-jaa-ashby-autofill-hidden="1"]');
+      nodes = deepQuerySelectorAll('[data-jaa-ashby-autofill-hidden="1"]');
     } catch (eQuery) {
       return 0;
     }
@@ -492,17 +567,17 @@
       (inp.getAttribute('data-field') || '')
     ).toLowerCase();
     if (RESUME_LABEL_RE.test(idn) || idn.indexOf('resume') >= 0) return 85;
-    var node = inp.parentElement;
-    for (var d = 0; d < 5 && node; d++) {
+    var node = composedParentElement(inp);
+    for (var d = 0; d < 6 && node; d++) {
       var chunk = containerText(node, 280);
       if (SUPPLEMENTAL_FILE_RE.test(chunk) && !RESUME_LABEL_RE.test(chunk)) return -50;
       if (COVER_LABEL_RE.test(chunk) && !RESUME_LABEL_RE.test(chunk.split(/cover/i)[0] || '')) {
         if (/cover\s*letter/i.test(chunk) && !RESUME_SECTION_RE.test(chunk)) return -100;
       }
       if (RESUME_SECTION_RE.test(chunk) || (RESUME_LABEL_RE.test(chunk) && !/cover\s*letter/i.test(chunk))) {
-        return 55 - d * 5;
+        return 65 - d * 5;
       }
-      node = node.parentElement;
+      node = composedParentElement(node);
     }
     return 0;
   }
@@ -536,7 +611,7 @@
     }
     var aria = container.getAttribute('aria-label') || container.getAttribute('aria-labelledby');
     if (aria) {
-      var byId = document.getElementById(aria);
+      var byId = deepGetElementById(aria);
       if (byId) {
         var at = (byId.innerText || '').replace(/\s+/g, ' ').trim();
         if (at) return at;
@@ -694,7 +769,7 @@
 
   function clearPreviousMarkers() {
     try {
-      document.querySelectorAll('[data-jaa-fid]').forEach(function (n) {
+      deepQuerySelectorAll('[data-jaa-fid]').forEach(function (n) {
         n.removeAttribute('data-jaa-fid');
       });
     } catch (e) {
@@ -775,7 +850,7 @@
   function findYesNoContainerForVisaSponsorship() {
     var blocks;
     try {
-      blocks = document.querySelectorAll(
+      blocks = deepQuerySelectorAll(
         '[data-jaa-control="yes_no_buttons"], [data-jaa-control="role_radio"]'
       );
     } catch (eQuery) {
@@ -839,7 +914,7 @@
 
     var buttons;
     try {
-      buttons = document.querySelectorAll(
+      buttons = deepQuerySelectorAll(
         'button, [role="button"], [role="radio"], input[type="radio"], label, [class*="toggle"], [class*="Toggle"], [class*="option"], [class*="Option"], [class*="segment"]'
       );
     } catch (eBtn) {
@@ -855,7 +930,7 @@
 
     var groups;
     try {
-      groups = document.querySelectorAll('[role="radiogroup"]');
+      groups = deepQuerySelectorAll('[role="radiogroup"]');
     } catch (eGrp) {
       return out;
     }
@@ -984,7 +1059,7 @@
     var id = el.id;
     if (id) {
       try {
-        var forLab = document.querySelector('label[for="' + CSS.escape(id) + '"]');
+        var forLab = deepQuerySelector('label[for="' + CSS.escape(id) + '"]');
         if (forLab instanceof HTMLElement) {
           var ft = (forLab.innerText || '').replace(/\s+/g, ' ').trim().replace(/\*+$/, '');
           if (ft && !isPlaceholderLikeLabel(ft, el)) return ft;
@@ -997,11 +1072,38 @@
     if (labelledBy) {
       var ids = labelledBy.split(/\s+/);
       for (var ai = 0; ai < ids.length; ai++) {
-        var ref = document.getElementById(ids[ai].trim());
+        var ref = deepGetElementById(ids[ai].trim());
         if (!(ref instanceof HTMLElement)) continue;
         var at = (ref.innerText || ref.textContent || '').replace(/\s+/g, ' ').trim().replace(/\*+$/, '');
         if (at && !isPlaceholderLikeLabel(at, el)) return at;
       }
+    }
+    var scope = composedParentElement(el);
+    for (var depth = 0; depth < 4 && scope instanceof HTMLElement; depth++) {
+      var nearbyLabels = scope.querySelectorAll('label');
+      var nearbyControls = scope.querySelectorAll('input, textarea, select');
+      if (nearbyLabels.length === 1) {
+        var onlyText = (nearbyLabels[0].innerText || nearbyLabels[0].textContent || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .replace(/\*+$/, '');
+        if (onlyText && !isPlaceholderLikeLabel(onlyText, el)) return onlyText;
+      }
+      if (nearbyLabels.length > 1 && nearbyLabels.length === nearbyControls.length) {
+        var controlIndex = Array.prototype.indexOf.call(nearbyControls, el);
+        if (controlIndex >= 0 && nearbyLabels[controlIndex]) {
+          var pairedText = (
+            nearbyLabels[controlIndex].innerText ||
+            nearbyLabels[controlIndex].textContent ||
+            ''
+          )
+            .replace(/\s+/g, ' ')
+            .trim()
+            .replace(/\*+$/, '');
+          if (pairedText && !isPlaceholderLikeLabel(pairedText, el)) return pairedText;
+        }
+      }
+      scope = composedParentElement(scope);
     }
     return '';
   }
@@ -1026,6 +1128,22 @@
   }
 
   function labelForInputEl(el) {
+    var inputType = (el && el.type ? String(el.type) : '').toLowerCase();
+    var direct = labelTextFor(el);
+    // Text/select controls commonly share a broad row wrapper. Prefer their
+    // explicit label/ARIA association so First Name cannot inherit the nearby
+    // Middle Name label (or vice versa). Group controls still use the prompt.
+    if (
+      inputType !== 'radio' &&
+      inputType !== 'checkbox' &&
+      direct &&
+      direct.length > 1 &&
+      !isPlaceholderLikeLabel(direct, el)
+    ) {
+      return direct.replace(/\*+$/, '').trim();
+    }
+    var associated = labelAssociatedWithInput(el);
+    if (associated) return associated;
     var wrap = el.closest(
       'fieldset, [role="group"], [role="radiogroup"], [class*="field"], [class*="question"], [class*="Field"], [class*="Question"]'
     );
@@ -1035,7 +1153,7 @@
         return qt.replace(/\*+$/, '').trim();
       }
     }
-    var lt = labelTextFor(el);
+    var lt = direct;
     if (lt && lt.length > 1 && !isPlaceholderLikeLabel(lt, el)) return lt;
     if (wrap instanceof HTMLElement) {
       var enriched = enrichSerializedLabel(el, {
@@ -1092,7 +1210,7 @@
     var count = 0;
     var candidates;
     try {
-      candidates = document.querySelectorAll('input, textarea, select');
+      candidates = deepQuerySelectorAll('input, textarea, select');
     } catch (e) {
       return 0;
     }
@@ -1130,7 +1248,7 @@
     var seen = new Set();
     var candidates;
     try {
-      candidates = document.querySelectorAll('input, textarea, select');
+      candidates = deepQuerySelectorAll('input, textarea, select');
     } catch (e) {
       return blocks;
     }
@@ -1242,14 +1360,22 @@
     if (isWorkAuthorizationQuestion(assignment.label_text)) {
       return isWorkAuthorizationQuestion(cl);
     }
-    return true;
+    if (!cl) return false;
+    var wanted = normalizeLabelKey(assignment.label_text);
+    var wantedStem = questionStem(assignment.label_text);
+    var actual = normalizeLabelKey(cl);
+    var actualStem = questionStem(cl);
+    return !!(
+      (wanted && actual === wanted) ||
+      (wantedStem && actualStem === wantedStem)
+    );
   }
 
   function resolveAssignmentElement(assignment) {
     if (!assignment) return null;
     var uidRaw = assignment.field_uid != null ? String(assignment.field_uid) : '';
     if (/^\d+$/.test(uidRaw)) {
-      var byFid = document.querySelector('[data-jaa-fid="' + uidRaw + '"]');
+      var byFid = deepQuerySelector('[data-jaa-fid="' + uidRaw + '"]');
       if (byFid instanceof HTMLElement && fidElementMatchesScreeningAssignment(byFid, assignment)) {
         return byFid;
       }
@@ -1285,7 +1411,9 @@
 
     var candidates;
     try {
-      candidates = document.querySelectorAll('input, textarea, select');
+      candidates = deepQuerySelectorAll(
+        'input, textarea, select, [role="combobox"], [aria-haspopup="listbox"], ng-select, mat-select'
+      );
     } catch (e) {
       return null;
     }
@@ -1300,6 +1428,14 @@
       var tag = c.tagName.toLowerCase();
       var inputType = (c.type || '').toLowerCase();
       if (tag === 'input' && SKIP_INPUT_TYPES[inputType]) continue;
+      if (
+        tag !== 'input' &&
+        tag !== 'textarea' &&
+        tag !== 'select' &&
+        c.querySelector('input, textarea, select')
+      ) {
+        continue;
+      }
 
       var cl = labelForInputEl(c);
       if (!cl) continue;
@@ -1361,7 +1497,7 @@
     add(document.body);
     var nodes;
     try {
-      nodes = document.querySelectorAll('main, [role="main"], form, section, article, div');
+      nodes = deepQuerySelectorAll('main, [role="main"], form, section, article, div');
     } catch (e) {
       return out;
     }
@@ -1434,7 +1570,7 @@
   function serializeRoleRadioGroups(fields, radioGroupsSeen) {
     var groups;
     try {
-      groups = document.querySelectorAll('[role="radiogroup"]');
+      groups = deepQuerySelectorAll('[role="radiogroup"]');
     } catch (e) {
       return;
     }
@@ -1493,6 +1629,78 @@
     if (controlKind) el.setAttribute('data-jaa-control', controlKind);
     row.field_uid = uid;
     fields.push(row);
+  }
+
+  function exactSerializedLabelSeen(fields, label) {
+    var key = normalizeLabelKey(label);
+    if (!key) return false;
+    for (var i = 0; i < fields.length; i++) {
+      if (normalizeLabelKey(fields[i] && fields[i].label_text) === key) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Discover custom selects that expose an ARIA/listbox trigger without a
+   * visible native input. This is portal-neutral and works across framework
+   * widgets (Material, ng-select, React select wrappers, and native ARIA).
+   */
+  function serializeStandaloneComboboxes(fields, labelCounts) {
+    var nodes;
+    try {
+      nodes = deepQuerySelectorAll(
+        '[role="combobox"], [aria-haspopup="listbox"], ng-select, mat-select'
+      );
+    } catch (eQuery) {
+      return;
+    }
+    for (var i = 0; i < nodes.length && fields.length < MAX_FIELDS; i++) {
+      var el = nodes[i];
+      if (!(el instanceof HTMLElement) || !visible(el) || el.closest('[inert]')) continue;
+      if (el.getAttribute('aria-disabled') === 'true' || el.hasAttribute('disabled')) continue;
+      var tag = el.tagName.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') continue;
+      var markedNative = el.querySelector('input[data-jaa-fid], textarea[data-jaa-fid], select[data-jaa-fid]');
+      if (markedNative) continue;
+      var ancestorCombo = el.parentElement && el.parentElement.closest(
+        '[role="combobox"], [aria-haspopup="listbox"], ng-select, mat-select'
+      );
+      if (ancestorCombo instanceof HTMLElement && ancestorCombo.hasAttribute('data-jaa-fid')) {
+        continue;
+      }
+      var label = labelForInputEl(el);
+      if (!label || isPlaceholderLikeLabel(label, el) || exactSerializedLabelSeen(fields, label)) {
+        continue;
+      }
+      var wrapper = el.closest(
+        'fieldset, [role="group"], [class*="field"], [class*="question"], [class*="Field"], [class*="Question"]'
+      );
+      var key = normalizeLabelKey(label);
+      var duplicateIndex = labelCounts[key] || 0;
+      labelCounts[key] = duplicateIndex + 1;
+      pushField(
+        fields,
+        el,
+        {
+          field_uid: '',
+          tag: tag,
+          input_type: 'combobox',
+          name_attr: el.getAttribute('name') || null,
+          id_attr: el.id || null,
+          label_text: label,
+          placeholder: el.getAttribute('placeholder') || null,
+          aria_label: el.getAttribute('aria-label') || null,
+          required: el.getAttribute('aria-required') === 'true' || containerLooksRequired(wrapper),
+          readonly: el.getAttribute('aria-readonly') === 'true',
+          disabled: false,
+          current_value: serializedCurrentValue(el),
+          max_length: null,
+          options: null,
+          duplicate_label_index: duplicateIndex
+        },
+        'combobox'
+      );
+    }
   }
 
   function fieldsIncludeVisaSponsorshipQuestion(fields) {
@@ -1569,7 +1777,7 @@
     try {
       var blocks;
       try {
-        blocks = document.querySelectorAll(
+        blocks = deepQuerySelectorAll(
           '[class*="field"]:not([class*="fields"]), fieldset, [data-testid*="field"], [role="group"]'
         );
       } catch (eQuery) {
@@ -1613,7 +1821,7 @@
   function findYesNoBlockForQuestionMatcher(matcher) {
     var roots;
     try {
-      roots = document.querySelectorAll(
+      roots = deepQuerySelectorAll(
         'label, legend, [class*="question"], [class*="Question"], [class*="field"], [class*="Field"], fieldset, [role="group"]'
       );
     } catch (eQuery) {
@@ -1749,7 +1957,7 @@
     }
     var nodes;
     try {
-      nodes = document.querySelectorAll(
+      nodes = deepQuerySelectorAll(
         'label, legend, p, span, h3, h4, h5, [class*="question"], [class*="Question"], [class*="field"], [class*="Field"]'
       );
     } catch (eNodes) {
@@ -1859,7 +2067,7 @@
 
   function serializeCollectOnly(warnings) {
     if (!warnings) warnings = [];
-    warnings.push('Only fields in this page document are included (not inside iframes).');
+    warnings.push('This frame scan includes light DOM and open shadow roots; closed shadow roots are inaccessible.');
     resetScanDebugTrace();
     recordScanDebugTrace('serialize_start', { ashby: isAshbyHost() });
 
@@ -1879,10 +2087,120 @@
     }
   }
 
+  /**
+   * Some multi-step portals keep inactive steps mounted and briefly report
+   * zero-sized controls during transitions. Discover the active form region
+   * from semantic/current-state markers, independent of portal or framework.
+   */
+  function serializeActiveFormRegionFallback(fields, radioGroupsSeen, labelCounts) {
+    var roots;
+    try {
+      roots = deepQuerySelectorAll(
+        '[role="tabpanel"]:not([hidden]):not([inert]):not([aria-hidden="true"]), ' +
+        '[aria-current="step"]:not([inert]), [data-state="active"]:not([inert]), ' +
+        '[class*="step"][class*="current"]:not([inert]), ' +
+        '[class*="step"][class*="active"]:not([class*="inactive"]):not([inert]), ' +
+        'form:not([hidden]):not([inert])'
+      );
+    } catch (eRoots) {
+      roots = [];
+    }
+    var root = null;
+    var bestScore = -1;
+    for (var ri = 0; ri < roots.length; ri++) {
+      var candidate = roots[ri];
+      if (!(candidate instanceof HTMLElement)) continue;
+      if (closestComposed(candidate, '[hidden], [inert], [aria-hidden="true"]')) continue;
+      var style = getComputedStyle(candidate);
+      if (style.display === 'none' || style.visibility === 'hidden') continue;
+      var controlCount = deepQuerySelectorAll('input, textarea, select', candidate).length;
+      if (!controlCount) continue;
+      var stateScore = candidate.matches(
+        '[role="tabpanel"], [aria-current="step"], [data-state="active"], ' +
+        '[class*="step"][class*="current"], ' +
+        '[class*="step"][class*="active"]:not([class*="inactive"])'
+      ) ? 1000 : 0;
+      var score = stateScore + controlCount;
+      if (score > bestScore) {
+        bestScore = score;
+        root = candidate;
+      }
+    }
+    if (!(root instanceof HTMLElement) && document.body instanceof HTMLElement) {
+      root = document.body;
+      recordScanDebugTrace('active_form_fallback_body', {
+        native_control_count: deepQuerySelectorAll('input, textarea, select', root).length
+      });
+    }
+    if (!(root instanceof HTMLElement)) return;
+    var candidates = deepQuerySelectorAll('input, textarea, select', root);
+    for (var i = 0; i < candidates.length && fields.length < MAX_FIELDS; i++) {
+      var el = candidates[i];
+      if (
+        !(el instanceof HTMLElement) ||
+        el.disabled ||
+        closestComposed(el, '[hidden], [inert], [aria-hidden="true"]')
+      ) continue;
+      var branch = el;
+      var hiddenByStyle = false;
+      while (branch instanceof HTMLElement) {
+        var branchStyle = getComputedStyle(branch);
+        if (branchStyle.display === 'none' || branchStyle.visibility === 'hidden') {
+          hiddenByStyle = true;
+          break;
+        }
+        if (branch === root) break;
+        branch = composedParentElement(branch);
+      }
+      if (hiddenByStyle) continue;
+      var tag = el.tagName.toLowerCase();
+      var inputType = (el.type || '').toLowerCase();
+      if (tag === 'input' && SKIP_INPUT_TYPES[inputType]) continue;
+      if (tag === 'input' && inputType === 'radio') {
+        var radioName = el.name || el.id || 'radio-' + i;
+        if (radioGroupsSeen[radioName]) continue;
+        radioGroupsSeen[radioName] = true;
+      }
+      var row = {
+        field_uid: '',
+        tag: tag,
+        input_type: tag === 'input' ? inputType : tag,
+        name_attr: el.name || null,
+        id_attr: el.id || null,
+        label_text: labelForInputEl(el),
+        placeholder: el.getAttribute('placeholder') || null,
+        aria_label: el.getAttribute('aria-label') || null,
+        required: !!el.required,
+        readonly: !!el.readOnly,
+        disabled: !!el.disabled,
+        current_value: inputType === 'file' ? null : serializedCurrentValue(el),
+        max_length: el.maxLength > 0 ? el.maxLength : null,
+        options: null,
+        duplicate_label_index: 0
+      };
+      row.label_text = enrichSerializedLabel(el, row);
+      if (tag === 'input' && inputType === 'file') {
+        if (isAshbyResumeAutofillInput(el) || isSupplementalFileInput(el)) continue;
+        if (!isResumeFileInput(el)) continue;
+        row.label_text = row.label_text || row.aria_label || 'Resume';
+        row.input_type = 'file';
+      }
+      if (tag === 'input' && (inputType === 'text' || inputType === 'search') && isComboboxInput(el)) {
+        row.input_type = 'combobox';
+      }
+      var labelKey = normalizeLabelKey(row.label_text);
+      if (labelKey) {
+        row.duplicate_label_index = labelCounts[labelKey] || 0;
+        labelCounts[labelKey] = row.duplicate_label_index + 1;
+      }
+      pushField(fields, el, row, row.input_type === 'combobox' ? 'combobox' : null);
+    }
+  }
+
   function serializeCollectOnlyBody(warnings) {
     var candidates = [];
     try {
-      candidates = Array.prototype.slice.call(document.querySelectorAll('input, textarea, select'));
+      candidates = deepQuerySelectorAll('input, textarea, select');
     } catch (e2) {
       return { fields: [], page_url: String(location.href || ''), warnings: warnings.concat(['Could not query form elements.']) };
     }
@@ -1907,6 +2225,9 @@
         placeholder: el.getAttribute('placeholder') || null,
         aria_label: el.getAttribute('aria-label') || null,
         required: !!el.required,
+        readonly: !!el.readOnly,
+        disabled: !!el.disabled,
+        current_value: inputType === 'file' ? null : serializedCurrentValue(el),
         max_length: el.maxLength > 0 ? el.maxLength : null,
         options: null,
         duplicate_label_index: 0
@@ -1985,10 +2306,10 @@
         var groupEls;
         try {
           groupEls = el.name
-            ? document.querySelectorAll('input[type="radio"][name="' + CSS.escape(el.name) + '"]')
+            ? deepQuerySelectorAll('input[type="radio"][name="' + CSS.escape(el.name) + '"]')
             : [el];
         } catch (eG) {
-          groupEls = document.querySelectorAll('input[type="radio"][name="' + String(el.name).replace(/"/g, '') + '"]');
+          groupEls = deepQuerySelectorAll('input[type="radio"][name="' + String(el.name).replace(/"/g, '') + '"]');
         }
         for (var gi = 0; gi < groupEls.length && gi < 12; gi++) {
           var gr = groupEls[gi];
@@ -2010,6 +2331,12 @@
 
       var controlKind = row.input_type === 'combobox' ? 'combobox' : null;
       pushField(fields, el, row, controlKind);
+    }
+
+    serializeStandaloneComboboxes(fields, labelCounts);
+
+    if (!fields.length) {
+      serializeActiveFormRegionFallback(fields, radioGroupsSeen, labelCounts);
     }
 
     if (fields.length < MAX_FIELDS) {
@@ -2131,6 +2458,16 @@
       if (String(o.text).toLowerCase().trim() === lower || String(o.value).toLowerCase() === lower) {
         el.selectedIndex = i;
         setNativeValue(el, o.value);
+        return true;
+      }
+    }
+    // ATS portals often use a machine value or slightly different display
+    // text (for example, "Citizen of India" vs "Citizen (India)").
+    for (var j = 0; j < el.options.length; j++) {
+      var candidate = el.options[j];
+      if (comboboxOptionMatches(candidate.text, v) || comboboxOptionMatches(candidate.value, v)) {
+        el.selectedIndex = j;
+        setNativeValue(el, candidate.value);
         return true;
       }
     }
@@ -2295,7 +2632,7 @@
     closeAllComboboxMenus();
     var expanded;
     try {
-      expanded = document.querySelectorAll('input[aria-expanded="true"], [role="combobox"][aria-expanded="true"]');
+      expanded = deepQuerySelectorAll('input[aria-expanded="true"], [role="combobox"][aria-expanded="true"]');
     } catch (eQuery) {
       expanded = [];
     }
@@ -2303,7 +2640,7 @@
       closeComboboxMenu(expanded[i]);
     }
     try {
-      var anchor = document.querySelector('h1, h2, form legend, [class*="application"]');
+      var anchor = deepQuerySelector('h1, h2, form legend, [class*="application"]');
       if (anchor instanceof HTMLElement) {
         anchor.dispatchEvent(
           new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window })
@@ -2319,16 +2656,43 @@
 
   function comboboxSelectedText(el) {
     if (!(el instanceof HTMLElement)) return '';
+    var ariaValue = el.getAttribute('aria-valuetext');
+    if (ariaValue && ariaValue.trim()) return ariaValue.trim();
     var root = el.closest(
-      '[class*="select__container"], [class*="select__control"], [class*="Select"], [class*="select"]'
+      '[role="combobox"], [aria-haspopup="listbox"], ng-select, mat-select, [class*="select__container"], [class*="select__control"], [class*="Select"], [class*="select"]'
     );
     if (root instanceof HTMLElement) {
       var sv = root.querySelector(
-        '[class*="single-value"], [class*="SingleValue"], [class*="select__single-value"]'
+        '[class*="single-value"], [class*="SingleValue"], [class*="selected-value"], [class*="SelectedValue"], [class*="select__single-value"], .ng-value-label, .mat-select-value-text, .mat-mdc-select-value-text'
       );
       if (sv) return normalizeBtnText(sv);
     }
-    return normalizeBtnText(el);
+    var tag = el.tagName.toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+      return 'value' in el ? String(el.value || '').trim() : '';
+    }
+    var displayed = normalizeBtnText(el);
+    var label = labelForInputEl(el);
+    if (displayed && label) {
+      var labelPattern = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      displayed = displayed.replace(new RegExp('^\\s*' + labelPattern + '\\s*', 'i'), '').trim();
+    }
+    return displayed;
+  }
+
+  function isEmptyComboboxDisplay(value) {
+    return /^(select|choose|start typing|search)(?:\s+.+)?(?:\.{1,3})?$/i.test(
+      String(value || '').trim()
+    );
+  }
+
+  function serializedCurrentValue(el) {
+    if (!(el instanceof HTMLElement)) return '';
+    if (isComboboxInput(el)) {
+      var selected = comboboxSelectedText(el);
+      if (selected && !isEmptyComboboxDisplay(selected)) return selected;
+    }
+    return 'value' in el ? String(el.value || '').trim() : '';
   }
 
   function comboboxShowsValue(el, value) {
@@ -2354,7 +2718,7 @@
     }
     var expanded;
     try {
-      expanded = document.querySelectorAll(
+      expanded = deepQuerySelectorAll(
         'input[aria-expanded="true"], [role="combobox"][aria-expanded="true"]'
       );
     } catch (eQuery) {
@@ -2380,14 +2744,14 @@
     if (!(el instanceof HTMLElement)) return null;
     var controlsId = el.getAttribute('aria-controls');
     if (controlsId) {
-      var node = document.getElementById(controlsId);
+      var node = deepGetElementById(controlsId);
       if (node instanceof HTMLElement) return node;
     }
     var owns = el.getAttribute('aria-owns');
     if (owns) {
       var parts = owns.split(/\s+/);
       for (var oi = 0; oi < parts.length; oi++) {
-        var owned = document.getElementById(parts[oi].trim());
+        var owned = deepGetElementById(parts[oi].trim());
         if (owned instanceof HTMLElement) return owned;
       }
     }
@@ -2402,7 +2766,7 @@
   }
 
   function comboboxOptionSelector() {
-    return '[role="option"], .select__option, [class*="select__option"], [class*="Select-option"]';
+    return '[role="option"], [role="menuitem"], [role="treeitem"], .select__option, [class*="select__option"], [class*="Select-option"], .ng-option, .mat-option, .mat-mdc-option';
   }
 
   function findComboboxOptionsForElement(el) {
@@ -2410,31 +2774,23 @@
     var out = [];
     var seenText = new Set();
     var listbox = comboboxListboxForInput(el);
-    if (!listbox) {
-      var allLb;
-      try {
-        allLb = document.querySelectorAll('[role="listbox"]');
-      } catch (eAll) {
-        allLb = [];
-      }
-      var visibleLb = [];
-      for (var li = 0; li < allLb.length; li++) {
-        if (allLb[li] instanceof HTMLElement && visible(allLb[li])) {
-          visibleLb.push(allLb[li]);
-        }
-      }
-      if (visibleLb.length === 1) {
-        listbox = visibleLb[0];
-      }
-    }
     var roots = [];
     if (listbox instanceof HTMLElement) {
       roots.push(listbox);
     } else {
+      var allLb;
+      try {
+        allLb = deepQuerySelectorAll('[role="listbox"], [role="menu"], .cdk-overlay-pane');
+      } catch (eAll) {
+        allLb = [];
+      }
+      for (var li = allLb.length - 1; li >= 0; li--) {
+        if (allLb[li] instanceof HTMLElement && visible(allLb[li])) roots.push(allLb[li]);
+      }
       var local = el.closest(
-        '[class*="select__container"], [class*="select__control"], [class*="Select"], [class*="select"]'
+        '[role="combobox"], [aria-haspopup="listbox"], ng-select, mat-select, [class*="select__container"], [class*="select__control"], [class*="Select"], [class*="select"]'
       );
-      if (local instanceof HTMLElement) roots.push(local);
+      if (local instanceof HTMLElement && roots.indexOf(local) < 0) roots.push(local);
     }
     for (var ri = 0; ri < roots.length; ri++) {
       var nodes;
@@ -2453,22 +2809,45 @@
         out.push({ el: n, text: t });
       }
     }
+    if (!out.length) {
+      var globalOptions;
+      try {
+        globalOptions = deepQuerySelectorAll(comboboxOptionSelector());
+      } catch (eGlobal) {
+        globalOptions = [];
+      }
+      for (var gi = 0; gi < globalOptions.length; gi++) {
+        var option = globalOptions[gi];
+        if (!(option instanceof HTMLElement) || !visible(option)) continue;
+        var optionText = normalizeBtnText(option);
+        if (!optionText || isNoOptionsPlaceholder(optionText) || seenText.has(optionText)) continue;
+        seenText.add(optionText);
+        out.push({ el: option, text: optionText });
+      }
+    }
     return out;
   }
 
   function openComboboxMenu(el) {
     if (!(el instanceof HTMLElement)) return;
     var clickTarget = el;
-    var wrap = el.closest(
-      '[class*="select__control"], [class*="select-control"], [class*="Select-control"]'
+    var comboRoot = el.closest(
+      '[role="combobox"], [aria-haspopup="listbox"], ng-select, mat-select, [class*="select__container"], [class*="select__control"], [class*="Select-control"], [class*="select-control"]'
     );
-    if (wrap instanceof HTMLElement) clickTarget = wrap;
+    var materialTrigger = comboRoot && comboRoot.querySelector(
+      '.mat-select-trigger, .mat-mdc-select-trigger, .ng-select-container, [class*="select__control"], button[aria-haspopup="menu"], button[aria-haspopup="listbox"], [role="button"]'
+    );
+    if (materialTrigger instanceof HTMLElement) clickTarget = materialTrigger;
+    else if (comboRoot instanceof HTMLElement && comboRoot !== el && el.tagName.toLowerCase() !== 'input') {
+      clickTarget = comboRoot;
+    }
     try {
       el.focus();
     } catch (eFocus) {
       /* ignore */
     }
     clickChoiceElement(clickTarget);
+    if (el.getAttribute('aria-expanded') !== 'true') dispatchComboboxKey(el, 'ArrowDown');
   }
 
   function isNoOptionsPlaceholder(text) {
@@ -2509,7 +2888,7 @@
               setTimeout(resolve, 0);
             });
           }
-          var el = document.querySelector('[data-jaa-fid="' + String(field.field_uid) + '"]');
+          var el = deepQuerySelector('[data-jaa-fid="' + String(field.field_uid) + '"]');
           if (!(el instanceof HTMLElement)) {
             return new Promise(function (resolve) {
               setTimeout(resolve, 80);
@@ -2771,7 +3150,7 @@
     if (!out.length) {
       var nodes;
       try {
-        nodes = document.querySelectorAll('[role="option"]');
+        nodes = deepQuerySelectorAll('[role="option"]');
       } catch (eAll) {
         nodes = [];
       }
@@ -3102,6 +3481,11 @@
       if (prefixIdx < 0 || prefixIdx >= prefixes.length) return '';
       return prefixes[prefixIdx];
     }
+    if (/\bcitizenship\b/i.test(String(labelText || ''))) {
+      if (attempt === 0) return '';
+      var country = String(value || '').match(/\(([^)]+)\)/);
+      return country && country[1] ? country[1].trim() : String(value || '').trim();
+    }
     if (shouldUseComboboxFilter(labelText, null, value)) {
       prefixes = [comboboxFilterPrefix(value, labelText)];
     }
@@ -3114,6 +3498,7 @@
     if (isDegreeFieldLabel(labelText)) {
       return Math.max(3, degreeFilterPrefixes(value).length + 1);
     }
+    if (/\bcitizenship\b/i.test(String(labelText || ''))) return 5;
     return 3;
   }
 
@@ -3382,7 +3767,7 @@
       if (txt.toLowerCase() !== lower) continue;
       clickChoiceElement(node);
       if (node.htmlFor) {
-        var linked = document.getElementById(node.htmlFor);
+        var linked = deepGetElementById(node.htmlFor);
         if (linked && linked.type === 'radio') clickChoiceElement(linked);
       }
       var nested = node.querySelector('input[type="radio"]');
@@ -3398,9 +3783,9 @@
     var group = [];
     if (name) {
       try {
-        group = document.querySelectorAll('input[type="radio"][name="' + CSS.escape(name) + '"]');
+        group = deepQuerySelectorAll('input[type="radio"][name="' + CSS.escape(name) + '"]');
       } catch (e) {
-        group = document.querySelectorAll(
+        group = deepQuerySelectorAll(
           'input[type="radio"][name="' + name.replace(/"/g, '') + '"]'
         );
       }
@@ -3456,6 +3841,74 @@
     }
   }
 
+  /** Find an exact, visible menu choice in portals that do not use role=option. */
+  function findVisibleExactTextChoice(target) {
+    var want = String(target || '').toLowerCase().trim();
+    if (!want) return null;
+    var roots;
+    try {
+      roots = deepQuerySelectorAll(
+        '[role="listbox"], [role="menu"], [aria-modal="true"], .cdk-overlay-pane, ' +
+        '[class*="menu"][class*="open"], [class*="dropdown"][class*="open"], ' +
+        '[class*="option-list"], [class*="options"]'
+      );
+    } catch (eQuery) {
+      return null;
+    }
+    var best = null;
+    var bestScore = -1;
+    for (var ri = 0; ri < roots.length; ri++) {
+      var root = roots[ri];
+      if (!(root instanceof HTMLElement) || !visible(root)) continue;
+      var nodes;
+      try {
+        nodes = root.querySelectorAll(
+          '[role="option"], [role="menuitem"], [role="treeitem"], li, button, div, span'
+        );
+      } catch (eNodes) {
+        continue;
+      }
+      for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+        if (!(node instanceof HTMLElement) || !visible(node)) continue;
+        if (normalizeBtnText(node).toLowerCase().trim() !== want) continue;
+        var role = node.getAttribute('role') || '';
+        var actionable = /^(option|menuitem|treeitem|button)$/.test(role) ||
+          /^(LI|BUTTON)$/.test(node.tagName);
+        var score = (actionable ? 100 : 0) - node.querySelectorAll('*').length;
+        if (score > bestScore) {
+          bestScore = score;
+          best = node;
+        }
+      }
+    }
+    return best;
+  }
+
+  function findVisibleMenuItemExactText(target) {
+    var want = String(target || '').toLowerCase().trim();
+    if (!want) return null;
+    var nodes = deepQuerySelectorAll('[role="menuitem"]');
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      if (node instanceof HTMLElement && visible(node) && normalizeBtnText(node).toLowerCase().trim() === want) {
+        return node;
+      }
+    }
+    return null;
+  }
+
+  function hoverChoiceElement(el) {
+    if (!(el instanceof HTMLElement)) return;
+    try {
+      el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, view: window }));
+      el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, view: window }));
+      el.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, view: window }));
+    } catch (eHover) {
+      /* ignore */
+    }
+  }
+
   function resolveYesNoContainerForAssignment(assignment) {
     if (!assignment) return null;
     var label = assignment.label_text ? String(assignment.label_text) : '';
@@ -3464,7 +3917,7 @@
     var wantExact = normalizeLabelKey(label);
     var blocks;
     try {
-      blocks = document.querySelectorAll(
+      blocks = deepQuerySelectorAll(
         '[data-jaa-control="yes_no_buttons"], [data-jaa-control="role_radio"]'
       );
     } catch (eQuery) {
@@ -3716,6 +4169,14 @@
     return 0;
   }
 
+  /** Apply dependent contact controls before values that may be rerendered. */
+  function contactAssignmentSortRank(assignment) {
+    var label = normalizeLabelKey(assignment && assignment.label_text);
+    if (/\bcountry\s+code\b/.test(label)) return -20;
+    if (/\b(phone|mobile|telephone|cell)\b/.test(label)) return 20;
+    return 0;
+  }
+
   function assignmentSortRank(el) {
     if (!(el instanceof HTMLElement)) return 50;
     var control = el.getAttribute('data-jaa-control') || '';
@@ -3727,6 +4188,19 @@
     if (tag === 'input' && inputType === 'file') return 100;
     if (tag === 'input' && inputType === 'radio') return 80;
     return 10;
+  }
+
+  function textControlShowsValue(el, value, labelText) {
+    if (!(el instanceof HTMLElement) || !('value' in el)) return false;
+    var actual = String(el.value || '').trim();
+    var target = String(value || '').trim();
+    if (actual === target) return true;
+    if (/\b(phone|mobile|telephone|cell)\b/i.test(String(labelText || ''))) {
+      var actualDigits = actual.replace(/\D/g, '');
+      var targetDigits = target.replace(/\D/g, '');
+      return !!actualDigits && actualDigits === targetDigits;
+    }
+    return false;
   }
 
   function shouldUseYesNoComboboxPath(value, labelText, el) {
@@ -3884,11 +4358,52 @@
             openComboboxMenu(el);
           }
           var readDelay = prefix ? Math.min(delay, 220) : delay;
+          if (/\bcitizenship\b/i.test(String(labelText || ''))) {
+            readDelay = Math.max(readDelay, 650);
+          }
           setTimeout(function () {
             var options = findComboboxOptionsForElement(el);
-            var pickedEl =
-              pickAcknowledgementComboboxOptionEl(options, value, labelText) ||
-              tryPickComboboxOptionForTargets(options, value, labelText);
+            var isCitizenship = /\bcitizenship\b/i.test(String(labelText || ''));
+            var pickedEl = isCitizenship
+              ? null
+              : (pickAcknowledgementComboboxOptionEl(options, value, labelText) ||
+                tryPickComboboxOptionForTargets(options, value, labelText) ||
+                findVisibleExactTextChoice(value));
+            // Some hierarchical citizenship pickers require choosing the
+            // country parent before the "Citizen (Country)" child option.
+            if (!pickedEl && isCitizenship) {
+              var countryMatch = String(value || '').match(/\(([^)]+)\)/);
+              var country = countryMatch && countryMatch[1] ? countryMatch[1].trim() : '';
+              var parent = country
+                ? (findVisibleMenuItemExactText(country) || tryPickComboboxOption(options, country, labelText))
+                : null;
+              if (parent) {
+                // Angular Material's nested menu opens reliably on click;
+                // hover alone only highlights the country item.
+                clickChoiceElement(parent);
+                setTimeout(function () {
+                  var childOptions = findComboboxOptionsForElement(el);
+                  var child =
+                    findVisibleMenuItemExactText(value) ||
+                    tryPickComboboxOptionForTargets(childOptions, value, labelText);
+                  if (!child) {
+                    if (attempt < maxAttempts - 1) {
+                      tryOnce(attempt + 1).then(resolve);
+                    } else {
+                      dismissOpenSelectMenus();
+                      resolve(false);
+                    }
+                    return;
+                  }
+                  clickChoiceElement(child);
+                  setTimeout(function () {
+                    dismissOpenSelectMenus();
+                    resolve(comboboxShowsValue(el, value) || comboboxHasRealSelection(el));
+                  }, 350);
+                }, 220);
+                return;
+              }
+            }
             if (!pickedEl && attempt < maxAttempts - 1) {
               tryOnce(attempt + 1).then(resolve);
               return;
@@ -3953,7 +4468,7 @@
       var detail = {
         field_uid: a && a.field_uid,
         label_text: a && a.label_text ? String(a.label_text).slice(0, 200) : '',
-        value: a && a.value != null ? String(a.value).slice(0, 120) : '',
+        value: a && a.value != null ? '[redacted]' : '',
         ok: false,
         reason: ''
       };
@@ -4078,7 +4593,7 @@
           finish(applyCheckbox(el, val), 'checkbox_apply_failed');
         } else {
           setNativeValue(el, val);
-          finish(true, '');
+          finish(textControlShowsValue(el, val, a.label_text), 'text_value_not_committed');
         }
       } catch (e) {
         detail.reason = 'exception';
@@ -4095,7 +4610,7 @@
     var detail = {
       field_uid: a && a.field_uid,
       label_text: a && a.label_text ? String(a.label_text).slice(0, 200) : '',
-      value: a && a.value != null ? String(a.value).slice(0, 120) : '',
+      value: a && a.value != null ? '[redacted]' : '',
       ok: false,
       reason: ''
     };
@@ -4139,7 +4654,7 @@
         if (!ok) detail.reason = 'checkbox_apply_failed';
       } else {
         setNativeValue(el, val);
-        ok = true;
+        ok = textControlShowsValue(el, val, a.label_text);
       }
       if (ok) detail.ok = true;
       else if (!detail.reason) detail.reason = 'apply_failed';
@@ -4189,6 +4704,13 @@
           details.push(detail);
           if (detail.ok) applied++;
           else failed++;
+          // Country/nationality selections can rebuild a dependent citizenship
+          // dropdown asynchronously. Wait before resolving the next assignment.
+          if (/\b(nationality|country\s+code)\b/i.test(String(a.label_text || ''))) {
+            return new Promise(function (resolve) {
+              setTimeout(resolve, 650);
+            });
+          }
         });
       })(assignments[i]);
     }
@@ -4222,6 +4744,9 @@
       });
     }
     remapped.sort(function (x, y) {
+      var contactX = contactAssignmentSortRank(x);
+      var contactY = contactAssignmentSortRank(y);
+      if (contactX !== contactY) return contactX - contactY;
       var eduX = educationAssignmentSortRank(x);
       var eduY = educationAssignmentSortRank(y);
       if (eduX !== eduY) return eduX - eduY;
@@ -4270,6 +4795,9 @@
   function applyAssignmentsWithRematchBodyAsync(assignments, fresh) {
     var prep = applyAssignmentsWithRematchBody(assignments, fresh);
     var sorted = prep.remapped.slice().sort(function (x, y) {
+      var contactX = contactAssignmentSortRank(x);
+      var contactY = contactAssignmentSortRank(y);
+      if (contactX !== contactY) return contactX - contactY;
       var eduX = educationAssignmentSortRank(x);
       var eduY = educationAssignmentSortRank(y);
       if (eduX !== eduY) return eduX - eduY;
@@ -4345,7 +4873,7 @@
   function scrollEducationSectionIntoView() {
     var nodes;
     try {
-      nodes = document.querySelectorAll('h1, h2, h3, h4, h5, h6, label, legend, p, span, div');
+      nodes = deepQuerySelectorAll('h1, h2, h3, h4, h5, h6, label, legend, p, span, div');
     } catch (e) {
       return;
     }
@@ -4372,7 +4900,7 @@
   function findEducationAddAnotherLink() {
     var links;
     try {
-      links = document.querySelectorAll('a, button, [role="button"]');
+      links = deepQuerySelectorAll('a, button, [role="button"]');
     } catch (e) {
       return null;
     }
@@ -4513,8 +5041,34 @@
     return /failed to upload/i.test(text);
   }
 
+  function bestResumeFileInput() {
+    var inputs;
+    try {
+      inputs = deepQuerySelectorAll('input[type="file"]');
+    } catch (eQuery) {
+      inputs = [];
+    }
+    var bestInp = null;
+    var bestScore = 49;
+    for (var i = 0; i < inputs.length; i++) {
+      var cand = inputs[i];
+      if (isAshbyHost() && isAshbyResumeAutofillInput(cand)) continue;
+      var score = resumeFileInputScore(cand);
+      if (score > bestScore) {
+        bestScore = score;
+        bestInp = cand;
+      }
+    }
+    return { element: bestInp, score: bestScore };
+  }
+
+  function probeResumeFileInput() {
+    var best = bestResumeFileInput();
+    return { found: best.element instanceof HTMLElement, score: best.score };
+  }
+
   /**
-   * Attach resume bytes to resume/CV file inputs (including hidden Greenhouse inputs).
+   * Attach resume bytes to the best matching file input, including hidden controls in open shadow roots.
    * @param {{ base64: string, filename: string, mimeType: string }} payload
    * @returns {{ attached: number, ashby_upload_failed?: boolean }}
    */
@@ -4537,23 +5091,7 @@
     } catch (e2) {
       return { attached: 0 };
     }
-    var inputs;
-    try {
-      inputs = document.querySelectorAll('input[type="file"]');
-    } catch (e3) {
-      return { attached: 0 };
-    }
-    var bestInp = null;
-    var bestScore = 49;
-    for (var j = 0; j < inputs.length; j++) {
-      var cand = inputs[j];
-      if (isAshbyHost() && isAshbyResumeAutofillInput(cand)) continue;
-      var sc = resumeFileInputScore(cand);
-      if (sc > bestScore) {
-        bestScore = sc;
-        bestInp = cand;
-      }
-    }
+    var bestInp = bestResumeFileInput().element;
     if (bestInp) {
       try {
         bestInp.scrollIntoView({ block: 'center', behavior: 'instant' });
@@ -4592,6 +5130,7 @@
   window.__jaaDebugScanAutofillFields = debugScanFields;
   /** In DevTools on the application tab: `copy(JSON.stringify(__jaaLastScanDebug, null, 2))` */
   window.__jaaLastScanDebug = null;
+  window.__jaaProbeResumeFileInput = probeResumeFileInput;
   window.__jaaAttachResumeFile = attachResumeFile;
   window.__jaaAshbyResumeUploadFailed = ashbyResumeUploadFailed;
   window.__jaaSuppressAshbyResumeAutofill = suppressAshbyResumeAutofillUI;

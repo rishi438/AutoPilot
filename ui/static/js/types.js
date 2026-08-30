@@ -59,6 +59,8 @@
  * @property {string} [city] - User's city
  * @property {string} [state] - User's state/province
  * @property {string} [country] - User's country
+ * @property {string} [country_phone_code] - Calling code derived from country
+ * @property {string} [postal_code] - User's postal or PIN code
  * @property {string} [professional_title] - Professional title
  * @property {string} [professional_summary] - Professional summary
  * @property {number} [years_experience] - Years of experience

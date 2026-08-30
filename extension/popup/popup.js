@@ -111,11 +111,11 @@ async function runExtractPageContent(tabId, options = {}) {
  */
 async function runSerializeAutofill(tabId, educationCount) {
   await chrome.scripting.executeScript({
-    target: { tabId },
+    target: { tabId, allFrames: true },
     files: [JAA_FORM_AUTOFILL_FILE]
   });
-  const [exec] = await chrome.scripting.executeScript({
-    target: { tabId },
+  const executions = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
     func: async (eduCount) => {
       var result;
       if (typeof window.__jaaSerializeAutofillFieldsAsync === 'function') {
@@ -163,7 +163,53 @@ async function runSerializeAutofill(tabId, educationCount) {
     },
     args: [typeof educationCount === 'number' ? educationCount : 0]
   });
-  return exec.result;
+  const main = executions.find(function (entry) { return entry.frameId === 0; }) || executions[0];
+  const fields = [];
+  const frameByUid = {};
+  executions.forEach(function (entry) {
+    const result = entry.result || {};
+    const frameFields = Array.isArray(result.fields) ? result.fields : [];
+    frameFields.forEach(function (field) {
+      const uid = String(fields.length);
+      fields.push({ ...field, field_uid: uid });
+      frameByUid[uid] = entry.frameId;
+    });
+  });
+  // Some Chromium builds return an empty all-frames result for a same-page
+  // Angular navigation even though the top document is accessible. Preserve
+  // the established top-document scan as a compatibility fallback.
+  if (!fields.length) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: [JAA_FORM_AUTOFILL_FILE]
+    });
+    const [fallback] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: async (eduCount) => {
+        if (typeof window.__jaaSerializeAutofillFieldsAsync === 'function') {
+          return await window.__jaaSerializeAutofillFieldsAsync(eduCount);
+        }
+        return typeof window.__jaaSerializeAutofillFields === 'function'
+          ? window.__jaaSerializeAutofillFields()
+          : { fields: [], page_url: String(location.href || '') };
+      },
+      args: [typeof educationCount === 'number' ? educationCount : 0]
+    });
+    const fallbackFields = Array.isArray(fallback?.result?.fields) ? fallback.result.fields : [];
+    fallbackFields.forEach(function (field, index) {
+      field.field_uid = String(index);
+      frameByUid[field.field_uid] = 0;
+    });
+    fields.push(...fallbackFields);
+  }
+  state.autofillFrameByUid = frameByUid;
+  return {
+    ...(main?.result || {}),
+    fields: fields,
+    warnings: executions.flatMap(function (entry) {
+      return Array.isArray(entry.result?.warnings) ? entry.result.warnings : [];
+    })
+  };
 }
 
 /**
@@ -171,13 +217,13 @@ async function runSerializeAutofill(tabId, educationCount) {
  * @param {Array<{ field_uid: string, value: string }>} assignments
  * @returns {Promise<{ applied: number, failed: number }>}
  */
-async function runApplyAutofill(tabId, assignments, educationCount) {
+async function runApplyAutofill(tabId, assignments, educationCount, frameId = 0) {
   await chrome.scripting.executeScript({
-    target: { tabId },
+    target: { tabId, frameIds: [frameId] },
     files: [JAA_FORM_AUTOFILL_FILE]
   });
   const [exec] = await chrome.scripting.executeScript({
-    target: { tabId },
+    target: { tabId, frameIds: [frameId] },
     func: async (payload) => {
       if (typeof window.__jaaApplyAutofillWithRematch === 'function') {
         return await window.__jaaApplyAutofillWithRematch(
@@ -271,6 +317,30 @@ async function suppressAshbyResumeAutofillOnTab(tabId) {
  * @returns {Promise<{ attached: number, ashby_upload_failed: boolean }>}
  */
 async function attachStoredResumeToTab(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    files: [JAA_FORM_AUTOFILL_FILE]
+  });
+  const probes = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: () => {
+      if (typeof window.__jaaProbeResumeFileInput === 'function') {
+        return window.__jaaProbeResumeFileInput();
+      }
+      return { found: false, score: -100 };
+    }
+  });
+  const target = probes
+    .filter(function (entry) { return entry.result?.found === true; })
+    .sort(function (left, right) {
+      const scoreDiff = Number(right.result?.score || -100) - Number(left.result?.score || -100);
+      if (scoreDiff !== 0) return scoreDiff;
+      if (left.frameId === 0) return -1;
+      if (right.frameId === 0) return 1;
+      return left.frameId - right.frameId;
+    })[0];
+  if (!target) return { attached: 0, ashby_upload_failed: false };
+
   const res = await fetch(`${CONFIG.API_BASE_URL}/profile/resume`, {
     headers: { Authorization: 'Bearer ' + state.token }
   });
@@ -291,12 +361,8 @@ async function attachStoredResumeToTab(tabId) {
   }
   const mimeType = blob.type || 'application/pdf';
 
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: [JAA_FORM_AUTOFILL_FILE]
-  });
   const [exec] = await chrome.scripting.executeScript({
-    target: { tabId },
+    target: { tabId, frameIds: [target.frameId] },
     func: (payload) => {
       if (typeof window.__jaaAttachResumeFile === 'function') {
         return window.__jaaAttachResumeFile(payload);
@@ -407,6 +473,11 @@ const elements = {
   authMainFlow: document.getElementById('authMainFlow'),
   primaryActionsBlock: document.getElementById('primaryActionsBlock'),
   matchProfileBtn: document.getElementById('matchProfileBtn'),
+  autofillReview: document.getElementById('autofillReview'),
+  autofillReviewContext: document.getElementById('autofillReviewContext'),
+  autofillReviewList: document.getElementById('autofillReviewList'),
+  cancelAutofillReview: document.getElementById('cancelAutofillReview'),
+  applyReviewedAutofill: document.getElementById('applyReviewedAutofill'),
   portalQueueSection: document.getElementById('portalQueueSection'),
   portalQueueSummary: document.getElementById('portalQueueSummary'),
   portalQueueList: document.getElementById('portalQueueList'),
@@ -425,7 +496,8 @@ let state = {
   detectedJob: null,
   isExtracting: false,
   isLoggingIn: false,
-  isAutofillScanning: false
+  isAutofillScanning: false,
+  pendingAutofillReview: null
 };
 
 // =============================================================================
@@ -731,6 +803,8 @@ function getInitials(name) {
 
 function exitAutofillPreview() {
   state.isAutofillScanning = false;
+  if (state.pendingAutofillReview) resolveAutofillReview(false);
+  if (elements.autofillReview) elements.autofillReview.classList.add('hidden');
   if (elements.matchProfileBtn) elements.matchProfileBtn.disabled = false;
 }
 
@@ -741,22 +815,40 @@ function exitAutofillPreview() {
  * @returns {Promise<void>}
  */
 async function applyAutofillAssignmentsToTab(tabId, mapped, scanCount, educationCount) {
-  const mapFn = mapped.map(function (a) {
-    return {
-      field_uid: a.field_uid,
-      value: a.value,
-      label_text: a.label_text || '',
+  const byFrame = new Map();
+  mapped.forEach(function (assignment) {
+    const frameId = state.autofillFrameByUid?.[assignment.field_uid] ?? 0;
+    const row = {
+      field_uid: assignment.field_uid,
+      value: assignment.value,
+      label_text: assignment.label_text || '',
       duplicate_label_index:
-        typeof a.duplicate_label_index === 'number' ? a.duplicate_label_index : 0
+        typeof assignment.duplicate_label_index === 'number' ? assignment.duplicate_label_index : 0
     };
+    const rows = byFrame.get(frameId) || [];
+    rows.push(row);
+    byFrame.set(frameId, rows);
   });
-  const result = await runApplyAutofill(tabId, mapFn, educationCount);
-  const n = result && typeof result.applied === 'number' ? result.applied : 0;
-  const f = result && typeof result.failed === 'number' ? result.failed : 0;
+  const results = await Promise.all(Array.from(byFrame.entries()).map(async function ([frameId, rows]) {
+    return await runApplyAutofill(tabId, rows, educationCount, frameId);
+  }));
+  const n = results.reduce(function (total, result) {
+    return total + (typeof result?.applied === 'number' ? result.applied : 0);
+  }, 0);
+  const f = results.reduce(function (total, result) {
+    return total + (typeof result?.failed === 'number' ? result.failed : 0);
+  }, 0);
+  const result = results.length === 1 ? results[0] : { applied: n, failed: f, frame_results: results };
+  const failedLabels = results.flatMap(function (frameResult) {
+    return Array.isArray(frameResult?.details)
+      ? frameResult.details.filter(function (detail) { return detail && !detail.ok; })
+        .map(function (detail) { return detail.label_text || 'Unknown field'; })
+      : [];
+  });
   const scanned = typeof scanCount === 'number' ? scanCount : 0;
   let msg = 'Scanned ' + scanned + ' field(s), filled ' + n + '. Review before submit.';
   if (f > 0) {
-    msg += ' (' + f + ' failed)';
+    msg += ' Failed: ' + failedLabels.slice(0, 3).join(', ');
   }
   showToast(msg, f > 0 ? 'info' : 'success', 10000);
 
@@ -790,6 +882,225 @@ async function applyAutofillAssignmentsToTab(tabId, mapped, scanCount, education
     console.debug('Autofill debug log skipped:', logErr);
   }
   return result;
+}
+
+async function savedApplicationIdForPage(pageUrl) {
+  try {
+    const response = await sendQueueMessage({ type: 'GET_PORTAL_JOB_QUEUE' });
+    const job = (response.jobs || []).find(function (candidate) {
+      return candidate && candidate.status === 'synced' && candidate.applicationId && candidate.url === pageUrl;
+    });
+    return job ? job.applicationId : null;
+  } catch (error) {
+    console.debug('Saved-job lookup skipped:', error);
+    return null;
+  }
+}
+
+function reviewAutofillAssignments(assignments, applicationId, pageUrl) {
+  if (!elements.autofillReview || !elements.autofillReviewList) {
+    return Promise.resolve(assignments);
+  }
+  elements.autofillReviewList.replaceChildren();
+  const reviewCount = assignments.length;
+  elements.autofillReviewContext.textContent = (applicationId
+    ? 'These answers are linked to your saved dashboard job.'
+    : 'This page is not a saved job.') +
+    ` ${reviewCount} answer${reviewCount === 1 ? '' : 's'} found. Scroll to review all before fields change.`;
+  assignments.forEach(function (assignment, index) {
+    const row = document.createElement('article');
+    row.className = 'autofill-review-item';
+    const accept = document.createElement('input');
+    accept.type = 'checkbox'; accept.checked = true; accept.dataset.index = String(index); accept.dataset.role = 'accept';
+    const label = document.createElement('label');
+    label.append(accept, document.createTextNode(' ' + (assignment.label_text || 'Form field')));
+    const value = document.createElement('input');
+    value.type = 'text'; value.value = assignment.value || ''; value.dataset.index = String(index);
+    value.setAttribute('aria-label', assignment.label_text || 'Proposed answer');
+    const meta = document.createElement('span');
+    meta.className = 'autofill-review-meta';
+    const reasons = Array.isArray(assignment.review_reasons) && assignment.review_reasons.length
+      ? ' · review: ' + assignment.review_reasons.join(', ')
+      : '';
+    meta.textContent = 'Source: ' + (assignment.answer_source || 'ai') + reasons;
+    const saveLabel = document.createElement('label');
+    saveLabel.className = 'autofill-review-save';
+    const isSensitive = Array.isArray(assignment.review_reasons) &&
+      assignment.review_reasons.includes('sensitive');
+    const saveForFuture = document.createElement('input');
+    saveForFuture.type = 'checkbox';
+    saveForFuture.dataset.index = String(index);
+    saveForFuture.dataset.role = 'save-for-future';
+    saveForFuture.checked = Array.isArray(assignment.review_reasons) &&
+      assignment.review_reasons.includes('needs_user_input');
+    saveLabel.append(
+      saveForFuture,
+      document.createTextNode(
+        isSensitive
+          ? ' Save securely for matching future forms'
+          : ' Save this answer for matching future forms'
+      )
+    );
+    row.append(label, value, meta, saveLabel);
+    elements.autofillReviewList.append(row);
+  });
+  elements.autofillReview.classList.remove('hidden');
+  return new Promise(function (resolve) {
+    state.pendingAutofillReview = { assignments, applicationId, pageUrl, resolve };
+  });
+}
+
+async function resolveAutofillReview(apply) {
+  const pending = state.pendingAutofillReview;
+  if (!pending) return;
+  state.pendingAutofillReview = null;
+  elements.autofillReview.classList.add('hidden');
+  if (!apply) {
+    pending.resolve([]);
+    return;
+  }
+  const reviewed = pending.assignments.flatMap(function (assignment, index) {
+    const accepted = elements.autofillReviewList.querySelector(`input[data-role="accept"][data-index="${index}"]`);
+    const value = elements.autofillReviewList.querySelector(`input[type="text"][data-index="${index}"]`);
+    if (!accepted || !accepted.checked || !value || !value.value.trim()) return [];
+    const changed = value.value !== assignment.value;
+    const reasons = Array.isArray(assignment.review_reasons) ? [...assignment.review_reasons] : [];
+    if (changed && !reasons.includes('changed_from_suggestion')) reasons.push('changed_from_suggestion');
+    return [{
+      ...assignment,
+      value: value.value,
+      answer_source: changed ? 'manual' : assignment.answer_source,
+      review_reasons: reasons,
+      save_for_future: Boolean(
+        elements.autofillReviewList.querySelector(`input[data-role="save-for-future"][data-index="${index}"]`)?.checked
+      )
+    }];
+  });
+  const reusable = reviewed.filter(function (assignment) {
+    return assignment.save_for_future;
+  });
+  if (reusable.length) {
+    let sourcePortal = null;
+    try {
+      sourcePortal = new URL(pending.pageUrl).hostname.toLowerCase().replace(/^www\./, '');
+    } catch (_) {
+      sourcePortal = null;
+    }
+    try {
+      await Promise.all(reusable.map(async function (assignment) {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/automation/answer-library`, {
+          method: 'PUT',
+          headers: {
+            Authorization: 'Bearer ' + state.token,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            question: assignment.label_text || `Field ${assignment.field_uid}`,
+            answer: assignment.value,
+            source_portal: sourcePortal
+          })
+        });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.detail || data.message || 'Could not save an answer for future forms.');
+        }
+      }));
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not save an answer for future forms.', 'error', 8000);
+      pending.resolve([]);
+      return;
+    }
+  }
+  const draftAnswers = reviewed.filter(function (assignment) {
+    return !assignment.review_reasons.includes('sensitive');
+  });
+  if (pending.applicationId && draftAnswers.length) {
+    try {
+      const response = await fetch(
+        `${CONFIG.API_BASE_URL}/automation/applications/${pending.applicationId}/draft-answers`,
+        {
+          method: 'PUT',
+          headers: {
+            Authorization: 'Bearer ' + state.token,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            answers: draftAnswers.map(function (assignment) {
+              return {
+                question: assignment.label_text || `Field ${assignment.field_uid}`,
+                answer: assignment.value,
+                answer_source: assignment.answer_source || 'ai',
+                review_reasons: assignment.review_reasons || []
+              };
+            })
+          })
+        }
+      );
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || data.message || 'Could not save reviewed answers.');
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not save reviewed answers.', 'error', 8000);
+      pending.resolve([]);
+      return;
+    }
+  }
+  pending.resolve(reviewed);
+}
+
+function isSensitivePortalField(field) {
+  const label = String(field?.label_text || '').toLowerCase();
+  return label.includes('date of birth') || label.includes('dob') ||
+    (label.includes('pan') && (label.includes('card') || label.includes('number')));
+}
+
+/**
+ * A portal can reveal DOB/PAN only after a dependent answer such as citizenship.
+ * Rescan just those newly revealed fields and retain the review gate.
+ */
+async function fillRevealedSensitivePortalFields(tabId, initialFields, educationCount, pageUrl) {
+  await new Promise(function (resolve) { setTimeout(resolve, 700); });
+  const rescanned = await runSerializeAutofill(tabId, educationCount);
+  const oldLabels = new Set(initialFields.map(function (field) {
+    return String(field?.label_text || '').trim().toLowerCase();
+  }));
+  const newSensitiveFields = (rescanned?.fields || []).filter(function (field) {
+    const label = String(field?.label_text || '').trim().toLowerCase();
+    return isSensitivePortalField(field) && !oldLabels.has(label);
+  });
+  if (!newSensitiveFields.length) return { applied: 0, failed: 0, revealed: false };
+
+  const response = await fetch(`${CONFIG.API_BASE_URL}/extension/autofill/map`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + state.token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      fields: newSensitiveFields,
+      page_url: rescanned?.page_url || pageUrl,
+      application_id: await savedApplicationIdForPage(rescanned?.page_url || pageUrl)
+    })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.message || data.detail || 'Could not map newly revealed fields.');
+  const assignments = Array.isArray(data.assignments) ? data.assignments : [];
+  if (!assignments.length) return { applied: 0, failed: 0, revealed: true };
+
+  const mapped = await reviewAutofillAssignments(assignments.map(function (assignment) {
+    return {
+      field_uid: assignment.field_uid,
+      value: assignment.value,
+      label_text: assignment.label_text,
+      answer_source: assignment.answer_source,
+      review_reasons: assignment.review_reasons,
+      duplicate_label_index: typeof assignment.duplicate_label_index === 'number'
+        ? assignment.duplicate_label_index : 0
+    };
+  }), data.application_id || null, rescanned?.page_url || pageUrl);
+  if (!mapped.length) return { applied: 0, failed: 0, revealed: true };
+  const result = await applyAutofillAssignmentsToTab(
+    tabId, mapped, newSensitiveFields.length, educationCount
+  );
+  return { ...result, revealed: true };
 }
 
 async function matchFormToProfile() {
@@ -826,11 +1137,46 @@ async function matchFormToProfile() {
     const serialized = await runSerializeAutofill(tab.id, eduCount);
     const fields = serialized && serialized.fields ? serialized.fields : [];
     if (!fields.length) {
+      try {
+        const attachment = await attachStoredResumeToTab(tab.id);
+        if (attachment.attached > 0) {
+          showToast(
+            'Resume attached. Review the upload, then click Continue yourself.',
+            'success',
+            8000
+          );
+          return;
+        }
+      } catch (resumeOnlyErr) {
+        console.debug('Resume-only attachment probe failed:', resumeOnlyErr);
+      }
       showToast(
-        'No fillable fields found on this page. If the form is inside a frame, open the apply step in the main page.',
+        'No accessible fillable fields found. Open the current apply step directly if it is inside a protected frame.',
         'info',
         8000
       );
+      return;
+    }
+
+    const onlyResumeFields = fields.every(function (field) {
+      return field && field.input_type === 'file';
+    });
+    if (onlyResumeFields) {
+      try {
+        const attachment = await attachStoredResumeToTab(tab.id);
+        if (attachment.attached > 0) {
+          showToast(
+            'Resume attached. Review the upload, then click Continue yourself.',
+            'success',
+            8000
+          );
+        } else {
+          showToast('Could not attach the stored resume. Check Profile Setup and try again.', 'info', 8000);
+        }
+      } catch (resumeOnlyErr) {
+        console.debug('Resume-only attachment failed:', resumeOnlyErr);
+        showToast('Could not attach the stored resume. Check Profile Setup and try again.', 'info', 8000);
+      }
       return;
     }
 
@@ -842,7 +1188,8 @@ async function matchFormToProfile() {
       },
       body: JSON.stringify({
         fields: fields,
-        page_url: serialized.page_url || u
+        page_url: serialized.page_url || u,
+        application_id: await savedApplicationIdForPage(serialized.page_url || u)
       })
     });
 
@@ -878,19 +1225,43 @@ async function matchFormToProfile() {
 
     const assignments = Array.isArray(data.assignments) ? data.assignments : [];
     if (!assignments.length) {
+      const hasResumeField = fields.some(function (f) {
+        return f && f.input_type === 'file' && /resume|cv/i.test(String(f.label_text || ''));
+      });
+      if (hasResumeField) {
+        try {
+          const attachment = await attachStoredResumeToTab(tab.id);
+          if (attachment.attached > 0) {
+            showToast('Resume attached. Review it before submitting.', 'success', 6000);
+          } else {
+            showToast('Could not attach the stored resume. Reload the extension and try again.', 'info', 8000);
+          }
+        } catch (resumeOnlyErr) {
+          console.debug('Resume-only attachment failed:', resumeOnlyErr);
+          showToast('Could not attach the stored resume. Reload the extension and try again.', 'info', 8000);
+        }
+        return;
+      }
       showToast('No suggestions returned. Try a different step of the form or update your profile.', 'info', 7000);
       return;
     }
 
-    const mapped = assignments.map(function (x) {
+    let mapped = assignments.map(function (x) {
       return {
         field_uid: x.field_uid,
         value: x.value,
         label_text: x.label_text,
+        answer_source: x.answer_source,
+        review_reasons: x.review_reasons,
         duplicate_label_index:
           typeof x.duplicate_label_index === 'number' ? x.duplicate_label_index : 0
       };
     });
+    mapped = await reviewAutofillAssignments(mapped, data.application_id || null, serialized.page_url || u);
+    if (!mapped.length) {
+      showToast('No answers were selected to apply.', 'info');
+      return;
+    }
     try {
       await applyAutofillAssignmentsToTab(tab.id, mapped, fields.length, eduCount);
       const apiWarnings = Array.isArray(data.warnings) ? data.warnings : [];
@@ -952,6 +1323,16 @@ async function matchFormToProfile() {
         }
       } catch (resumeAfterErr) {
         console.debug('Post-apply resume attach skipped:', resumeAfterErr);
+      }
+      try {
+        const sensitiveResult = await fillRevealedSensitivePortalFields(
+          tab.id, fields, eduCount, serialized.page_url || u
+        );
+        if (sensitiveResult.revealed && sensitiveResult.applied > 0) {
+          showToast('Newly revealed protected fields filled. Review before submitting.', 'success', 7000);
+        }
+      } catch (sensitiveRescanErr) {
+        console.debug('Sensitive portal field rescan skipped:', sensitiveRescanErr);
       }
       if (ashbyResumeUploadFailed) {
         showToast(
@@ -1307,6 +1688,12 @@ function setupEventListeners() {
 
   if (elements.matchProfileBtn) {
     elements.matchProfileBtn.addEventListener('click', () => matchFormToProfile());
+  }
+  if (elements.cancelAutofillReview) {
+    elements.cancelAutofillReview.addEventListener('click', () => resolveAutofillReview(false));
+  }
+  if (elements.applyReviewedAutofill) {
+    elements.applyReviewedAutofill.addEventListener('click', () => resolveAutofillReview(true));
   }
 
   elements.portalQueueList.addEventListener('click', (event) => {

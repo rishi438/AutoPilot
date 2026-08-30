@@ -1246,10 +1246,10 @@ async def regenerate_cover_letter(
             uuid.UUID(user_id_raw) if isinstance(user_id_raw, str) else user_id_raw
         )
 
-        # Rate limit: 5 regenerations per hour
+        # Rate limit: 10 regenerations per hour
         rate_result = await check_rate_limit_with_headers(
             identifier=f"{user_id}:regen_cover_letter",
-            limit=5,
+            limit=10,
             window_seconds=3600,
         )
         response.headers["X-RateLimit-Limit"] = str(rate_result.limit)
@@ -1257,7 +1257,7 @@ async def regenerate_cover_letter(
         response.headers["X-RateLimit-Reset"] = str(rate_result.reset_seconds)
         if not rate_result.allowed:
             raise rate_limit_error(
-                "Rate limit exceeded. Maximum 5 regenerations per hour."
+                "Rate limit exceeded. Maximum 10 regenerations per hour."
             )
 
         # Load workflow session

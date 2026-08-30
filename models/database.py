@@ -16,11 +16,13 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import (
@@ -249,6 +251,18 @@ class User(Base):
         lazy="noload",
         cascade="all, delete-orphan",
     )
+    application_draft_answers: Mapped[list["ApplicationDraftAnswer"]] = relationship(
+        "ApplicationDraftAnswer",
+        back_populates="user",
+        lazy="noload",
+        cascade="all, delete-orphan",
+    )
+    automation_worker_devices: Mapped[list["AutomationWorkerDevice"]] = relationship(
+        "AutomationWorkerDevice",
+        back_populates="user",
+        lazy="noload",
+        cascade="all, delete-orphan",
+    )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert user to dictionary for API responses."""
@@ -299,6 +313,18 @@ class UserProfile(Base):
     city: Mapped[str | None] = mapped_column(String(100), nullable=True)
     state: Mapped[str | None] = mapped_column(String(100), nullable=True)
     country: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    country_phone_code: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    postal_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    nationality: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    citizenship: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Explicitly opt-in portal details. Values are Fernet-encrypted; never expose
+    # them from `to_dict()` or include them in LLM prompts.
+    date_of_birth_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pan_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gender_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sensitive_portal_autofill_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     professional_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     years_experience: Mapped[float | None] = mapped_column(Float, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -359,6 +385,17 @@ class UserProfile(Base):
             "city": self.city,
             "state": self.state,
             "country": self.country,
+            "country_phone_code": self.country_phone_code,
+            "postal_code": self.postal_code,
+            "nationality": self.nationality,
+            "citizenship": self.citizenship,
+            "has_sensitive_portal_details": bool(
+                self.date_of_birth_encrypted
+                or self.pan_encrypted
+                or self.gender_encrypted
+            ),
+            "has_saved_gender": bool(self.gender_encrypted),
+            "sensitive_portal_autofill_enabled": self.sensitive_portal_autofill_enabled,
             "professional_title": self.professional_title,
             "years_experience": self.years_experience,
             "summary": self.summary,
@@ -740,6 +777,12 @@ class JobApplication(Base):
         nullable=True,
         index=True,
     )
+    workday_account_gate_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workday_account_gates.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     automation_lease_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True, index=True
     )
@@ -795,6 +838,12 @@ class JobApplication(Base):
     )
     automation_events: Mapped[list["ApplicationAutomationEvent"]] = relationship(
         "ApplicationAutomationEvent",
+        back_populates="application",
+        lazy="noload",
+        cascade="all, delete-orphan",
+    )
+    draft_answers: Mapped[list["ApplicationDraftAnswer"]] = relationship(
+        "ApplicationDraftAnswer",
         back_populates="application",
         lazy="noload",
         cascade="all, delete-orphan",
@@ -909,6 +958,7 @@ class JobFormAnswer(Base):
     )
     question: Mapped[str] = mapped_column(String(200))
     answer: Mapped[str] = mapped_column(Text)
+    answer_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     normalized_question: Mapped[str | None] = mapped_column(String(240), nullable=True)
     field_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     sensitivity: Mapped[str] = mapped_column(
@@ -940,7 +990,10 @@ class JobFormAnswer(Base):
             "id": str(self.id),
             "user_id": str(self.user_id),
             "question": self.question,
-            "answer": self.answer,
+            # Protected reusable values are decrypted only inside the matching
+            # service and are never exposed by generic model serialization.
+            "answer": "" if self.answer_encrypted else self.answer,
+            "protected": bool(self.answer_encrypted),
             "normalized_question": self.normalized_question,
             "field_type": self.field_type,
             "sensitivity": self.sensitivity,
@@ -948,6 +1001,50 @@ class JobFormAnswer(Base):
             "source_portal": self.source_portal,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class AutomationWorkerDevice(Base):
+    """Revocable, hashed credential for one narrowly scoped local worker."""
+
+    __tablename__ = "automation_worker_devices"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    scope: Mapped[str] = mapped_column(String(80), nullable=False)
+    token_digest: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now
+    )
+
+    user: Mapped["User"] = relationship(
+        "User", back_populates="automation_worker_devices"
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "scope IN ('workday_account_gate', 'workday_application')",
+            name="ck_worker_device_scope",
+        ),
+        Index(
+            "ix_worker_device_user_active",
+            "user_id",
+            "revoked_at",
+            "expires_at",
+        ),
+    )
 
 
 class ApplicationAutomationBatch(Base):
@@ -1080,6 +1177,335 @@ class ApplicationSubmittedAnswer(Base):
     __table_args__ = (
         Index(
             "ix_submitted_answer_application_created", "application_id", "submitted_at"
+        ),
+    )
+
+
+class ApplicationDraftAnswer(Base):
+    """Latest user-reviewed answer proposal, before portal submission."""
+
+    __tablename__ = "application_draft_answers"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("job_applications.id", ondelete="CASCADE"),
+        index=True,
+    )
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    answer_source: Mapped[str] = mapped_column(String(30), nullable=False)
+    review_reasons: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
+    )
+
+    user: Mapped["User"] = relationship(
+        "User", back_populates="application_draft_answers"
+    )
+    application: Mapped["JobApplication"] = relationship(
+        "JobApplication", back_populates="draft_answers"
+    )
+    __table_args__ = (
+        UniqueConstraint(
+            "application_id", "question", name="uq_application_draft_question"
+        ),
+        Index("ix_draft_answer_application_updated", "application_id", "updated_at"),
+    )
+
+
+class WorkdayAccountGate(Base):
+    """Private user/account/tenant gate for serialized Workday authentication."""
+
+    __tablename__ = "workday_account_gates"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    account_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    portal_scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cooldown_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    user_min_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_eligible_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "account_ref",
+            "portal_scope",
+            name="uq_workday_account_gate_identity",
+        ),
+        CheckConstraint(
+            "state IN ('open', 'cooling_down', 'probe_in_progress', "
+            "'auth_outcome_pending', 'review_required')",
+            name="ck_workday_account_gate_state",
+        ),
+        CheckConstraint(
+            "generation >= 0",
+            name="ck_workday_account_gate_generation_nonnegative",
+        ),
+    )
+
+
+class WorkdayAuthAttempt(Base):
+    """Crash-safe private lease and bounded counters for one auth attempt."""
+
+    __tablename__ = "workday_auth_attempts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    gate_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workday_account_gates.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("job_applications.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    secret_accessed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    auth_submit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    llm_repair_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "lease_token",
+            name="uq_workday_auth_attempt_lease_token",
+        ),
+        CheckConstraint(
+            "generation >= 0",
+            name="ck_workday_auth_attempt_generation_nonnegative",
+        ),
+        CheckConstraint(
+            "auth_submit_count BETWEEN 0 AND 1",
+            name="ck_workday_auth_attempt_submit_count",
+        ),
+        CheckConstraint(
+            "llm_repair_count BETWEEN 0 AND 1",
+            name="ck_workday_auth_attempt_llm_repair_count",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'completed', 'abandoned', 'review_required')",
+            name="ck_workday_auth_attempt_status",
+        ),
+        Index(
+            "uq_workday_auth_attempt_one_active_per_gate",
+            "gate_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
+
+
+class WorkdayCooldownNotice(Base):
+    """Private, deduplicated user decision for one account-lock generation."""
+
+    __tablename__ = "workday_cooldown_notices"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    gate_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workday_account_gates.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("job_applications.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    gate_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "gate_id",
+            "gate_generation",
+            name="uq_workday_cooldown_notice_generation",
+        ),
+        CheckConstraint(
+            "gate_generation >= 0",
+            name="ck_workday_cooldown_notice_generation_nonnegative",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'kept', 'extended', 'deleted')",
+            name="ck_workday_cooldown_notice_status",
+        ),
+        Index(
+            "ix_workday_cooldown_notice_application",
+            "application_id",
+        ),
+    )
+
+
+class WorkdayTransitionFamily(Base):
+    """Shared identity and mutable CURRENT pointer for transition recipes."""
+
+    __tablename__ = "workday_transition_families"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    visibility: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="shared_catalog"
+    )
+    portal_family: Mapped[str] = mapped_column(String(50), nullable=False)
+    tenant_scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    task_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    from_state_signature: Mapped[str] = mapped_column(String(128), nullable=False)
+    action_intent: Mapped[str] = mapped_column(String(80), nullable=False)
+    current_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "visibility = 'shared_catalog'",
+            name="ck_workday_transition_family_shared_visibility",
+        ),
+        UniqueConstraint(
+            "portal_family",
+            "tenant_scope",
+            "task_type",
+            "from_state_signature",
+            "action_intent",
+            name="uq_workday_transition_family_identity",
+        ),
+        ForeignKeyConstraint(
+            ["id", "current_version_id"],
+            [
+                "workday_transition_versions.family_id",
+                "workday_transition_versions.id",
+            ],
+            name="fk_workday_transition_family_current_same_family",
+            use_alter=True,
+        ),
+    )
+
+
+class WorkdayTransitionVersion(Base):
+    """Immutable shared recipe version with same-family lineage."""
+
+    __tablename__ = "workday_transition_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    family_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    parent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    safe_locator_strategy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    expected_to_state: Mapped[str] = mapped_column(String(64), nullable=False)
+    risk_class: Mapped[str] = mapped_column(String(32), nullable=False)
+    recipe_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    signature_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    executor_policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["family_id"],
+            ["workday_transition_families.id"],
+            name="fk_workday_transition_version_family",
+        ),
+        UniqueConstraint(
+            "family_id",
+            "id",
+            name="uq_workday_transition_version_family_id",
+        ),
+        UniqueConstraint(
+            "family_id",
+            "recipe_version",
+            name="uq_workday_transition_version_recipe",
+        ),
+        ForeignKeyConstraint(
+            ["family_id", "parent_version_id"],
+            [
+                "workday_transition_versions.family_id",
+                "workday_transition_versions.id",
+            ],
+            name="fk_workday_transition_version_parent_same_family",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(safe_locator_strategy) = 'object'",
+            name="ck_workday_transition_version_locator_object",
+        ),
+        CheckConstraint(
+            "risk_class IN ('navigation_only', 'auth_structure')",
+            name="ck_workday_transition_version_risk",
+        ),
+        CheckConstraint(
+            "status IN ('verified', 'quarantined', 'retired')",
+            name="ck_workday_transition_version_status",
         ),
     )
 

@@ -3,7 +3,7 @@ Configuration settings for the Autopilot.
 Manages environment variables, database connections, and application settings.
 """
 
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -64,6 +64,26 @@ class Settings(BaseSettings):
         'Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"',
     )
 
+    # Isolated portal credential vault. These values are deliberately separate
+    # from PostgreSQL and from the API-key encryption key.
+    portal_vault_enabled: bool = False
+    portal_vault_mongodb_url: SecretStr | None = Field(
+        default=None,
+        description="MongoDB URL for the isolated portal credential vault.",
+    )
+    portal_vault_mongodb_database: str = "autopilot_vault"
+    portal_vault_encryption_key: SecretStr | None = Field(
+        default=None,
+        description="Dedicated Fernet key for recoverable portal credentials.",
+    )
+    portal_vault_password_recovery_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Dedicated key for deterministic per-tenant password recovery after "
+            "vault data loss. Back this up outside MongoDB."
+        ),
+    )
+
     # Gemini Configuration
     # API key is optional - users can provide their own via BYOK (Bring Your Own Key)
     gemini_api_key: str | None = Field(
@@ -91,6 +111,10 @@ class Settings(BaseSettings):
         le=600,
         description="Timeout in seconds for requests sent to the local LLM endpoint.",
     )
+
+    # Workday transition policy
+    workday_transition_history_limit: int = Field(default=10, ge=1, le=100)
+    workday_account_lock_cooldown_hours: int = Field(default=6, ge=1, le=168)
 
     # Vertex AI Configuration (alternative backend - higher rate limits, no free tier limits)
     # Requires: gcloud auth application-default login (or GOOGLE_APPLICATION_CREDENTIALS)
@@ -204,11 +228,17 @@ class Settings(BaseSettings):
     log_redact_sensitive: bool = True
     slow_request_threshold_ms: float = 5000.0  # 5 seconds
 
-    # User resume files (on-disk; relative paths stored in user_resume_assets)
+    # User resume files. Existing filesystem paths stay readable after a MinIO switch.
     user_resume_storage_dir: str = Field(
         default="data/user_resumes",
         description="Directory for persisted resume uploads (created automatically).",
     )
+    resume_storage_backend: Literal["filesystem", "minio"] = "filesystem"
+    minio_endpoint: str | None = None
+    minio_access_key: str | None = None
+    minio_secret_key: str | None = None
+    minio_bucket: str = "autopilot-resumes"
+    minio_secure: bool = False
 
     # Session Configuration
     session_timeout: int = 3600
@@ -304,6 +334,33 @@ class Settings(BaseSettings):
             )
         return v
 
+    @field_validator(
+        "portal_vault_encryption_key", "portal_vault_password_recovery_key"
+    )
+    @classmethod
+    def validate_portal_vault_encryption_key(cls, value):
+        """Validate the vault's dedicated Fernet key without revealing it."""
+        if value is None:
+            return value
+        from cryptography.fernet import Fernet
+
+        try:
+            Fernet(value.get_secret_value().encode("ascii"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "PORTAL_VAULT_ENCRYPTION_KEY must be a valid Fernet key"
+            ) from exc
+        return value
+
+    @field_validator("portal_vault_mongodb_database")
+    @classmethod
+    def validate_portal_vault_database_name(cls, value: str) -> str:
+        """Constrain the MongoDB database name to a safe explicit identifier."""
+        normalized = value.strip()
+        if not normalized or any(char in normalized for char in '/\\. "$\x00'):
+            raise ValueError("Invalid portal vault MongoDB database name")
+        return normalized
+
     @field_validator("gemini_api_key")
     @classmethod
     def validate_gemini_api_key(cls, v):
@@ -345,6 +402,45 @@ class Settings(BaseSettings):
             if parsed.username or parsed.password:
                 raise ValueError("LOCAL_LLM_URL must not contain credentials")
 
+        return self
+
+    @model_validator(mode="after")
+    def validate_portal_vault_configuration(self):
+        """Require complete vault configuration and TLS outside local development."""
+        if not self.portal_vault_enabled:
+            return self
+        if self.portal_vault_mongodb_url is None:
+            raise ValueError(
+                "PORTAL_VAULT_MONGODB_URL is required when the vault is enabled"
+            )
+        if self.portal_vault_encryption_key is None:
+            raise ValueError(
+                "PORTAL_VAULT_ENCRYPTION_KEY is required when the vault is enabled"
+            )
+        if self.portal_vault_password_recovery_key is None:
+            raise ValueError(
+                "PORTAL_VAULT_PASSWORD_RECOVERY_KEY is required when the vault is enabled"
+            )
+        mongo_url = self.portal_vault_mongodb_url.get_secret_value()
+        if not mongo_url.startswith(("mongodb://", "mongodb+srv://")):
+            raise ValueError("PORTAL_VAULT_MONGODB_URL must be a MongoDB URL")
+        parsed_mongo = urlsplit(mongo_url)
+        parsed_base = urlsplit(self.base_url)
+        local_compose_vault = parsed_mongo.hostname in {
+            "portal-vault",
+            "localhost",
+            "127.0.0.1",
+        } and parsed_base.hostname in {"localhost", "127.0.0.1"}
+        if (
+            self.is_production
+            and mongo_url.startswith("mongodb://")
+            and not local_compose_vault
+        ):
+            query = urlsplit(mongo_url).query.lower()
+            if "tls=true" not in query and "ssl=true" not in query:
+                raise ValueError(
+                    "PORTAL_VAULT_MONGODB_URL must enable TLS in production"
+                )
         return self
 
     @field_validator("cors_origins")

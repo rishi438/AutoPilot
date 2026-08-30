@@ -25,6 +25,10 @@ from models.database import (
     WorkflowSession,
     WorkflowStatusEnum,
 )
+from services.application_soft_delete import (
+    ApplicationSoftDeleteNotFoundError,
+    soft_delete_owned_application_in_transaction,
+)
 from utils.auth import get_current_user_with_complete_profile
 from utils.cache import invalidate_workflow_state
 from utils.database import get_database
@@ -669,40 +673,17 @@ async def delete_application(
 
         user_id = get_user_uuid(current_user)
 
-        result = await db.execute(
-            select(JobApplication).where(
-                and_(
-                    JobApplication.id == app_uuid,
-                    JobApplication.user_id == user_id,
-                    JobApplication.deleted_at.is_(None),
-                )
+        try:
+            deletion = await soft_delete_owned_application_in_transaction(
+                db,
+                application_id=app_uuid,
+                user_id=user_id,
             )
-        )
-        existing_app = result.scalar_one_or_none()
-
-        if not existing_app:
+        except ApplicationSoftDeleteNotFoundError:
             raise not_found_error("Application not found")
 
         # Soft delete — preserves workflow data for audit purposes.
-        existing_app.deleted_at = datetime.now(UTC)
-        session_id = existing_app.session_id
-        if session_id:
-            session_result = await db.execute(
-                select(WorkflowSession).where(
-                    and_(
-                        WorkflowSession.session_id == session_id,
-                        WorkflowSession.user_id == user_id,
-                    )
-                )
-            )
-            workflow_session = session_result.scalar_one_or_none()
-            if workflow_session and workflow_session.workflow_status in {
-                WorkflowStatusEnum.INITIALIZED.value,
-                WorkflowStatusEnum.IN_PROGRESS.value,
-                WorkflowStatusEnum.AWAITING_CONFIRMATION.value,
-            }:
-                workflow_session.workflow_status = WorkflowStatusEnum.CANCELLED.value
-                workflow_session.processing_end_time = datetime.now(UTC)
+        session_id = deletion.session_id
         await db.commit()
 
         if session_id:

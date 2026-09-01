@@ -77,6 +77,7 @@ _POST_SUBMIT_CLASSES = frozenset(
         WorkdayFailureClass.POST_SUBMIT_VERIFIED_SUCCESS,
         WorkdayFailureClass.POST_SUBMIT_ACCOUNT_LOCKED,
         WorkdayFailureClass.POST_SUBMIT_CAPTCHA_OR_OTP,
+        WorkdayFailureClass.POST_SUBMIT_ACCOUNT_EXISTS,
         WorkdayFailureClass.POST_SUBMIT_AUTH_REJECTED,
         WorkdayFailureClass.POST_SUBMIT_OTHER_OR_UNKNOWN,
     }
@@ -109,6 +110,11 @@ _ROUTES = (
         WorkdayGateOperation.MARK_REVIEW_REQUIRED,
     ),
     (
+        WorkdayFailureClass.POST_SUBMIT_ACCOUNT_EXISTS,
+        WorkdayFailureOutcome.CREDENTIAL_HOLD,
+        WorkdayGateOperation.MARK_REVIEW_REQUIRED,
+    ),
+    (
         WorkdayFailureClass.POST_SUBMIT_AUTH_REJECTED,
         WorkdayFailureOutcome.CREDENTIAL_HOLD,
         WorkdayGateOperation.MARK_REVIEW_REQUIRED,
@@ -116,6 +122,16 @@ _ROUTES = (
     (
         WorkdayFailureClass.POST_SUBMIT_OTHER_OR_UNKNOWN,
         WorkdayFailureOutcome.REVIEW_REQUIRED,
+        WorkdayGateOperation.MARK_REVIEW_REQUIRED,
+    ),
+    (
+        WorkdayFailureClass.ACCOUNT_DISCOVERY_ACCOUNT_EXISTS,
+        WorkdayFailureOutcome.CREDENTIAL_HOLD,
+        WorkdayGateOperation.MARK_REVIEW_REQUIRED,
+    ),
+    (
+        WorkdayFailureClass.ACCOUNT_DISCOVERY_RETRY_EXHAUSTED,
+        WorkdayFailureOutcome.CREDENTIAL_HOLD,
         WorkdayGateOperation.MARK_REVIEW_REQUIRED,
     ),
     (

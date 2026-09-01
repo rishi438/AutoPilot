@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+load_dotenv(PROJECT_ROOT / ".env")
 
 from config.settings import get_settings
 from services.local_workday_runner import LocalWorkdayRunner
@@ -299,7 +300,6 @@ async def run_once(args: argparse.Namespace, device_token: str) -> str:
 
 
 def main() -> int:
-    load_dotenv(PROJECT_ROOT / ".env")
     args = build_parser().parse_args()
     run_id, log_path, context_tokens = configure_workflow_logging(args.log_dir)
     print(f"Workday workflow log: {log_path}", flush=True)

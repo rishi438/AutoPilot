@@ -1,4 +1,12 @@
-from models.database import JobFormAnswer
+import uuid
+from datetime import UTC, datetime
+
+from models.database import (
+    ApplicationAutomationEvent,
+    ApplicationStatus,
+    JobApplication,
+    JobFormAnswer,
+)
 import pytest
 
 from api.automation import (
@@ -9,7 +17,10 @@ from api.automation import (
 from api.workflow import WorkflowStartRequest
 from services.application_automation import (
     classify_sensitivity,
+    derive_automation_progress,
+    has_unit1_completed,
     is_prohibited_answer_material,
+    is_stage2_eligible,
     normalize_question,
     protect_reusable_answer,
     reusable_answer_value,
@@ -168,3 +179,171 @@ def test_reusable_answer_rejects_secrets_and_payment_data(
 def test_reusable_answer_rejects_control_characters() -> None:
     with pytest.raises(ValueError):
         SaveReusableAnswerRequest(question="Nationality", answer="Indian\x00")
+
+
+def test_derive_automation_progress_projects_completed_stage1() -> None:
+    app_id = uuid.uuid4()
+    completed_at = datetime.now(UTC)
+    application = JobApplication(
+        id=app_id,
+        user_id=uuid.uuid4(),
+        status=ApplicationStatus.APPLYING.value,
+        portal="workday",
+    )
+    events = [
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="application_leased",
+            created_at=datetime(2026, 8, 30, 9, 0, 0, tzinfo=UTC),
+        ),
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit1_completed",
+            detail="authenticated_application_ready_submitted",
+            created_at=completed_at,
+        ),
+    ]
+
+    progress = derive_automation_progress(application, events)
+    assert progress is not None
+    assert progress["stage"] == "workday_unit1"
+    assert progress["stage_status"] == "completed"
+    assert progress["next_stage"] == "workday_unit2"
+    assert progress["next_stage_status"] == "not_started"
+    assert progress["label"] == "Stage 1 complete — ready for Stage 2"
+    assert progress["unit1_completed"] is True
+    assert progress["completed_at"] == completed_at
+    assert application.status == ApplicationStatus.APPLYING.value
+    assert is_stage2_eligible(application, events) is True
+
+
+def test_derive_automation_progress_projects_review_required() -> None:
+    app_id = uuid.uuid4()
+    application = JobApplication(
+        id=app_id,
+        user_id=uuid.uuid4(),
+        status=ApplicationStatus.BLOCKED.value,
+        portal="workday",
+    )
+    events = [
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit1_review_required",
+            detail="checkpoint_failed",
+            created_at=datetime.now(UTC),
+        ),
+    ]
+
+    progress = derive_automation_progress(application, events)
+    assert progress is not None
+    assert progress["stage"] == "workday_unit1"
+    assert progress["stage_status"] == "review_required"
+    assert progress["label"] == "Review required"
+    assert progress["unit1_completed"] is False
+    assert is_stage2_eligible(application, events) is False
+
+
+def test_derive_automation_progress_projects_queued_and_retrying() -> None:
+    app_id = uuid.uuid4()
+    app_queued = JobApplication(
+        id=app_id,
+        user_id=uuid.uuid4(),
+        status=ApplicationStatus.QUEUED.value,
+        portal="workday",
+    )
+    progress_queued = derive_automation_progress(app_queued, [])
+    assert progress_queued is not None
+    assert progress_queued["stage"] == "workday_unit1"
+    assert progress_queued["stage_status"] == "queued"
+    assert progress_queued["unit1_completed"] is False
+
+    app_retrying = JobApplication(
+        id=app_id,
+        user_id=uuid.uuid4(),
+        status=ApplicationStatus.RETRYING.value,
+        portal="workday",
+    )
+    progress_retrying = derive_automation_progress(app_retrying, [])
+    assert progress_retrying is not None
+    assert progress_retrying["stage"] == "workday_unit1"
+    assert progress_retrying["stage_status"] == "retrying"
+    assert progress_retrying["unit1_completed"] is False
+
+
+def test_derive_automation_progress_returns_none_for_non_automated_app() -> None:
+    application = JobApplication(
+        id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        status=ApplicationStatus.COMPLETED.value,
+    )
+    assert derive_automation_progress(application, []) is None
+    assert has_unit1_completed([]) is False
+
+
+def test_derive_automation_progress_ignores_non_workday_queued_application() -> None:
+    application = JobApplication(
+        id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        status=ApplicationStatus.QUEUED.value,
+        portal="greenhouse",
+        job_url="https://boards.greenhouse.io/example/jobs/123",
+    )
+    assert derive_automation_progress(application, []) is None
+
+
+def test_derive_automation_progress_status_blocked_takes_precedence_over_historic_completion() -> (
+    None
+):
+    app_id = uuid.uuid4()
+    application = JobApplication(
+        id=app_id,
+        user_id=uuid.uuid4(),
+        status=ApplicationStatus.BLOCKED.value,
+        portal="workday",
+    )
+    # Historic completion event exists, but current status is blocked
+    events = [
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit1_completed",
+            created_at=datetime(2026, 8, 30, 9, 0, 0, tzinfo=UTC),
+        ),
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit1_review_required",
+            created_at=datetime(2026, 8, 30, 9, 30, 0, tzinfo=UTC),
+        ),
+    ]
+
+    progress = derive_automation_progress(application, events)
+    assert progress is not None
+    assert progress["stage_status"] == "review_required"
+    assert progress["label"] == "Review required"
+    assert progress["unit1_completed"] is False
+    assert is_stage2_eligible(application, events) is False
+
+
+def test_derive_automation_progress_handles_unordered_events() -> None:
+    app_id = uuid.uuid4()
+    application = JobApplication(
+        id=app_id,
+        user_id=uuid.uuid4(),
+        status=ApplicationStatus.APPLYING.value,
+        portal="workday",
+    )
+    # Events passed out of chronological order
+    newer_completion = ApplicationAutomationEvent(
+        application_id=app_id,
+        event_type="workday_unit1_completed",
+        created_at=datetime(2026, 8, 30, 10, 0, 0, tzinfo=UTC),
+    )
+    older_leased = ApplicationAutomationEvent(
+        application_id=app_id,
+        event_type="application_leased",
+        created_at=datetime(2026, 8, 30, 9, 0, 0, tzinfo=UTC),
+    )
+    progress = derive_automation_progress(application, [newer_completion, older_leased])
+    assert progress is not None
+    assert progress["stage_status"] == "completed"
+    assert progress["unit1_completed"] is True
+    assert progress["completed_at"] == datetime(2026, 8, 30, 10, 0, 0, tzinfo=UTC)

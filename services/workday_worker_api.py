@@ -356,6 +356,8 @@ class WorkdayWorkerApi:
         if hold_code not in {
             "unknown_page_state",
             "native_credentials_required",
+            "existing_account_credentials_required",
+            "account_discovery_retry_exhausted",
             "captcha",
             "otp",
         }:

@@ -481,22 +481,44 @@
     }
 
     /**
-     * Read-only AI analysis status badge (always shown top-right).
-     * Shows: Analyzing (blue) → Ready (cyan) → Failed (red).
+     * Read-only AI analysis / automation status badge (always shown top-right).
      * @param {string} status
+     * @param {Record<string,unknown>|null} [automationProgress]
      */
-    function aiStatusBadge(status) {
+    function aiStatusBadge(status, automationProgress) {
+        if (status === 'blocked' || (automationProgress && automationProgress.stage_status === 'review_required')) {
+            return `<span class="card-ai-badge ai-blocked"><i class="fas fa-pause-circle me-1" aria-hidden="true"></i>Review required</span>`;
+        }
+        if (status === 'failed' || (automationProgress && automationProgress.stage_status === 'failed')) {
+            return `<span class="card-ai-badge ai-failed"><i class="fas fa-exclamation-circle me-1" aria-hidden="true"></i>Failed</span>`;
+        }
+        if (automationProgress && automationProgress.unit1_completed) {
+            const label = automationProgress.label || 'Stage 1 complete — ready for Stage 2';
+            return `<span class="card-ai-badge ai-stage1-complete" title="${escapeHtml(String(label))}"><i class="fas fa-check-circle me-1" aria-hidden="true"></i>Stage 1 complete</span>`;
+        }
+        if (automationProgress && automationProgress.stage === 'workday_unit1' && automationProgress.stage_status === 'in_progress') {
+            const label = automationProgress.label || 'Stage 1 in progress';
+            return `<span class="card-ai-badge ai-processing" title="${escapeHtml(String(label))}"><i class="fas fa-spinner fa-spin me-1" aria-hidden="true"></i>${escapeHtml(String(label))}</span>`;
+        }
+        if (status === 'applying') {
+            return `<span class="card-ai-badge ai-applying"><i class="fas fa-paper-plane me-1" aria-hidden="true"></i>Applying</span>`;
+        }
+        if (status === 'retrying') {
+            const label = (automationProgress && automationProgress.label) || 'Retrying';
+            return `<span class="card-ai-badge ai-retrying" title="${escapeHtml(String(label))}"><i class="fas fa-redo fa-spin me-1" aria-hidden="true"></i>${escapeHtml(String(label))}</span>`;
+        }
         if (status === 'processing') {
             return `<span class="card-ai-badge ai-processing"><i class="fas fa-spinner fa-spin me-1" aria-hidden="true"></i>Analyzing</span>`;
         }
-        if (status === 'failed') {
-            return `<span class="card-ai-badge ai-failed"><i class="fas fa-exclamation-circle me-1" aria-hidden="true"></i>Failed</span>`;
+        if (status === 'preparing') {
+            return `<span class="card-ai-badge ai-processing"><i class="fas fa-spinner fa-spin me-1" aria-hidden="true"></i>Preparing</span>`;
         }
         if (status === 'draft') {
             return `<span class="card-ai-badge ai-draft">Draft</span>`;
         }
         if (status === 'queued') {
-            return `<span class="card-ai-badge ai-draft"><i class="fas fa-clock me-1" aria-hidden="true"></i>Queued</span>`;
+            const label = (automationProgress && automationProgress.label) || 'Queued';
+            return `<span class="card-ai-badge ai-draft" title="${escapeHtml(String(label))}"><i class="fas fa-clock me-1" aria-hidden="true"></i>${escapeHtml(String(label))}</span>`;
         }
         if (status === 'skipped') {
             return `<span class="card-ai-badge ai-expired"><i class="fas fa-calendar-times me-1" aria-hidden="true"></i>Job expired</span>`;
@@ -512,7 +534,7 @@
      * @param {string} appId
      */
     function trackingButtonsHtml(status, appId) {
-        const systemStatuses = ['draft', 'processing', 'failed', 'queued', 'retrying', 'blocked', 'skipped'];
+        const systemStatuses = ['draft', 'processing', 'failed', 'queued', 'retrying', 'blocked', 'skipped', 'preparing', 'applying'];
         if (systemStatuses.includes(status)) return '';
 
         const safeId = escapeHtml(appId);
@@ -636,6 +658,7 @@
         const appId      = String(app['id'] ?? '');
         const status     = String(app['status'] ?? '').toLowerCase();
         const safeAppId  = escapeHtml(appId);
+        const automationProgress = /** @type {Record<string,unknown>|null} */ (app['automation_progress'] ?? null);
 
         const createdAt = String(app['created_at'] ?? '');
         const relTime   = createdAt ? relativeTime(createdAt) : '';
@@ -682,7 +705,7 @@
         <div class="card-right">
             <div class="card-right-top">
                 ${followUpIcon}
-                ${aiStatusBadge(status)}
+                ${aiStatusBadge(status, automationProgress)}
             </div>
             <div class="card-right-bottom">
                 ${trackingButtonsHtml(status, appId)}

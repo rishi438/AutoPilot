@@ -1641,3 +1641,108 @@ def test_account_state_event_rejects_unknown_or_extra_values() -> None:
             page_state="login_required",
             password="must-not-be-accepted",
         )
+
+
+def test_navigation_context_error_recognition_narrowed() -> None:
+    from services.workday_playwright_worker import (
+        _is_playwright_navigation_context_error,
+    )
+
+    class _PlaywrightError(Exception):
+        __module__ = "playwright._impl._errors"
+
+    class _NonPlaywrightError(Exception):
+        __module__ = "builtins"
+
+    # Genuine navigation / context destruction / detached frames -> True
+    assert _is_playwright_navigation_context_error(
+        _PlaywrightError(
+            "Execution context was destroyed, most likely because of a navigation."
+        )
+    )
+    assert _is_playwright_navigation_context_error(
+        _PlaywrightError("Cannot find context with specified id")
+    )
+    assert _is_playwright_navigation_context_error(
+        _PlaywrightError("Frame was detached")
+    )
+    assert _is_playwright_navigation_context_error(
+        _PlaywrightError("frame has been detached")
+    )
+    assert _is_playwright_navigation_context_error(
+        _PlaywrightError("detached frame error occurred")
+    )
+
+    # Generic Timeout or Target closed or non-playwright -> False
+    assert not _is_playwright_navigation_context_error(
+        _PlaywrightError("Timeout 30000ms exceeded.")
+    )
+    assert not _is_playwright_navigation_context_error(
+        _PlaywrightError("Target closed")
+    )
+    assert not _is_playwright_navigation_context_error(
+        _PlaywrightError("Protocol error: page crashed")
+    )
+    assert not _is_playwright_navigation_context_error(
+        _NonPlaywrightError("Execution context was destroyed")
+    )
+
+
+@pytest.mark.asyncio
+async def test_capture_checkpoint_evidence_excludes_volatile_control_count_from_signature() -> (
+    None
+):
+    page = _HydratingPage(
+        url="https://wd1.myworkdaysite.com/recruiting/wf/WellsFargoJobs/job/Engineer_R-1"
+    )
+    browser = PlaywrightWorkdayBrowser(page)
+
+    app_id = uuid.UUID("10000000-0000-0000-0000-000000000001")
+    target_url = (
+        "https://wd1.myworkdaysite.com/recruiting/wf/WellsFargoJobs/job/Engineer_R-1"
+    )
+    tenant_scope = "workday:wf:wellsfargojobs"
+
+    evidence1 = await browser.capture_checkpoint_evidence(
+        target_url=target_url,
+        expected_tenant_scope=tenant_scope,
+        application_id=app_id,
+        account_binding_verified=True,
+        application_context_matches=True,
+    )
+
+    evidence2 = await browser.capture_checkpoint_evidence(
+        target_url=target_url,
+        expected_tenant_scope=tenant_scope,
+        application_id=app_id,
+        account_binding_verified=True,
+        application_context_matches=True,
+    )
+
+    assert evidence1.safe_signature == evidence2.safe_signature
+    assert evidence1.safe_signature.startswith("wdcp1:")
+
+
+def test_next_application_step_action_regex_matches_strictly_without_arbitrary_suffixes() -> (
+    None
+):
+    from services.workday_playwright_worker import (
+        _NEXT_APPLICATION_STEP_ACTION,
+        _SAVE_AND_CONTINUE_ACTION,
+    )
+
+    # Exact matches -> True
+    assert _NEXT_APPLICATION_STEP_ACTION.fullmatch("Next") is not None
+    assert _NEXT_APPLICATION_STEP_ACTION.fullmatch("next") is not None
+    assert _NEXT_APPLICATION_STEP_ACTION.fullmatch("Save and Continue") is not None
+    assert _NEXT_APPLICATION_STEP_ACTION.fullmatch("Save & Continue") is not None
+    assert _SAVE_AND_CONTINUE_ACTION.fullmatch("Save and Continue") is not None
+    assert _SAVE_AND_CONTINUE_ACTION.fullmatch("Save & Continue") is not None
+
+    # Arbitrary suffixes -> False
+    assert _NEXT_APPLICATION_STEP_ACTION.fullmatch("Next Steps") is None
+    assert _NEXT_APPLICATION_STEP_ACTION.fullmatch("Next Question") is None
+    assert _NEXT_APPLICATION_STEP_ACTION.fullmatch("Save and Continue Later") is None
+    assert _NEXT_APPLICATION_STEP_ACTION.fullmatch("Save & Continue Later") is None
+    assert _SAVE_AND_CONTINUE_ACTION.fullmatch("Save and Continue Later") is None
+    assert _SAVE_AND_CONTINUE_ACTION.fullmatch("Save & Continue to exit") is None

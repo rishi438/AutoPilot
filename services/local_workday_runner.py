@@ -43,6 +43,14 @@ _HOLD_REMEDIATION = {
     "native_credentials_required": (
         "Import or correct this Workday credential in the AutoPilot Credential Vault."
     ),
+    "existing_account_credentials_required": (
+        "This Workday account already exists. Import its correct password in "
+        "AutoPilot Credential Vault, or reset it on Workday, then retry."
+    ),
+    "account_discovery_retry_exhausted": (
+        "AutoPilot reached the three-attempt limit for this unconfirmed Workday "
+        "account. Review or import the credential before retrying."
+    ),
     "unknown_page_state": (
         "Review the Workday page in the dedicated Autopilot Browser before retrying."
     ),

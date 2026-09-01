@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
-from typing import Awaitable, Callable, Protocol
+from typing import Awaitable, Callable, Literal, Protocol
 from uuid import UUID
 
-from services.portal_credentials import WorkerPortalCredential, normalize_portal_scope
+from services.portal_credentials import (
+    MAX_UNCONFIRMED_ACCOUNT_ATTEMPTS,
+    WorkerPortalCredential,
+    normalize_portal_scope,
+)
 from services.workday_account_gate_store import (
     WorkdayAuthGateBinding,
+    WorkdayGateAcquisition,
     WorkdayGateLease,
     WorkdayGateMutation,
 )
@@ -40,9 +45,11 @@ class WorkdayAuthBrokerError(RuntimeError):
         *,
         submitted: bool = False,
         phase: WorkdayAuthExecutionPhase | None = None,
+        gate_lease: WorkdayGateLease | None = None,
     ) -> None:
         super().__init__(message)
         self.submitted = submitted
+        self.gate_lease = gate_lease
         self.phase = phase or (
             WorkdayAuthExecutionPhase.SUBMIT_CLAIMED_PENDING
             if submitted
@@ -58,19 +65,29 @@ class WorkdayAuthExecutionPhase(str, Enum):
     SUBMIT_CLAIMED_PENDING = "submit_claimed_pending"
 
 
+class WorkdayAuthOperation(str, Enum):
+    """One account operation protected by the durable submit claim."""
+
+    LOGIN = "login"
+    REGISTRATION = "registration"
+
+
 @dataclass(frozen=True, slots=True)
 class WorkdayAuthBrokerRequest:
-    """Private server-issued authority for one existing-account login."""
+    """Private server-issued authority for one login or registration submit."""
 
     user_id: UUID
     account_ref: UUID
     portal_scope: str
     gate_lease: WorkdayGateLease
+    operation: WorkdayAuthOperation = WorkdayAuthOperation.LOGIN
 
     def __post_init__(self) -> None:
         scope = normalize_portal_scope(self.portal_scope)
         if scope != self.portal_scope or not scope.startswith("workday:"):
             raise ValueError("A canonical Workday portal scope is required.")
+        if not isinstance(self.operation, WorkdayAuthOperation):
+            raise ValueError("A supported Workday account operation is required.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +111,7 @@ class WorkdayPostSubmitObservation:
             WorkdayFailureClass.POST_SUBMIT_VERIFIED_SUCCESS,
             WorkdayFailureClass.POST_SUBMIT_ACCOUNT_LOCKED,
             WorkdayFailureClass.POST_SUBMIT_CAPTCHA_OR_OTP,
+            WorkdayFailureClass.POST_SUBMIT_ACCOUNT_EXISTS,
             WorkdayFailureClass.POST_SUBMIT_AUTH_REJECTED,
             WorkdayFailureClass.POST_SUBMIT_OTHER_OR_UNKNOWN,
         }
@@ -109,6 +127,7 @@ class WorkdayAuthBrokerResult:
     observations: int
     provisional_success: bool = False
     account_binding: WorkdayAuthAccountBinding | None = field(default=None, repr=False)
+    gate_lease: WorkdayGateLease | None = field(default=None, repr=False)
 
 
 class WorkdayAuthGateStore(Protocol):
@@ -125,6 +144,10 @@ class WorkdayAuthGateStore(Protocol):
     async def claim_auth_submit(
         self, lease: WorkdayGateLease
     ) -> WorkdayGateMutation: ...
+
+    async def begin_auth_followup(
+        self, lease: WorkdayGateLease
+    ) -> WorkdayGateAcquisition | None: ...
 
     async def complete_success(
         self, lease: WorkdayGateLease
@@ -149,6 +172,32 @@ class WorkdayAuthCredentialReader(Protocol):
         self, *, user_id: str, account_ref: UUID, portal_scope: str
     ) -> WorkerPortalCredential | None: ...
 
+    async def mark_account_ready(
+        self,
+        *,
+        user_id: str,
+        portal_scope: str,
+        method: Literal["login", "registration"],
+    ) -> bool: ...
+
+    async def claim_account_discovery_attempt(
+        self,
+        *,
+        user_id: str,
+        account_ref: UUID,
+        portal_scope: str,
+        operation: Literal["login", "registration"],
+    ) -> int | None: ...
+
+    async def mark_account_discovery_state(
+        self,
+        *,
+        user_id: str,
+        account_ref: UUID,
+        portal_scope: str,
+        state: Literal["registration_pending", "existing_account_credentials_required"],
+    ) -> bool: ...
+
 
 class WorkdayAuthPageActions(Protocol):
     """Only the broker may receive this login fill/submit page surface."""
@@ -160,6 +209,20 @@ class WorkdayAuthPageActions(Protocol):
     ) -> None: ...
 
     async def click_verified_sign_in(self) -> None: ...
+
+    async def verify_unique_registration_controls(
+        self, *, expected_scope: str
+    ) -> bool: ...
+
+    async def fill_verified_registration_controls(
+        self, credential: WorkerPortalCredential
+    ) -> None: ...
+
+    async def click_verified_create_account(self) -> None: ...
+
+    async def open_registration_after_rejected_login(
+        self, *, expected_scope: str
+    ) -> None: ...
 
 
 class WorkdaySafeStateObserver(Protocol):
@@ -205,7 +268,17 @@ class WorkdayAuthBroker:
     async def authenticate(
         self, request: WorkdayAuthBrokerRequest
     ) -> WorkdayAuthBrokerResult:
-        """Authenticate once; a claimed submit can never be retried by this broker."""
+        """Authenticate through separately claimed, bounded account operations."""
+        try:
+            return await self._authenticate_once(request)
+        except WorkdayAuthBrokerError as exc:
+            if exc.gate_lease is None:
+                exc.gate_lease = request.gate_lease
+            raise
+
+    async def _authenticate_once(
+        self, request: WorkdayAuthBrokerRequest
+    ) -> WorkdayAuthBrokerResult:
         observed = await self._state_observer.observe()
         if (
             observed.state is not WorkdayTransitionState.AUTH_FORM_STRUCTURALLY_READY
@@ -215,12 +288,27 @@ class WorkdayAuthBroker:
             raise WorkdayAuthBrokerError(
                 "Authentication did not start from a verified Workday auth form."
             )
-        if not await self._page_actions.verify_unique_auth_controls(
-            expected_scope=request.portal_scope
-        ):
-            raise WorkdayAuthBrokerError(
+        registration = request.operation is WorkdayAuthOperation.REGISTRATION
+        if registration:
+            verifier = getattr(
+                self._page_actions, "verify_unique_registration_controls", None
+            )
+            verified_controls = bool(
+                callable(verifier)
+                and await verifier(expected_scope=request.portal_scope)
+            )
+            invalid_controls_message = (
+                "The active Workday form does not contain unique registration controls."
+            )
+        else:
+            verified_controls = await self._page_actions.verify_unique_auth_controls(
+                expected_scope=request.portal_scope
+            )
+            invalid_controls_message = (
                 "The active Workday dialog does not contain unique login controls."
             )
+        if not verified_controls:
+            raise WorkdayAuthBrokerError(invalid_controls_message)
 
         binding = WorkdayAuthGateBinding(
             user_id=request.user_id,
@@ -255,15 +343,81 @@ class WorkdayAuthBroker:
                 "The owned Workday credential was not available.",
                 phase=WorkdayAuthExecutionPhase.SECRET_ACCESSED_NO_SUBMIT,
             )
+        if registration and credential.status != "pending_registration":
+            status_matches_operation = False
+        else:
+            status_matches_operation = credential.status in {
+                "active",
+                "pending_registration",
+            }
+        if not status_matches_operation:
+            raise WorkdayAuthBrokerError(
+                "The owned Workday credential status does not match the account operation.",
+                phase=WorkdayAuthExecutionPhase.SECRET_ACCESSED_NO_SUBMIT,
+            )
+        if credential.status == "pending_registration":
+            if credential.discovery_state == "existing_account_credentials_required":
+                return self._unsubmitted_discovery_result(
+                    request,
+                    WorkdayFailureClass.ACCOUNT_DISCOVERY_ACCOUNT_EXISTS,
+                )
+            if credential.discovery_attempt_count >= MAX_UNCONFIRMED_ACCOUNT_ATTEMPTS:
+                return self._unsubmitted_discovery_result(
+                    request,
+                    WorkdayFailureClass.ACCOUNT_DISCOVERY_RETRY_EXHAUSTED,
+                )
         fill_failed = False
         try:
-            await self._page_actions.fill_verified_auth_controls(credential)
+            if registration:
+                fill_registration = getattr(
+                    self._page_actions, "fill_verified_registration_controls", None
+                )
+                if not callable(fill_registration):
+                    raise RuntimeError("Registration controls are unavailable.")
+                await fill_registration(credential)
+            else:
+                await self._page_actions.fill_verified_auth_controls(credential)
         except Exception:
             fill_failed = True
         if fill_failed:
             raise WorkdayAuthBrokerError(
-                "The verified Workday login controls could not be filled.",
+                "The verified Workday account controls could not be filled.",
                 phase=WorkdayAuthExecutionPhase.SECRET_ACCESSED_NO_SUBMIT,
+            )
+
+        if credential.status == "pending_registration":
+            claim_discovery = getattr(
+                self._credential_reader, "claim_account_discovery_attempt", None
+            )
+            operation = "registration" if registration else "login"
+            try:
+                discovery_attempt = (
+                    await claim_discovery(
+                        user_id=str(request.user_id),
+                        account_ref=request.account_ref,
+                        portal_scope=request.portal_scope,
+                        operation=operation,
+                    )
+                    if callable(claim_discovery)
+                    else None
+                )
+            except Exception as exc:
+                raise WorkdayAuthBrokerError(
+                    "The unconfirmed Workday account attempt could not be claimed.",
+                    phase=WorkdayAuthExecutionPhase.SECRET_ACCESSED_NO_SUBMIT,
+                ) from exc
+            if discovery_attempt is None:
+                raise WorkdayAuthBrokerError(
+                    "The unconfirmed Workday account attempt is stale or exhausted.",
+                    phase=WorkdayAuthExecutionPhase.SECRET_ACCESSED_NO_SUBMIT,
+                )
+            logger.info(
+                "workday_account_discovery_attempt_claimed "
+                "portal_scope=%s operation=%s attempt=%s max_attempts=%s",
+                request.portal_scope,
+                operation,
+                discovery_attempt,
+                MAX_UNCONFIRMED_ACCOUNT_ATTEMPTS,
             )
 
         submit_claim = await self._gate_store.claim_auth_submit(request.gate_lease)
@@ -274,7 +428,15 @@ class WorkdayAuthBroker:
             )
 
         try:
-            await self._page_actions.click_verified_sign_in()
+            if registration:
+                submit_registration = getattr(
+                    self._page_actions, "click_verified_create_account", None
+                )
+                if not callable(submit_registration):
+                    raise RuntimeError("Registration submit is unavailable.")
+                await submit_registration()
+            else:
+                await self._page_actions.click_verified_sign_in()
         except Exception:
             return await self._route_and_apply(
                 request,
@@ -306,9 +468,59 @@ class WorkdayAuthBroker:
                     network_ambiguity=True,
                 )
             if latest.terminal:
-                return await self._route_and_apply(
+                if (
+                    not registration
+                    and credential.status == "pending_registration"
+                    and WorkdayFailureClass.POST_SUBMIT_AUTH_REJECTED
+                    in latest.failure_classes
+                ):
+                    return await self._continue_with_registration(request)
+                if (
+                    registration
+                    and WorkdayFailureClass.POST_SUBMIT_ACCOUNT_EXISTS
+                    in latest.failure_classes
+                ):
+                    await self._persist_discovery_state(
+                        request,
+                        state="existing_account_credentials_required",
+                        required=False,
+                    )
+                result = await self._route_and_apply(
                     request, latest, observations=index + 1
                 )
+                if (
+                    credential.status == "pending_registration"
+                    and result.provisional_success
+                ):
+                    mark_ready = getattr(
+                        self._credential_reader, "mark_account_ready", None
+                    )
+                    activation_method = "registration" if registration else "login"
+                    try:
+                        marked = bool(
+                            callable(mark_ready)
+                            and await mark_ready(
+                                user_id=str(request.user_id),
+                                portal_scope=request.portal_scope,
+                                method=activation_method,
+                            )
+                        )
+                    except Exception as exc:
+                        raise WorkdayAuthBrokerError(
+                            "The confirmed Workday account could not be activated in the vault.",
+                            submitted=True,
+                        ) from exc
+                    if not marked:
+                        raise WorkdayAuthBrokerError(
+                            "The confirmed Workday account could not be activated in the vault.",
+                            submitted=True,
+                        )
+                    logger.info(
+                        "workday_account_activated portal_scope=%s method=%s",
+                        request.portal_scope,
+                        activation_method,
+                    )
+                return result
             if index + 1 < self._max_observations:
                 await self._poll_wait(self._poll_interval_seconds)
 
@@ -318,6 +530,146 @@ class WorkdayAuthBroker:
             timeout_observation,
             observations=self._max_observations,
             timeout=True,
+        )
+
+    async def _continue_with_registration(
+        self, request: WorkdayAuthBrokerRequest
+    ) -> WorkdayAuthBrokerResult:
+        """Use a new durable gate attempt for signup after one rejected login."""
+        state_persisted = await self._persist_discovery_state(
+            request,
+            state="registration_pending",
+            required=False,
+        )
+        if not state_persisted:
+            return await self._route_and_apply(
+                request,
+                WorkdayPostSubmitObservation(
+                    frozenset({WorkdayFailureClass.POST_SUBMIT_AUTH_REJECTED})
+                ),
+                observations=1,
+            )
+        open_registration = getattr(
+            self._page_actions, "open_registration_after_rejected_login", None
+        )
+        try:
+            if not callable(open_registration):
+                raise RuntimeError("Registration fallback controls are unavailable.")
+            await open_registration(expected_scope=request.portal_scope)
+        except Exception as exc:
+            logger.info(
+                "workday_registration_fallback_not_opened "
+                "portal_scope=%s error_type=%s",
+                request.portal_scope,
+                type(exc).__name__,
+            )
+            return await self._route_and_apply(
+                request,
+                WorkdayPostSubmitObservation(
+                    frozenset({WorkdayFailureClass.POST_SUBMIT_AUTH_REJECTED})
+                ),
+                observations=1,
+            )
+        begin_followup = getattr(self._gate_store, "begin_auth_followup", None)
+        try:
+            acquisition = (
+                await begin_followup(request.gate_lease)
+                if callable(begin_followup)
+                else None
+            )
+        except Exception as exc:
+            logger.warning(
+                "workday_registration_followup_gate_not_granted "
+                "portal_scope=%s error_type=%s",
+                request.portal_scope,
+                type(exc).__name__,
+            )
+            acquisition = None
+        followup_lease = (
+            acquisition.lease_for(request.gate_lease.application_id)
+            if acquisition is not None
+            else None
+        )
+        if followup_lease is None:
+            return await self._route_and_apply(
+                request,
+                WorkdayPostSubmitObservation(
+                    frozenset({WorkdayFailureClass.POST_SUBMIT_AUTH_REJECTED})
+                ),
+                observations=1,
+            )
+        logger.info(
+            "workday_registration_fallback_started portal_scope=%s",
+            request.portal_scope,
+        )
+        try:
+            return await self.authenticate(
+                replace(
+                    request,
+                    gate_lease=followup_lease,
+                    operation=WorkdayAuthOperation.REGISTRATION,
+                )
+            )
+        except WorkdayAuthBrokerError:
+            raise
+        except Exception as exc:
+            raise WorkdayAuthBrokerError(
+                "The Workday registration follow-up outcome is unknown.",
+                submitted=True,
+                gate_lease=followup_lease,
+            ) from exc
+
+    async def _persist_discovery_state(
+        self,
+        request: WorkdayAuthBrokerRequest,
+        *,
+        state: Literal["registration_pending", "existing_account_credentials_required"],
+        required: bool,
+    ) -> bool:
+        marker = getattr(self._credential_reader, "mark_account_discovery_state", None)
+        try:
+            marked = bool(
+                callable(marker)
+                and await marker(
+                    user_id=str(request.user_id),
+                    account_ref=request.account_ref,
+                    portal_scope=request.portal_scope,
+                    state=state,
+                )
+            )
+        except Exception as exc:
+            if required:
+                raise WorkdayAuthBrokerError(
+                    "The Workday account discovery state could not be persisted.",
+                    submitted=True,
+                ) from exc
+            logger.warning(
+                "workday_account_discovery_state_not_persisted "
+                "portal_scope=%s state=%s error_type=%s",
+                request.portal_scope,
+                state,
+                type(exc).__name__,
+            )
+            return False
+        if not marked and required:
+            raise WorkdayAuthBrokerError(
+                "The Workday account discovery state could not be persisted.",
+                submitted=True,
+            )
+        return marked
+
+    @staticmethod
+    def _unsubmitted_discovery_result(
+        request: WorkdayAuthBrokerRequest,
+        failure_class: WorkdayFailureClass,
+    ) -> WorkdayAuthBrokerResult:
+        route = route_workday_failure(
+            WorkdayFailureFacts(frozenset({failure_class}), auth_submit_count=0)
+        )
+        return WorkdayAuthBrokerResult(
+            route=route,
+            observations=0,
+            gate_lease=request.gate_lease,
         )
 
     async def _route_and_apply(
@@ -347,6 +699,7 @@ class WorkdayAuthBroker:
                 observations=observations,
                 provisional_success=True,
                 account_binding=WorkdayAuthAccountBinding(request.account_ref),
+                gate_lease=request.gate_lease,
             )
         elif operation is WorkdayGateOperation.CONFIRM_ACCOUNT_LOCK:
             mutation = await self._gate_store.confirm_account_lock(
@@ -365,4 +718,8 @@ class WorkdayAuthBroker:
                 submitted=True,
                 phase=WorkdayAuthExecutionPhase.SUBMIT_CLAIMED_PENDING,
             )
-        return WorkdayAuthBrokerResult(route=route, observations=observations)
+        return WorkdayAuthBrokerResult(
+            route=route,
+            observations=observations,
+            gate_lease=request.gate_lease,
+        )

@@ -39,7 +39,7 @@ _INTENT_KEYS: Final = frozenset(
         "next_application_step",
     }
 )
-_SCOPE_KEYS: Final = frozenset({"page", "active_dialog"})
+_SCOPE_KEYS: Final = frozenset({"page", "active_dialog", "active_account_form"})
 
 
 class WorkdayTransitionCatalogError(RuntimeError):

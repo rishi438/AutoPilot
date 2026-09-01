@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import asyncio
 import logging
@@ -20,6 +20,7 @@ from services.workday_auth_broker import (
     WorkdayAuthBrokerError,
     WorkdayAuthBrokerRequest,
     WorkdayAuthBrokerResult,
+    WorkdayAuthOperation,
     WorkdayPostSubmitObservation,
 )
 from services.workday_failure_router import (
@@ -29,7 +30,10 @@ from services.workday_failure_router import (
     WorkdayGateOperation,
     route_workday_failure,
 )
-from services.workday_state_observer import WorkdayStateSecurityError
+from services.workday_state_observer import (
+    WorkdayStateObservationError,
+    WorkdayStateSecurityError,
+)
 from services.workday_page_condition import (
     WorkdayPageConditionError,
     WorkdayUnit1PageCondition,
@@ -59,7 +63,7 @@ _EXECUTOR_POLICY_VERSION = 1
 _MAX_DISPATCH_STEPS = 5
 _LOGIN_FORM_HYDRATION_ATTEMPTS = 4
 _LOGIN_FORM_HYDRATION_INTERVAL_MS = 250
-_CHECKPOINT_DEADLINE_SECONDS = 2.0
+_CHECKPOINT_DEADLINE_SECONDS = 15.0
 _TRANSITIONS = {
     WorkdayTransitionState.JOB_PAGE: (
         "open_apply",
@@ -68,10 +72,6 @@ _TRANSITIONS = {
     WorkdayTransitionState.APPLY_CHOICES: (
         "select_apply_manually",
         PortalControlIntent.APPLY_MANUALLY,
-    ),
-    WorkdayTransitionState.ACCOUNT_PAGE: (
-        "open_existing_sign_in",
-        PortalControlIntent.SIGN_IN,
     ),
 }
 _REPLAY_SUCCESS = frozenset(
@@ -160,6 +160,12 @@ class WorkdayUnit1Page(Protocol):
     ) -> WorkdayUnit1PageCondition | None: ...
 
     async def capture_page_condition(self) -> WorkdayUnit1PageCondition: ...
+
+    async def open_login(self) -> None: ...
+
+    async def open_registration_from_login_form(
+        self, *, expected_scope: str
+    ) -> None: ...
 
     async def observe_post_submit(self) -> WorkdayPostSubmitObservation: ...
 
@@ -250,6 +256,7 @@ class WorkdayUnit1Orchestrator:
         private_context: WorkdayUnit1PrivateContext,
         persistence: WorkdayUnit1Persistence,
         events: WorkdayUnit1Events,
+        registration_required: bool = False,
         clock: Callable[[], float] = perf_counter,
     ) -> None:
         self._page = page
@@ -260,6 +267,7 @@ class WorkdayUnit1Orchestrator:
         self._private_context = private_context
         self._persistence = persistence
         self._events = events
+        self._registration_required = registration_required
         self._clock = clock
 
     async def run(self, lease: LeasedWorkdayApplication) -> WorkdayUnit1Result:
@@ -313,6 +321,56 @@ class WorkdayUnit1Orchestrator:
                 is not WorkdayTransitionState.AUTHENTICATED_APPLICATION_READY
             ):
                 return await self._apply_session_review(lease)
+
+            if self._registration_requires_login_entry(observed):
+                dispatch_steps += 1
+                started = self._clock()
+                try:
+                    await self._page.open_login()
+                    await self._page.open_registration_from_login_form(
+                        expected_scope=portal_scope
+                    )
+                    condition = await self._capture_condition(None)
+                    failure_class = self._condition_failure(condition)
+                    if failure_class is not None:
+                        return await self._apply_failure(lease, failure_class)
+                    next_observed = await self._observer.observe(
+                        include_candidates=True
+                    )
+                except WorkdayPageConditionError as exc:
+                    return await self._apply_failure(lease, exc.failure_class)
+                except WorkdayStateSecurityError:
+                    return await self._apply_failure(
+                        lease, WorkdayFailureClass.WRONG_ORIGIN_OR_TENANT
+                    )
+                except Exception as exc:
+                    logger.info(
+                        "workday_registration_login_entry_rejected "
+                        "application_id=%s error_type=%s",
+                        lease.application_id,
+                        type(exc).__name__,
+                    )
+                    return await self._apply_failure(
+                        lease, WorkdayFailureClass.ANYTHING_ELSE
+                    )
+                await self._emit_transition(
+                    key=WorkdayTransitionKey(
+                        portal_family="workday",
+                        tenant_scope=portal_scope,
+                        task_type="open_registration_via_login_entry",
+                        from_state_signature=observed.safe_signature,
+                        action_intent=PortalControlIntent.OPEN_REGISTRATION,
+                        signature_version=observed.signature_version,
+                        executor_policy_version=_EXECUTOR_POLICY_VERSION,
+                    ),
+                    version_id=None,
+                    from_state=observed.state,
+                    to_state=next_observed.state,
+                    decision="deterministic_verified",
+                    started=started,
+                )
+                observed = next_observed
+                continue
 
             dispatch_kind, transition = self._dispatch_state(observed.state)
             if dispatch_kind == "terminal":
@@ -505,8 +563,14 @@ class WorkdayUnit1Orchestrator:
                 auth_request = await self._private_context.auth_request(
                     lease=lease, portal_scope=portal_scope
                 )
+                if self._registration_required:
+                    auth_request = replace(
+                        auth_request,
+                        operation=WorkdayAuthOperation.REGISTRATION,
+                    )
                 auth_result = await self._auth_broker.authenticate(auth_request)
             except WorkdayAuthBrokerError as exc:
+                lease = self._lease_with_auth_gate(lease, exc.gate_lease)
                 if exc.submitted:
                     route = self._checkpoint_failure_route(
                         authentication_submitted=True
@@ -522,6 +586,7 @@ class WorkdayUnit1Orchestrator:
                 route = self._route(WorkdayFailureClass.PRE_SUBMIT_TRANSIENT)
                 await self._persistence.apply_route(lease=lease, route=route)
                 return self._result(route)
+            lease = self._lease_with_auth_gate(lease, auth_result.gate_lease)
             if auth_result.route.outcome is not WorkdayFailureOutcome.COMPLETE_UNIT:
                 await self._persistence.apply_route(
                     lease=lease, route=auth_result.route
@@ -631,80 +696,191 @@ class WorkdayUnit1Orchestrator:
     async def _prove_checkpoint(
         self, lease: LeasedWorkdayApplication
     ) -> WorkdayUnit1CheckpointFacts | None:
-        signatures: list[tuple[str, WorkdayUnit1CheckpointFacts]] = []
-        latest: WorkdayUnit1CheckpointFacts | None = None
         deadline = self._clock() + _CHECKPOINT_DEADLINE_SECONDS
-        for index in range(2):
+        baseline_observation: WorkdayObservedState | None = None
+        baseline_facts: WorkdayUnit1CheckpointFacts | None = None
+
+        while True:
+            obs_num = 2 if baseline_observation is not None else 1
             try:
                 observed = await self._observer.observe()
                 latest = await self._private_context.checkpoint_facts(
                     lease=lease, observation=observed
                 )
+            except WorkdayStateSecurityError:
+                logger.info(
+                    "workday_unit1_checkpoint_observation_failed "
+                    "observation=%s error_type=WorkdayStateSecurityError",
+                    obs_num,
+                )
+                return None
+            except WorkdayStateObservationError:
+                if self._clock() >= deadline:
+                    logger.info(
+                        "workday_unit1_checkpoint_rejected "
+                        "observation=%s reason=deadline_exceeded",
+                        obs_num,
+                    )
+                    return None
+                baseline_observation = None
+                baseline_facts = None
+                await self._wait_for_hydration()
+                continue
             except Exception as exc:
                 logger.info(
                     "workday_unit1_checkpoint_observation_failed "
                     "observation=%s error_type=%s",
-                    index + 1,
+                    obs_num,
                     type(exc).__name__,
                 )
                 return None
+
             transition_ready = (
                 observed.state is WorkdayTransitionState.AUTHENTICATED_APPLICATION_READY
             )
-            logger.info(
-                "workday_unit1_checkpoint_observed "
-                "observation=%s transition_state=%s transition_ready=%s "
-                "approved_https_origin=%s canonical_tenant_verified=%s "
-                "leased_job_context_matches=%s "
-                "leased_application_context_matches=%s "
-                "external_account_matches=%s no_login_or_auth_error=%s "
-                "no_captcha_or_otp_or_lock=%s "
-                "basic_information_control_hydrated=%s "
-                "checkpoint_facts_satisfied=%s",
-                index + 1,
-                observed.state.value,
-                transition_ready,
-                latest.approved_https_origin,
-                latest.canonical_tenant_verified,
-                latest.leased_job_context_matches,
-                latest.leased_application_context_matches,
-                latest.external_account_matches,
-                latest.no_login_or_auth_error,
-                latest.no_captcha_or_otp_or_lock,
-                latest.basic_information_control_hydrated,
-                latest.satisfied,
+
+            definitive_failure = (
+                not latest.approved_https_origin
+                or not latest.canonical_tenant_verified
+                or not latest.leased_job_context_matches
+                or not latest.leased_application_context_matches
+                or not latest.external_account_matches
+                or not latest.no_login_or_auth_error
+                or not latest.no_captcha_or_otp_or_lock
             )
-            if not transition_ready or not latest.satisfied:
-                if not transition_ready and not latest.satisfied:
-                    reason = "transition_state_and_checkpoint_facts"
-                elif not transition_ready:
-                    reason = "transition_state_not_ready"
-                else:
-                    reason = "checkpoint_facts_unsatisfied"
+            if definitive_failure:
                 logger.info(
-                    "workday_unit1_checkpoint_rejected observation=%s reason=%s",
-                    index + 1,
-                    reason,
+                    "workday_unit1_checkpoint_observed "
+                    "observation=%s transition_state=%s transition_ready=%s "
+                    "approved_https_origin=%s canonical_tenant_verified=%s "
+                    "leased_job_context_matches=%s "
+                    "leased_application_context_matches=%s "
+                    "external_account_matches=%s no_login_or_auth_error=%s "
+                    "no_captcha_or_otp_or_lock=%s "
+                    "basic_information_control_hydrated=%s "
+                    "checkpoint_facts_satisfied=%s",
+                    obs_num,
+                    observed.state.value,
+                    transition_ready,
+                    latest.approved_https_origin,
+                    latest.canonical_tenant_verified,
+                    latest.leased_job_context_matches,
+                    latest.leased_application_context_matches,
+                    latest.external_account_matches,
+                    latest.no_login_or_auth_error,
+                    latest.no_captcha_or_otp_or_lock,
+                    latest.basic_information_control_hydrated,
+                    latest.satisfied,
+                )
+                logger.info(
+                    "workday_unit1_checkpoint_rejected observation=%s reason=checkpoint_facts_unsatisfied",
+                    obs_num,
                 )
                 return None
-            signatures.append((observed.safe_signature, latest))
-            if index == 0:
+
+            if not transition_ready or not latest.satisfied:
+                baseline_observation = None
+                baseline_facts = None
+                logger.info(
+                    "workday_unit1_checkpoint_poll_waiting "
+                    "state=%s transition_ready=%s satisfied=%s "
+                    "origin=%s tenant=%s job=%s app=%s account=%s "
+                    "no_error=%s no_challenge=%s hydrated=%s",
+                    observed.state.value,
+                    transition_ready,
+                    latest.satisfied,
+                    latest.approved_https_origin,
+                    latest.canonical_tenant_verified,
+                    latest.leased_job_context_matches,
+                    latest.leased_application_context_matches,
+                    latest.external_account_matches,
+                    latest.no_login_or_auth_error,
+                    latest.no_captcha_or_otp_or_lock,
+                    latest.basic_information_control_hydrated,
+                )
                 if self._clock() >= deadline:
                     logger.info(
                         "workday_unit1_checkpoint_rejected "
-                        "observation=1 reason=deadline_exceeded"
+                        "observation=%s reason=deadline_exceeded",
+                        obs_num,
                     )
                     return None
                 await self._wait_for_hydration()
-        stable = signatures[0] == signatures[1]
-        logger.info(
-            "workday_unit1_checkpoint_stability_evaluated " "observations=2 stable=%s",
-            stable,
-        )
-        if not stable:
-            return None
-        logger.info("workday_unit1_checkpoint_verified observations=2")
-        return latest
+                continue
+
+            if baseline_observation is None or baseline_facts is None:
+                baseline_observation = observed
+                baseline_facts = latest
+                logger.info(
+                    "workday_unit1_checkpoint_observed "
+                    "observation=1 transition_state=%s transition_ready=%s "
+                    "approved_https_origin=%s canonical_tenant_verified=%s "
+                    "leased_job_context_matches=%s "
+                    "leased_application_context_matches=%s "
+                    "external_account_matches=%s no_login_or_auth_error=%s "
+                    "no_captcha_or_otp_or_lock=%s "
+                    "basic_information_control_hydrated=%s "
+                    "checkpoint_facts_satisfied=%s",
+                    observed.state.value,
+                    transition_ready,
+                    latest.approved_https_origin,
+                    latest.canonical_tenant_verified,
+                    latest.leased_job_context_matches,
+                    latest.leased_application_context_matches,
+                    latest.external_account_matches,
+                    latest.no_login_or_auth_error,
+                    latest.no_captcha_or_otp_or_lock,
+                    latest.basic_information_control_hydrated,
+                    latest.satisfied,
+                )
+            else:
+                logger.info(
+                    "workday_unit1_checkpoint_observed "
+                    "observation=2 transition_state=%s transition_ready=%s "
+                    "approved_https_origin=%s canonical_tenant_verified=%s "
+                    "leased_job_context_matches=%s "
+                    "leased_application_context_matches=%s "
+                    "external_account_matches=%s no_login_or_auth_error=%s "
+                    "no_captcha_or_otp_or_lock=%s "
+                    "basic_information_control_hydrated=%s "
+                    "checkpoint_facts_satisfied=%s",
+                    observed.state.value,
+                    transition_ready,
+                    latest.approved_https_origin,
+                    latest.canonical_tenant_verified,
+                    latest.leased_job_context_matches,
+                    latest.leased_application_context_matches,
+                    latest.external_account_matches,
+                    latest.no_login_or_auth_error,
+                    latest.no_captcha_or_otp_or_lock,
+                    latest.basic_information_control_hydrated,
+                    latest.satisfied,
+                )
+                stable = (
+                    baseline_observation.safe_signature == observed.safe_signature
+                    and baseline_facts.safe_signature == latest.safe_signature
+                )
+                logger.info(
+                    "workday_unit1_checkpoint_stability_evaluated observations=2 stable=%s "
+                    "obs1_signature=%s obs2_signature=%s",
+                    stable,
+                    baseline_facts.safe_signature[:16] + "…",
+                    latest.safe_signature[:16] + "…",
+                )
+                if stable:
+                    logger.info("workday_unit1_checkpoint_verified observations=2")
+                    return latest
+                baseline_observation = observed
+                baseline_facts = latest
+
+            if self._clock() >= deadline:
+                logger.info(
+                    "workday_unit1_checkpoint_rejected "
+                    "observation=%s reason=deadline_exceeded",
+                    2 if baseline_observation is not None else 1,
+                )
+                return None
+            await self._wait_for_hydration()
 
     async def _apply_failure(
         self,
@@ -730,10 +906,20 @@ class WorkdayUnit1Orchestrator:
             await self._persistence.apply_route(lease=lease, route=route)
         return self._result(route)
 
-    @staticmethod
     def _dispatch_state(
+        self,
         state: WorkdayTransitionState,
     ) -> tuple[str, tuple[str, PortalControlIntent] | None]:
+        if state is WorkdayTransitionState.ACCOUNT_PAGE:
+            if self._registration_required:
+                return (
+                    "transition",
+                    ("open_registration", PortalControlIntent.OPEN_REGISTRATION),
+                )
+            return (
+                "transition",
+                ("open_existing_sign_in", PortalControlIntent.SIGN_IN),
+            )
         if state in _TRANSITIONS:
             return "transition", _TRANSITIONS[state]
         if state is WorkdayTransitionState.LOGIN_FORM:
@@ -746,6 +932,19 @@ class WorkdayUnit1Orchestrator:
         if state is WorkdayTransitionState.AUTH_OUTCOME_PENDING:
             return "safe_hold", None
         return "safe_hold", None
+
+    def _registration_requires_login_entry(
+        self, observed: WorkdayObservedState
+    ) -> bool:
+        """Recognize the Workday variant that reveals signup after Sign In."""
+        if (
+            not self._registration_required
+            or observed.state is not WorkdayTransitionState.ACCOUNT_PAGE
+            or len(observed.candidate_metadata) != 1
+        ):
+            return False
+        candidate = observed.candidate_metadata[0]
+        return candidate.intent_key == PortalControlIntent.SIGN_IN.value
 
     async def _hydrate_login_form(self) -> WorkdayObservedState | None:
         """Poll only fresh observations until the login form is structurally ready."""
@@ -777,6 +976,28 @@ class WorkdayUnit1Orchestrator:
             await waiter(_LOGIN_FORM_HYDRATION_INTERVAL_MS)
             return
         await asyncio.sleep(0)
+
+    @staticmethod
+    def _lease_with_auth_gate(
+        lease: LeasedWorkdayApplication,
+        gate_lease: WorkdayGateLease | None,
+    ) -> LeasedWorkdayApplication:
+        """Carry a broker-issued follow-up gate capability to final persistence."""
+        if gate_lease is None:
+            return lease
+        if (
+            gate_lease.gate_id != lease.gate_id
+            or gate_lease.application_id != lease.application_id
+        ):
+            raise WorkdayUnit1ExecutionError(
+                "The authentication follow-up gate binding is invalid.",
+                phase=WorkdayExecutionPhase.STALE_AUTHORITY,
+            )
+        return replace(
+            lease,
+            gate_generation=gate_lease.generation,
+            gate_lease_token=gate_lease.lease_token,
+        )
 
     async def _apply_session_review(
         self, lease: LeasedWorkdayApplication

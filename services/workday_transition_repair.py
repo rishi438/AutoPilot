@@ -49,10 +49,11 @@ _MIN_CONFIDENCE: Final = 0.5
 _LOGIN_FORM_HYDRATION_ATTEMPTS: Final = 4
 _LOGIN_FORM_HYDRATION_INTERVAL_MS: Final = 250
 _SAFE_ROLES: Final = frozenset({"button", "link"})
-_SAFE_SCOPES: Final = frozenset({"page", "active_dialog"})
+_SAFE_SCOPES: Final = frozenset({"page", "active_dialog", "active_account_form"})
 _LOCATOR_INTENTS: Final = {
     PortalControlIntent.APPLY: "apply",
     PortalControlIntent.APPLY_MANUALLY: "apply_manually",
+    PortalControlIntent.OPEN_REGISTRATION: "open_registration",
     PortalControlIntent.SIGN_IN: "sign_in",
 }
 _ALLOWED_TRANSITIONS: Final = {
@@ -68,6 +69,16 @@ _ALLOWED_TRANSITIONS: Final = {
     PortalControlIntent.APPLY_MANUALLY: (
         WorkdayTransitionState.APPLY_CHOICES,
         frozenset({WorkdayTransitionState.ACCOUNT_PAGE}),
+    ),
+    PortalControlIntent.OPEN_REGISTRATION: (
+        WorkdayTransitionState.ACCOUNT_PAGE,
+        frozenset(
+            {
+                WorkdayTransitionState.LOGIN_FORM,
+                WorkdayTransitionState.AUTH_FORM_STRUCTURALLY_READY,
+                WorkdayTransitionState.AUTHENTICATED_APPLICATION_READY,
+            }
+        ),
     ),
     PortalControlIntent.SIGN_IN: (
         WorkdayTransitionState.ACCOUNT_PAGE,
@@ -224,8 +235,28 @@ class WorkdayTransitionRepairCoordinator:
             intent=request.ticket.key.action_intent,
         )
         if not safe_candidates:
+            intent_counts = {
+                intent.value: sum(
+                    candidate.intent_key == intent.value
+                    for candidate in observed.candidate_metadata
+                )
+                for intent in PortalControlIntent
+            }
+            scope_counts = {
+                scope: sum(
+                    candidate.scope_key == scope
+                    for candidate in observed.candidate_metadata
+                )
+                for scope in sorted(_SAFE_SCOPES)
+            }
             logger.info(
-                "workday_transition_repair_stage_rejected stage=safe_candidates"
+                "workday_transition_repair_stage_rejected stage=safe_candidates "
+                "candidate_count=%s expected_intent=%s intent_counts=%s "
+                "scope_counts=%s",
+                len(observed.candidate_metadata),
+                request.ticket.key.action_intent.value,
+                intent_counts,
+                scope_counts,
             )
             return await self._safe_hold(request.gate_lease)
 
@@ -278,7 +309,7 @@ class WorkdayTransitionRepairCoordinator:
                 action_intent=request.ticket.key.action_intent,
             )
             next_observed = await self._observer.observe()
-            next_observed = await self._hydrate_sign_in_destination(
+            next_observed = await self._hydrate_auth_destination(
                 request.ticket, next_observed
             )
         except WorkdayPageConditionError as exc:
@@ -452,6 +483,7 @@ class WorkdayTransitionRepairCoordinator:
             in {
                 PortalControlIntent.APPLY,
                 PortalControlIntent.APPLY_MANUALLY,
+                PortalControlIntent.OPEN_REGISTRATION,
                 PortalControlIntent.SIGN_IN,
             }
         )
@@ -473,14 +505,18 @@ class WorkdayTransitionRepairCoordinator:
             and valid_state
         )
 
-    async def _hydrate_sign_in_destination(
+    async def _hydrate_auth_destination(
         self,
         ticket: TransitionRepairTicket,
         observed: WorkdayObservedState,
     ) -> WorkdayObservedState:
-        """Reobserve a partial login form without accepting or learning it."""
+        """Reobserve a partial login or registration form before learning it."""
         should_hydrate = (
-            ticket.key.action_intent is PortalControlIntent.SIGN_IN
+            ticket.key.action_intent
+            in {
+                PortalControlIntent.OPEN_REGISTRATION,
+                PortalControlIntent.SIGN_IN,
+            }
             and ticket.expected_to_state
             is WorkdayTransitionState.AUTH_FORM_STRUCTURALLY_READY
             and observed.state is WorkdayTransitionState.LOGIN_FORM

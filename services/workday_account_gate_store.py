@@ -295,6 +295,32 @@ class SQLAlchemyWorkdayAccountGateStore:
             gate.state = WorkdayGateState.AUTH_OUTCOME_PENDING.value
             return WorkdayGateMutation(applied=True)
 
+    async def begin_auth_followup(
+        self, lease: WorkdayGateLease
+    ) -> WorkdayGateAcquisition | None:
+        """Close one rejected submit and grant one separately guarded follow-up."""
+        now = self._now()
+        async with self._session.begin():
+            gate, attempt = await self._current_attempt_for_update(lease)
+            if (
+                gate is None
+                or attempt is None
+                or attempt.lease_expires_at <= now
+                or attempt.auth_submit_count != AUTH_SUBMIT_LIMIT_PER_ATTEMPT
+                or gate.state != WorkdayGateState.AUTH_OUTCOME_PENDING.value
+            ):
+                return None
+            attempt.status = "completed"
+            attempt.heartbeat_at = now
+            gate.state = WorkdayGateState.OPEN.value
+            await self._session.flush()
+            return await self._grant(
+                gate=gate,
+                application_id=lease.application_id,
+                decision=WorkdayGateDecision.ALLOW,
+                now=now,
+            )
+
     async def claim_llm_repair(self, lease: WorkdayGateLease) -> WorkdayGateMutation:
         """Claim the one pre-auth structural repair permitted per attempt."""
         async with self._session.begin():

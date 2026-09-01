@@ -24,6 +24,16 @@ _UPPER = string.ascii_uppercase
 _DIGITS = string.digits
 _SPECIAL = "!@#$%^&*_-+="
 _PASSWORD_ALPHABET = _LOWER + _UPPER + _DIGITS + _SPECIAL
+MAX_UNCONFIRMED_ACCOUNT_ATTEMPTS = 3
+_ACCOUNT_DISCOVERY_STATES = frozenset(
+    {
+        "login_pending",
+        "login_submitted",
+        "registration_pending",
+        "registration_submitted",
+        "existing_account_credentials_required",
+    }
+)
 
 
 class PortalCredentialError(ValueError):
@@ -47,6 +57,8 @@ class WorkerPortalCredential:
     account_email: str
     status: Literal["active", "pending_registration"]
     password: str = dataclass_field(repr=False)
+    discovery_state: str | None = None
+    discovery_attempt_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +68,8 @@ class WorkerPortalAccountMetadata:
     account_ref: uuid.UUID
     portal_scope: str
     status: Literal["active", "pending_registration"]
+    discovery_state: str | None = None
+    discovery_attempt_count: int = 0
 
 
 def generate_portal_password(length: int = 24) -> str:
@@ -191,6 +205,22 @@ def safe_credential_view(document: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _account_discovery_values(
+    document: dict[str, Any], *, status: str
+) -> tuple[str | None, int]:
+    if status == "active":
+        return None, 0
+    discovery_state = document.get("account_discovery_state") or "login_pending"
+    discovery_attempt_count = document.get("account_discovery_attempt_count", 0)
+    if discovery_state not in _ACCOUNT_DISCOVERY_STATES:
+        raise PortalCredentialError("Portal account discovery state is invalid.")
+    if type(discovery_attempt_count) is not int or discovery_attempt_count < 0:
+        raise PortalCredentialError(
+            "Portal account discovery attempt count is invalid."
+        )
+    return discovery_state, discovery_attempt_count
+
+
 class PortalAccountMetadataRepository:
     """Resolve owned opaque account identity without reading credential material."""
 
@@ -264,6 +294,8 @@ class PortalCredentialRepository:
             "password_derivation": "hmac-sha512:v1",
             "credential_source": "generated",
             "status": "pending_registration",
+            "account_discovery_state": "login_pending",
+            "account_discovery_attempt_count": 0,
             "created_at": now,
             "updated_at": now,
             "reveal_count": 0,
@@ -313,6 +345,10 @@ class PortalCredentialRepository:
                     "created_at": now,
                     "reveal_count": 0,
                 },
+                "$unset": {
+                    "account_discovery_state": "",
+                    "account_discovery_attempt_count": "",
+                },
             },
             upsert=True,
             return_document=True,
@@ -353,6 +389,9 @@ class PortalCredentialRepository:
         status = document.get("status")
         if status not in {"active", "pending_registration"}:
             raise PortalCredentialError("Portal credential status is invalid.")
+        discovery_state, discovery_attempt_count = _account_discovery_values(
+            document, status=status
+        )
         credential = WorkerPortalCredential(
             credential_id=str(document["_id"]),
             portal_scope=document["portal_scope"],
@@ -361,6 +400,8 @@ class PortalCredentialRepository:
             password=decrypt_portal_password(
                 document["password_encrypted"], self._encryption_key
             ),
+            discovery_state=discovery_state,
+            discovery_attempt_count=discovery_attempt_count,
         )
         await self._record_event(user_id, document, "credential_used_by_worker")
         return credential
@@ -372,7 +413,14 @@ class PortalCredentialRepository:
         scope = normalize_portal_scope(portal_scope)
         document = await self._credentials.find_one(
             {"user_id": user_id, "portal_scope": scope},
-            {"_id": 1, "user_id": 1, "portal_scope": 1, "status": 1},
+            {
+                "_id": 1,
+                "user_id": 1,
+                "portal_scope": 1,
+                "status": 1,
+                "account_discovery_state": 1,
+                "account_discovery_attempt_count": 1,
+            },
         )
         if document is None:
             return None
@@ -381,6 +429,9 @@ class PortalCredentialRepository:
         status = document.get("status")
         if status not in {"active", "pending_registration"}:
             raise PortalCredentialError("Portal credential status is invalid.")
+        discovery_state, discovery_attempt_count = _account_discovery_values(
+            document, status=status
+        )
         try:
             account_ref = uuid.UUID(str(document["_id"]))
         except (KeyError, TypeError, ValueError) as exc:
@@ -389,7 +440,116 @@ class PortalCredentialRepository:
             account_ref=account_ref,
             portal_scope=scope,
             status=status,
+            discovery_state=discovery_state,
+            discovery_attempt_count=discovery_attempt_count,
         )
+
+    async def claim_account_discovery_attempt(
+        self,
+        *,
+        user_id: str,
+        account_ref: uuid.UUID,
+        portal_scope: str,
+        operation: Literal["login", "registration"],
+    ) -> int | None:
+        """Claim at most three auth submits for one unconfirmed portal account."""
+        scope = normalize_portal_scope(portal_scope)
+        if operation == "login":
+            # A registration submit can succeed even when its navigation result is
+            # ambiguous.  The next user-triggered retry may spend the remaining
+            # bounded attempt on login verification, never another signup submit.
+            allowed_states = ["login_pending", "registration_submitted"]
+            state_filter: dict[str, Any] = {
+                "$or": [
+                    {"account_discovery_state": {"$in": allowed_states}},
+                    {"account_discovery_state": {"$exists": False}},
+                ]
+            }
+        elif operation == "registration":
+            allowed_states = ["registration_pending", "registration_submitted"]
+            state_filter = {"account_discovery_state": {"$in": allowed_states}}
+        else:  # pragma: no cover - Literal contract defense
+            raise PortalCredentialError(
+                "Portal account discovery operation is invalid."
+            )
+        now = datetime.now(UTC)
+        stored = await self._credentials.find_one_and_update(
+            {
+                "_id": str(account_ref),
+                "user_id": user_id,
+                "portal_scope": scope,
+                "status": "pending_registration",
+                "$and": [
+                    state_filter,
+                    {
+                        "$or": [
+                            {
+                                "account_discovery_attempt_count": {
+                                    "$lt": MAX_UNCONFIRMED_ACCOUNT_ATTEMPTS
+                                }
+                            },
+                            {"account_discovery_attempt_count": {"$exists": False}},
+                        ]
+                    },
+                ],
+            },
+            {
+                "$set": {
+                    "account_discovery_state": f"{operation}_submitted",
+                    "updated_at": now,
+                },
+                "$inc": {"account_discovery_attempt_count": 1},
+            },
+            upsert=False,
+            return_document=True,
+        )
+        if stored is None:
+            return None
+        attempt_count = stored.get("account_discovery_attempt_count")
+        if type(attempt_count) is not int or not (
+            1 <= attempt_count <= MAX_UNCONFIRMED_ACCOUNT_ATTEMPTS
+        ):
+            raise PortalCredentialError(
+                "Portal account discovery attempt count is invalid."
+            )
+        await self._record_event(
+            user_id,
+            stored,
+            f"account_discovery_{operation}_claimed",
+        )
+        return attempt_count
+
+    async def mark_account_discovery_state(
+        self,
+        *,
+        user_id: str,
+        account_ref: uuid.UUID,
+        portal_scope: str,
+        state: Literal["registration_pending", "existing_account_credentials_required"],
+    ) -> bool:
+        """Persist one safe unconfirmed-account decision without exposing secrets."""
+        scope = normalize_portal_scope(portal_scope)
+        now = datetime.now(UTC)
+        stored = await self._credentials.find_one_and_update(
+            {
+                "_id": str(account_ref),
+                "user_id": user_id,
+                "portal_scope": scope,
+                "status": "pending_registration",
+            },
+            {
+                "$set": {
+                    "account_discovery_state": state,
+                    "updated_at": now,
+                }
+            },
+            upsert=False,
+            return_document=True,
+        )
+        if stored is None:
+            return False
+        await self._record_event(user_id, stored, f"account_discovery_{state}")
+        return True
 
     async def credential_for_auth_broker(
         self, *, user_id: str, account_ref: uuid.UUID, portal_scope: str
@@ -414,6 +574,9 @@ class PortalCredentialRepository:
         status = document.get("status")
         if status not in {"active", "pending_registration"}:
             raise PortalCredentialError("Portal credential status is invalid.")
+        discovery_state, discovery_attempt_count = _account_discovery_values(
+            document, status=status
+        )
         credential = WorkerPortalCredential(
             credential_id=str(document["_id"]),
             portal_scope=document["portal_scope"],
@@ -422,6 +585,8 @@ class PortalCredentialRepository:
             password=decrypt_portal_password(
                 document["password_encrypted"], self._encryption_key
             ),
+            discovery_state=discovery_state,
+            discovery_attempt_count=discovery_attempt_count,
         )
         await self._record_event(user_id, document, "credential_used_by_auth_broker")
         return credential
@@ -438,7 +603,13 @@ class PortalCredentialRepository:
         now = datetime.now(UTC)
         stored = await self._credentials.find_one_and_update(
             {"user_id": user_id, "portal_scope": scope},
-            {"$set": {"status": "active", "updated_at": now}},
+            {
+                "$set": {"status": "active", "updated_at": now},
+                "$unset": {
+                    "account_discovery_state": "",
+                    "account_discovery_attempt_count": "",
+                },
+            },
             upsert=False,
             return_document=True,
         )

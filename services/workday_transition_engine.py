@@ -32,12 +32,14 @@ _EXECUTABLE_INTENTS: Final = frozenset(
     {
         PortalControlIntent.APPLY,
         PortalControlIntent.APPLY_MANUALLY,
+        PortalControlIntent.OPEN_REGISTRATION,
         PortalControlIntent.SIGN_IN,
     }
 )
 _LOCATOR_INTENTS: Final = {
     PortalControlIntent.APPLY: "apply",
     PortalControlIntent.APPLY_MANUALLY: "apply_manually",
+    PortalControlIntent.OPEN_REGISTRATION: "open_registration",
     PortalControlIntent.SIGN_IN: "sign_in",
 }
 _ALLOWED_NEXT_STATES: Final = {
@@ -49,6 +51,13 @@ _ALLOWED_NEXT_STATES: Final = {
     ),
     PortalControlIntent.APPLY_MANUALLY: frozenset(
         {WorkdayTransitionState.ACCOUNT_PAGE}
+    ),
+    PortalControlIntent.OPEN_REGISTRATION: frozenset(
+        {
+            WorkdayTransitionState.LOGIN_FORM,
+            WorkdayTransitionState.AUTH_FORM_STRUCTURALLY_READY,
+            WorkdayTransitionState.AUTHENTICATED_APPLICATION_READY,
+        }
     ),
     PortalControlIntent.SIGN_IN: frozenset(
         {
@@ -66,6 +75,10 @@ _BOOTSTRAP_TRANSITIONS: Final = {
     PortalControlIntent.APPLY_MANUALLY: (
         WorkdayTransitionState.ACCOUNT_PAGE,
         WorkdayTransitionRisk.NAVIGATION_ONLY,
+    ),
+    PortalControlIntent.OPEN_REGISTRATION: (
+        WorkdayTransitionState.AUTH_FORM_STRUCTURALLY_READY,
+        WorkdayTransitionRisk.AUTH_STRUCTURE,
     ),
     PortalControlIntent.SIGN_IN: (
         WorkdayTransitionState.AUTH_FORM_STRUCTURALLY_READY,
@@ -416,6 +429,10 @@ def _valid_from_state(
         or (
             intent is PortalControlIntent.APPLY_MANUALLY
             and state is WorkdayTransitionState.APPLY_CHOICES
+        )
+        or (
+            intent is PortalControlIntent.OPEN_REGISTRATION
+            and state is WorkdayTransitionState.ACCOUNT_PAGE
         )
         or (
             intent is PortalControlIntent.SIGN_IN

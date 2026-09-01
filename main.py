@@ -22,6 +22,7 @@ from fastapi.templating import Jinja2Templates
 from api.admin import router as admin_router
 from api.applications import router as applications_router
 from api.automation import router as automation_router
+from api.automation_test import router as automation_test_router
 from api.auth import router as auth_router
 from api.credential_vault import router as credential_vault_router
 from api.extension_autofill import router as extension_autofill_router
@@ -85,6 +86,18 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 templates: Jinja2Templates | None = None
+
+OPENAPI_TAGS = [
+    {
+        "name": "Test",
+        "description": (
+            "Debug-only Workday Stage 1 checks. Queue a public job URL with "
+            "generated dummy metadata, run the returned launcher command in a "
+            "visible foreground PowerShell, retry a review hold when required, "
+            "or clean up an incomplete test application."
+        ),
+    }
+]
 
 # =============================================================================
 # ASSET MANIFEST (Vite/esbuild content-hashed output)
@@ -357,10 +370,12 @@ def create_app() -> FastAPI:
         title=settings.app_name,
         description=settings.app_description,
         version=settings.app_version,
+        openapi_tags=OPENAPI_TAGS,
         docs_url="/api/docs" if settings.debug else None,
         redoc_url="/api/redoc" if settings.debug else None,
         openapi_url="/api/openapi.json" if settings.debug else None,
         swagger_ui_parameters={
+            "docExpansion": "none",
             "operationsSorter": "alpha",
             "tagsSorter": "alpha",
         },
@@ -694,6 +709,11 @@ def include_routers(app: FastAPI):
         prefix=f"{API_V1_PREFIX}/automation",
         tags=["Application Automation"],
     )
+    if settings.debug:
+        app.include_router(
+            automation_test_router,
+            prefix=f"{API_V1_PREFIX}/automation",
+        )
     app.include_router(
         credential_vault_router,
         prefix=f"{API_V1_PREFIX}/credential-vault",

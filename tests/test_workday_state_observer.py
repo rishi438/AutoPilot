@@ -237,3 +237,23 @@ async def test_observation_is_fresh_and_performs_no_mutation_llm_or_vault_call()
     assert second.state is WorkdayTransitionState.APPLY_CHOICES
     assert adapter.captures == 2
     assert adapter.mutations == adapter.llm_calls == adapter.vault_calls == 0
+
+
+def test_observer_next_application_step_intent_exact_match() -> None:
+    from services.portal_control_resolver import PortalControlIntent
+    from services.workday_state_observer import _INTENT_PATTERNS
+
+    intent_map = dict(_INTENT_PATTERNS)
+    pattern = intent_map[PortalControlIntent.NEXT_APPLICATION_STEP]
+
+    # Exact matches -> True
+    assert pattern.fullmatch("Next") is not None
+    assert pattern.fullmatch("next") is not None
+    assert pattern.fullmatch("Save and Continue") is not None
+    assert pattern.fullmatch("Save & Continue") is not None
+
+    # Suffixes -> False
+    assert pattern.fullmatch("Next Steps") is None
+    assert pattern.fullmatch("Next Question") is None
+    assert pattern.fullmatch("Save and Continue Later") is None
+    assert pattern.fullmatch("Save & Continue Later") is None

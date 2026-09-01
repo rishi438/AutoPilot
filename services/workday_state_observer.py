@@ -44,6 +44,12 @@ _SAFE_ROLES = frozenset(
 )
 _ACTION_ROLES = frozenset({"button", "link"})
 _FIELD_ROLES = frozenset({"checkbox", "combobox", "radio", "textbox"})
+WORKDAY_ACCOUNT_TERMS_CONSENT = re.compile(
+    r"^\s*yes,?\s+i\s+have\s+(?:reviewed\s+the\s+above|read)\s+and\s+"
+    r"consent\s+to\s+"
+    r"the\s+terms\s+and\s+conditions\.?\s*$",
+    re.IGNORECASE,
+)
 _INTENT_PATTERNS: tuple[tuple[PortalControlIntent, re.Pattern[str]], ...] = (
     (
         PortalControlIntent.APPLY_MANUALLY,
@@ -67,7 +73,7 @@ _INTENT_PATTERNS: tuple[tuple[PortalControlIntent, re.Pattern[str]], ...] = (
     ),
     (
         PortalControlIntent.NEXT_APPLICATION_STEP,
-        re.compile(r"^(?:next|save\s+and\s+continue)$", re.IGNORECASE),
+        re.compile(r"^(?:next|save\s+(?:and|&)\s+continue)$", re.IGNORECASE),
     ),
 )
 
@@ -95,6 +101,7 @@ class WorkdayControlScope(str, Enum):
 
 _SAFE_DIAGNOSTIC_ROLE_KEYS = (
     "account_consent",
+    "recognized_account_terms",
     "application_field",
     "auth_challenge_field",
     "auth_dialog_control",
@@ -182,8 +189,17 @@ def _is_challenge_control(control: WorkdaySemanticControl) -> bool:
 
 
 def _is_consent_control(control: WorkdaySemanticControl) -> bool:
+    if control.role.strip().casefold() not in {"checkbox", "radio"}:
+        return False
     normalized = control.semantic_name.casefold()
     return "consent" in normalized or "terms and conditions" in normalized
+
+
+def _is_recognized_account_terms_control(control: WorkdaySemanticControl) -> bool:
+    return (
+        control.role.strip().casefold() in {"checkbox", "radio"}
+        and WORKDAY_ACCOUNT_TERMS_CONSENT.fullmatch(control.semantic_name) is not None
+    )
 
 
 def _normalize_intent(name: str) -> PortalControlIntent | None:
@@ -228,6 +244,8 @@ def _safe_facts(
         input_type = control.input_type.strip().casefold()
         if _is_challenge_control(control):
             semantic_role = "auth_challenge_field"
+        elif _is_recognized_account_terms_control(control):
+            semantic_role = "recognized_account_terms"
         elif _is_consent_control(control):
             semantic_role = "account_consent"
         elif role == "textbox" and input_type in {"email", "password"}:
@@ -297,9 +315,11 @@ def _safe_count_summary(counts: Counter[str], *, allowed_keys: Sequence[str]) ->
 def _classify_state(
     roles: Counter[str], intents: Counter[str]
 ) -> WorkdayTransitionState:
-    if roles["auth_pending"]:
-        return WorkdayTransitionState.AUTH_OUTCOME_PENDING
-    if roles["auth_challenge_field"] or roles["account_consent"]:
+    if (
+        roles["auth_pending"]
+        or roles["auth_challenge_field"]
+        or roles["account_consent"]
+    ):
         return WorkdayTransitionState.AUTH_OUTCOME_PENDING
     if (
         roles["application_field"]
@@ -315,6 +335,8 @@ def _classify_state(
         has_email and password_count >= 2 and has_create
     ):
         return WorkdayTransitionState.AUTH_FORM_STRUCTURALLY_READY
+    if roles["recognized_account_terms"]:
+        return WorkdayTransitionState.AUTH_OUTCOME_PENDING
     if has_email or password_count or (has_sign_in and roles["form"]):
         return WorkdayTransitionState.LOGIN_FORM
     if intents[PortalControlIntent.APPLY_MANUALLY.value]:
@@ -340,6 +362,7 @@ def _auth_pending_reason_codes(roles: Counter[str]) -> tuple[str, ...]:
         "auth_pending",
         "auth_challenge_field",
         "account_consent",
+        "recognized_account_terms",
         "portal_alert",
     )
     return tuple(role for role in reason_roles if roles[role])

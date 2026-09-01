@@ -32,6 +32,7 @@ from services.workday_auth_broker import (
 )
 from services.workday_failure_router import WorkdayFailureOutcome
 from services.workday_state_observer import (
+    WORKDAY_ACCOUNT_TERMS_CONSENT,
     WorkdayControlScope,
     WorkdayPageStructure,
     WorkdaySemanticControl,
@@ -44,18 +45,18 @@ from services.workday_transition_contracts import WorkdayFailureClass
 _WORKDAY_HOST = re.compile(r"(^|\.)(myworkdayjobs|myworkdaysite)\.com$")
 _APPLY_ACTION = re.compile(r"^\s*apply(?:\s+now)?\s*$", re.IGNORECASE)
 _APPLY_MANUALLY_ACTION = re.compile(r"^\s*apply\s+manually\s*$", re.IGNORECASE)
-_ACCOUNT_TERMS_CONSENT = re.compile(
-    r"^\s*yes,?\s+i\s+have\s+reviewed\s+the\s+above\s+and\s+consent\s+to\s+"
-    r"the\s+terms\s+and\s+conditions\.?\s*$",
-    re.IGNORECASE,
-)
 _CREATE_ACCOUNT_ACTION = re.compile(
     r"^\s*(?:create\s+account|register)\s*$", re.IGNORECASE
 )
 _LOGIN_ACTION = re.compile(r"^\s*(?:sign\s+in|log\s+in)\s*$", re.IGNORECASE)
-_SAVE_AND_CONTINUE_ACTION = re.compile(r"^\s*save\s+and\s+continue\s*$", re.IGNORECASE)
+_CLOSE_DIALOG_ACTION = re.compile(
+    r"^\s*(?:close(?:\s+(?:dialog|modal))?|cancel)\s*$", re.IGNORECASE
+)
+_SAVE_AND_CONTINUE_ACTION = re.compile(
+    r"^\s*save\s+(?:and|&)\s+continue\s*$", re.IGNORECASE
+)
 _NEXT_APPLICATION_STEP_ACTION = re.compile(
-    r"^\s*(?:next|save\s+and\s+continue)\s*$", re.IGNORECASE
+    r"^\s*(?:next|save\s+(?:and|&)\s+continue)\s*$", re.IGNORECASE
 )
 _INFORMATION_SECTION_HEADING = re.compile(
     r"^\s*(?:basic|my)\s+information\s*$", re.IGNORECASE
@@ -71,12 +72,14 @@ _ACCOUNT_NOT_FOUND = re.compile(
 )
 _INVALID_CREDENTIALS = re.compile(
     r"invalid\s+(?:email|password|credentials)|incorrect\s+(?:email|password)|"
-    r"email\s+or\s+password\s+is\s+incorrect",
+    r"email\s+or\s+password\s+is\s+incorrect|"
+    r"wrong\s+email(?:\s+address)?\s+or\s+password",
     re.IGNORECASE,
 )
 _ACCOUNT_EXISTS = re.compile(
-    r"account\s+already\s+exists|email\s+is\s+already\s+(?:in\s+use|registered)",
-    re.IGNORECASE,
+    r"account\b.{0,80}\balready\s+exists|"
+    r"email(?:\s+address)?\s+is\s+already\s+(?:in\s+use|registered)",
+    re.IGNORECASE | re.DOTALL,
 )
 _ACCOUNT_TEMPORARILY_LOCKED = re.compile(
     r"\b(?:your\s+)?account\s+(?:has\s+been|is)\s+temporarily\s+locked\b|"
@@ -105,7 +108,9 @@ _JOB_UNAVAILABLE = re.compile(
     re.IGNORECASE,
 )
 _NAVIGATION_CONTEXT_DESTROYED = re.compile(
-    r"execution context was destroyed.*navigation", re.IGNORECASE | re.DOTALL
+    r"execution context was destroyed|Cannot find context with specified id|"
+    r"frame (?:was|has been|is) detached|detached frame",
+    re.IGNORECASE | re.DOTALL,
 )
 logger = logging.getLogger(__name__)
 
@@ -354,6 +359,14 @@ class WorkdayBrowser(Protocol):
 
     async def open_registration(self) -> None: ...
 
+    async def open_registration_after_rejected_login(
+        self, *, expected_scope: str
+    ) -> None: ...
+
+    async def open_registration_from_login_form(
+        self, *, expected_scope: str
+    ) -> None: ...
+
     async def fill_registration(self, credential: WorkerPortalCredential) -> None: ...
 
     async def submit_registration(self) -> None: ...
@@ -434,6 +447,7 @@ class PlaywrightWorkdayBrowser:
         self._decision_reporter = decision_reporter
         self._form_locators: dict[str, Any] = {}
         self._verified_auth_scope: str | None = None
+        self._verified_registration_scope: str | None = None
 
     def _report_control_decision(self, event: dict[str, Any]) -> None:
         if self._decision_reporter is not None:
@@ -492,8 +506,13 @@ class PlaywrightWorkdayBrowser:
                 """element => ({
                     tag: (element.tagName || '').toLowerCase(),
                     role: (element.getAttribute('role') || '').toLowerCase(),
-                    name: element.getAttribute('aria-label') || element.innerText ||
-                          element.title || '',
+                    name: element.getAttribute('aria-label') ||
+                          (element.labels && element.labels.length
+                              ? Array.from(element.labels)
+                                  .map(label => label.innerText || label.textContent || '')
+                                  .join(' ')
+                              : '') ||
+                          element.innerText || element.title || '',
                     inputType: (element.getAttribute('type') || '').toLowerCase(),
                     isEmail: element.matches(
                         "input[type='email'], input[autocomplete='email'], " +
@@ -539,12 +558,25 @@ class PlaywrightWorkdayBrowser:
                     scope_kind=scope_kind,
                 )
             )
+        heading_loc = getattr(self._page, "locator", None)
+        headings: list[str] = []
+        if callable(heading_loc):
+            try:
+                loc = self._page.locator(self._HEADING_SELECTOR)
+                if hasattr(loc, "all_inner_texts"):
+                    headings = await loc.all_inner_texts()
+            except Exception:
+                headings = []
+        has_info_heading = any(
+            _INFORMATION_SECTION_HEADING.fullmatch(" ".join(h.split()))
+            for h in headings[:20]
+        )
         navigation_names = {
             " ".join(item.semantic_name.split())
             for item in observed
             if item.role in {"button", "link"}
         }
-        if any(
+        if not has_info_heading and any(
             _APPLY_ACTION.fullmatch(name) is not None
             or _APPLY_MANUALLY_ACTION.fullmatch(name) is not None
             for name in navigation_names
@@ -569,7 +601,8 @@ class PlaywrightWorkdayBrowser:
             (_APPLY_MANUALLY_ACTION, "Apply Manually"),
             (_APPLY_ACTION, "Apply"),
             (_LOGIN_ACTION, "Sign In"),
-            (_SAVE_AND_CONTINUE_ACTION, "Save and Continue"),
+            (_CREATE_ACCOUNT_ACTION, "Create Account"),
+            (_NEXT_APPLICATION_STEP_ACTION, "Save and Continue"),
         )
         get_by_role = getattr(scope, "get_by_role", None)
         if not callable(get_by_role):
@@ -601,6 +634,7 @@ class PlaywrightWorkdayBrowser:
         patterns = {
             PortalControlIntent.APPLY: _APPLY_ACTION,
             PortalControlIntent.APPLY_MANUALLY: _APPLY_MANUALLY_ACTION,
+            PortalControlIntent.OPEN_REGISTRATION: _CREATE_ACCOUNT_ACTION,
             PortalControlIntent.SIGN_IN: _LOGIN_ACTION,
         }
         pattern = patterns.get(action_intent)
@@ -635,7 +669,11 @@ class PlaywrightWorkdayBrowser:
             raise WorkdayWorkerError("The Unit 1 transition candidate was not unique.")
         previous_account_state = (
             await self.detect_account_state()
-            if action_intent is PortalControlIntent.SIGN_IN
+            if action_intent
+            in {
+                PortalControlIntent.OPEN_REGISTRATION,
+                PortalControlIntent.SIGN_IN,
+            }
             else None
         )
         await self._click_and_adopt_workday_popup(matches[0])
@@ -664,6 +702,8 @@ class PlaywrightWorkdayBrowser:
             NativeAccountPageState.ACCOUNT_TEMPORARILY_LOCKED: WorkdayFailureClass.POST_SUBMIT_ACCOUNT_LOCKED,
             NativeAccountPageState.CAPTCHA: WorkdayFailureClass.POST_SUBMIT_CAPTCHA_OR_OTP,
             NativeAccountPageState.OTP: WorkdayFailureClass.POST_SUBMIT_CAPTCHA_OR_OTP,
+            NativeAccountPageState.REGISTRATION_ACCOUNT_EXISTS: WorkdayFailureClass.POST_SUBMIT_ACCOUNT_EXISTS,
+            NativeAccountPageState.LOGIN_ACCOUNT_NOT_FOUND: WorkdayFailureClass.POST_SUBMIT_AUTH_REJECTED,
             NativeAccountPageState.LOGIN_INVALID_CREDENTIALS: WorkdayFailureClass.POST_SUBMIT_AUTH_REJECTED,
         }.get(state)
         if failure is None:
@@ -813,7 +853,7 @@ class PlaywrightWorkdayBrowser:
             current = urlsplit(self._page.url)
             target = urlsplit(target_url)
             approved_origin = current.scheme.casefold() == "https" and bool(
-                _WORKDAY_HOST.fullmatch((current.hostname or "").casefold())
+                _WORKDAY_HOST.search((current.hostname or "").casefold())
             )
             current_scope = derive_workday_portal_scope(self._page.url)
             tenant_verified = current_scope == expected_tenant_scope
@@ -879,7 +919,24 @@ class PlaywrightWorkdayBrowser:
                 "target_path_present": False,
             }
         signature_payload = json.dumps(
-            facts, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+            {
+                "approved_https_origin": facts["approved_https_origin"],
+                "canonical_tenant_verified": facts["canonical_tenant_verified"],
+                "leased_job_context_matches": facts["leased_job_context_matches"],
+                "leased_application_context_matches": facts[
+                    "leased_application_context_matches"
+                ],
+                "external_account_matches": facts["external_account_matches"],
+                "no_login_or_auth_error": facts["no_login_or_auth_error"],
+                "no_captcha_or_otp_or_lock": facts["no_captcha_or_otp_or_lock"],
+                "basic_information_control_hydrated": facts[
+                    "basic_information_control_hydrated"
+                ],
+                "target_path_present": facts["target_path_present"],
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
         ).encode("ascii")
         return WorkdayPrivateCheckpointEvidence(
             approved_https_origin=facts["approved_https_origin"],
@@ -1024,7 +1081,7 @@ class PlaywrightWorkdayBrowser:
             has_application_action=(
                 await self._first_visible_role(
                     ("button",),
-                    re.compile(r"^(?:next|save\s+and\s+continue|submit)$", re.I),
+                    re.compile(r"^(?:next|save\s+(?:and|&)\s+continue|submit)$", re.I),
                 )
                 is not None
             ),
@@ -1097,6 +1154,139 @@ class PlaywrightWorkdayBrowser:
         self._assert_current_workday_url()
         logger.info("workday_login_opened")
 
+    async def open_registration_after_rejected_login(
+        self, *, expected_scope: str
+    ) -> None:
+        """Open one visible registration form after one explicit login rejection."""
+        self._assert_current_workday_url()
+        if derive_workday_portal_scope(self._page.url) != expected_scope:
+            raise WorkdayWorkerError(
+                "The rejected login is outside the expected Workday tenant."
+            )
+        previous_state = await self.detect_account_state()
+        if previous_state not in {
+            NativeAccountPageState.LOGIN_ACCOUNT_NOT_FOUND,
+            NativeAccountPageState.LOGIN_INVALID_CREDENTIALS,
+        }:
+            raise WorkdayWorkerError(
+                "Registration fallback requires an explicit login rejection."
+            )
+        account_dialog = await self._visible_account_dialog()
+        if account_dialog is None:
+            raise WorkdayWorkerError(
+                "The rejected Workday login dialog is no longer available."
+            )
+        create_count = await self._visible_role_count_in(
+            account_dialog, ("button", "link"), _CREATE_ACCOUNT_ACTION
+        )
+        if create_count == 1:
+            action = await self._first_visible_role_in(
+                account_dialog, ("button", "link"), _CREATE_ACCOUNT_ACTION
+            )
+            if action is None:  # pragma: no cover - count/action invariant
+                raise WorkdayWorkerError(
+                    "The Workday Create Account action became unavailable."
+                )
+            await action.click(timeout=self._timeout_ms)
+        elif create_count == 0:
+            close_count = await self._visible_role_count_in(
+                account_dialog, ("button",), _CLOSE_DIALOG_ACTION
+            )
+            if close_count != 1:
+                raise WorkdayWorkerError(
+                    "The rejected Workday login dialog cannot be closed uniquely."
+                )
+            close_action = await self._first_visible_role_in(
+                account_dialog, ("button",), _CLOSE_DIALOG_ACTION
+            )
+            if close_action is None:  # pragma: no cover - count/action invariant
+                raise WorkdayWorkerError(
+                    "The Workday login close action became unavailable."
+                )
+            await close_action.click(timeout=self._timeout_ms)
+            await self._page.wait_for_timeout(250)
+            if (
+                await self.detect_account_state()
+                is NativeAccountPageState.REGISTRATION_REQUIRED
+            ):
+                self._assert_current_workday_url()
+                logger.info("workday_registration_fallback_opened")
+                return
+            page_create_count = await self._visible_role_count_in(
+                self._page, ("button", "link"), _CREATE_ACCOUNT_ACTION
+            )
+            if page_create_count != 1:
+                raise WorkdayWorkerError(
+                    "The Workday page does not contain one Create Account action."
+                )
+            action = await self._first_visible_role_in(
+                self._page, ("button", "link"), _CREATE_ACCOUNT_ACTION
+            )
+            if action is None:  # pragma: no cover - count/action invariant
+                raise WorkdayWorkerError(
+                    "The Workday Create Account action became unavailable."
+                )
+            await action.click(timeout=self._timeout_ms)
+        else:
+            raise WorkdayWorkerError(
+                "The rejected Workday login dialog has ambiguous Create Account actions."
+            )
+        reached_state = await self._wait_for_account_state_change(previous_state)
+        if reached_state is not NativeAccountPageState.REGISTRATION_REQUIRED:
+            raise WorkdayWorkerError(
+                "The Workday Create Account action did not open a registration form."
+            )
+        self._assert_current_workday_url()
+        logger.info("workday_registration_fallback_opened")
+
+    async def open_registration_from_login_form(self, *, expected_scope: str) -> None:
+        """Open signup from one verified login form without submitting login."""
+        self._assert_current_workday_url()
+        if derive_workday_portal_scope(self._page.url) != expected_scope:
+            raise WorkdayWorkerError(
+                "The Workday login form is outside the expected tenant."
+            )
+        previous_state = await self.detect_account_state()
+        if previous_state is not NativeAccountPageState.LOGIN_REQUIRED:
+            raise WorkdayWorkerError(
+                "Registration entry requires one confirmed Workday login form."
+            )
+        if not await self.verify_unique_auth_controls(expected_scope=expected_scope):
+            raise WorkdayWorkerError(
+                "The Workday login form is not structurally unique."
+            )
+        account_scope, scope_kind = await self._visible_account_control_scope()
+        if account_scope is None or scope_kind is WorkdayControlScope.PAGE:
+            raise WorkdayWorkerError("The Workday login form was not available.")
+        create_count = await self._visible_role_count_in(
+            account_scope, ("button", "link"), _CREATE_ACCOUNT_ACTION
+        )
+        if create_count != 1:
+            raise WorkdayWorkerError(
+                "The Workday login form does not contain one Create Account action."
+            )
+        action = await self._first_visible_role_in(
+            account_scope, ("button", "link"), _CREATE_ACCOUNT_ACTION
+        )
+        if action is None or not await action.is_enabled():
+            raise WorkdayWorkerError(
+                "The Workday Create Account action is unavailable."
+            )
+        await action.click(timeout=self._timeout_ms)
+        self._verified_auth_scope = None
+        reached_state = await self._wait_for_account_state_change(previous_state)
+        if reached_state is not NativeAccountPageState.REGISTRATION_REQUIRED:
+            raise WorkdayWorkerError(
+                "The Workday Create Account action did not open registration."
+            )
+        if not await self.verify_unique_registration_controls(
+            expected_scope=expected_scope
+        ):
+            raise WorkdayWorkerError(
+                "The Workday registration form is not structurally unique."
+            )
+        logger.info("workday_registration_opened_from_login_form")
+
     async def verify_unique_auth_controls(self, *, expected_scope: str) -> bool:
         """Recheck origin/tenant and exactly one active-dialog login control set."""
         self._assert_current_workday_url()
@@ -1144,6 +1334,104 @@ class PlaywrightWorkdayBrowser:
         await password.fill(credential.password, timeout=self._timeout_ms)
         logger.info("workday_login_fields_filled")
 
+    async def verify_unique_registration_controls(self, *, expected_scope: str) -> bool:
+        """Verify one tenant-bound registration form before secret access."""
+        self._assert_current_workday_url()
+        try:
+            current_scope = derive_workday_portal_scope(self._page.url)
+        except PortalCredentialError:
+            return False
+        if current_scope != expected_scope:
+            return False
+        account_scope, scope_kind = await self._visible_account_control_scope()
+        if account_scope is None or scope_kind is WorkdayControlScope.PAGE:
+            return False
+        email_count = await self._visible_count_in(account_scope, self._EMAIL_SELECTOR)
+        password_count = await self._visible_count_in(
+            account_scope, self._PASSWORD_SELECTOR
+        )
+        create_count = await self._visible_role_count_in(
+            account_scope, ("button",), _CREATE_ACCOUNT_ACTION
+        )
+        verified = email_count == 1 and password_count == 2 and create_count == 1
+        self._verified_registration_scope = expected_scope if verified else None
+        return verified
+
+    async def fill_verified_registration_controls(
+        self, credential: WorkerPortalCredential
+    ) -> None:
+        """Fill only the registration form proven by the broker."""
+        if self._verified_registration_scope is None:
+            raise WorkdayWorkerError("The Workday registration form was not verified.")
+        if not await self.verify_unique_registration_controls(
+            expected_scope=self._verified_registration_scope
+        ):
+            raise WorkdayWorkerError(
+                "The Workday registration form changed before fill."
+            )
+        account_scope, scope_kind = await self._visible_account_control_scope()
+        if account_scope is None or scope_kind is WorkdayControlScope.PAGE:
+            raise WorkdayWorkerError("The Workday registration form was unavailable.")
+        email = await self._first_visible_locator_in(
+            account_scope, self._EMAIL_SELECTOR
+        )
+        passwords = account_scope.locator(self._PASSWORD_SELECTOR)
+        visible_passwords = [
+            passwords.nth(index)
+            for index in range(await passwords.count())
+            if await passwords.nth(index).is_visible()
+        ]
+        if email is None or len(visible_passwords) != 2:
+            raise WorkdayWorkerError(
+                "The Workday registration fields were not available."
+            )
+        terms_consent = await self._first_visible_role_in(
+            account_scope, ("checkbox",), WORKDAY_ACCOUNT_TERMS_CONSENT
+        )
+        if terms_consent is not None:
+            if not self._accept_account_terms:
+                raise WorkdayWorkerError(
+                    "Explicit approval is required for Workday account terms."
+                )
+            if not await terms_consent.is_checked():
+                await terms_consent.check(timeout=self._timeout_ms)
+                logger.info("workday_account_terms_checked")
+        await email.fill(credential.account_email, timeout=self._timeout_ms)
+        await visible_passwords[0].fill(credential.password, timeout=self._timeout_ms)
+        await visible_passwords[1].fill(credential.password, timeout=self._timeout_ms)
+        logger.info("workday_registration_fields_filled")
+
+    async def click_verified_create_account(self) -> None:
+        """Submit exactly one previously verified registration form."""
+        if self._verified_registration_scope is None:
+            raise WorkdayWorkerError("The Workday registration form was not verified.")
+        if not await self.verify_unique_registration_controls(
+            expected_scope=self._verified_registration_scope
+        ):
+            raise WorkdayWorkerError(
+                "The Workday registration form changed before submit."
+            )
+        account_scope, scope_kind = await self._visible_account_control_scope()
+        if account_scope is None or scope_kind is WorkdayControlScope.PAGE:
+            raise WorkdayWorkerError("The Workday registration form was unavailable.")
+        action = await self._resolve_action(
+            PortalControlIntent.CREATE_ACCOUNT,
+            ("button",),
+            _CREATE_ACCOUNT_ACTION,
+            scope=account_scope,
+        )
+        if action is None:
+            raise WorkdayWorkerError(
+                "A visible Create Account action was not found.",
+                safe_code="workday_create_account_not_selected",
+            )
+        await action.click(timeout=self._timeout_ms)
+        self._verified_registration_scope = None
+        logger.info("workday_registration_submitted")
+        await self._wait_for_account_state_change(
+            NativeAccountPageState.REGISTRATION_REQUIRED
+        )
+
     async def click_verified_sign_in(self) -> None:
         if self._verified_auth_scope is None:
             raise WorkdayWorkerError("The Workday auth form was not verified.")
@@ -1182,7 +1470,7 @@ class PlaywrightWorkdayBrowser:
                 "The Workday registration fields were not available."
             )
         terms_consent = await self._first_visible_role(
-            ("checkbox",), _ACCOUNT_TERMS_CONSENT
+            ("checkbox",), WORKDAY_ACCOUNT_TERMS_CONSENT
         )
         if terms_consent is not None:
             if not self._accept_account_terms:
@@ -1514,7 +1802,14 @@ class PlaywrightWorkdayBrowser:
         sign_in_count = await self._visible_role_count_in(
             self._page, ("button",), _LOGIN_ACTION
         )
-        if email_count == password_count == sign_in_count == 1:
+        create_count = await self._visible_role_count_in(
+            self._page, ("button",), _CREATE_ACCOUNT_ACTION
+        )
+        login_form = email_count == password_count == sign_in_count == 1
+        registration_form = (
+            email_count == 1 and password_count == 2 and create_count == 1
+        )
+        if login_form or registration_form:
             return self._page, WorkdayControlScope.ACTIVE_ACCOUNT_FORM
         return None, WorkdayControlScope.PAGE
 

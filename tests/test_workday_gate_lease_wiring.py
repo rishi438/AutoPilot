@@ -393,3 +393,24 @@ async def test_account_reference_lookup_reads_only_safe_owned_metadata() -> None
         "portal_scope": "workday:wf:wellsfargojobs",
     }
     assert credentials.projection == {"_id": 1, "user_id": 1, "portal_scope": 1}
+
+
+@pytest.mark.asyncio
+async def test_unit1_queue_query_excludes_unit1_completed_applications() -> None:
+    database = _LeaseDatabase(None)
+
+    response = await lease_next_application(
+        worker_kind="local_playwright",
+        current_user={"id": str(USER_ID)},
+        db=database,
+    )
+
+    compiled = str(
+        database.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).lower()
+    assert response == {"application": None}
+    assert "workday_unit1_completed" in compiled
+    assert "not (exists" in compiled or "not exists" in compiled

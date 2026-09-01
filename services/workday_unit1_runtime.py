@@ -30,6 +30,7 @@ from services.workday_failure_router import (
 )
 from services.workday_state_observer import WorkdayStateObserver
 from services.workday_transition_catalog import SQLAlchemyWorkdayTransitionCatalog
+from services.workday_transition_contracts import WorkdayFailureClass
 from services.workday_transition_engine import WorkdayTransitionReplayEngine
 from services.workday_transition_repair import WorkdayTransitionRepairCoordinator
 from services.workday_unit1_orchestrator import (
@@ -110,7 +111,12 @@ class _PrivateContext:
                 )
             ).scalar_one_or_none()
         gate = application
-        account_ref = UUID(gate.account_ref) if gate is not None else None
+        account_ref: UUID | None = None
+        if gate is not None and gate.account_ref:
+            try:
+                account_ref = UUID(gate.account_ref)
+            except (ValueError, TypeError):
+                account_ref = None
         application_context_matches = bool(
             job is not None
             and gate is not None
@@ -120,15 +126,21 @@ class _PrivateContext:
             and job.job_title == lease.job_title
             and job.company_name == lease.company_name
         )
+        if lease.gate_decision == "observe_only":
+            account_binding_verified = bool(
+                account_ref is not None and application_context_matches
+            )
+        else:
+            account_binding_verified = bool(
+                self.account_binding_verified
+                and account_ref is not None
+                and self.account_ref == account_ref
+            )
         evidence = await self.checkpoint_verifier.verify(
             target_url=target.target_url,
             expected_tenant_scope=portal_scope,
             application_id=lease.application_id,
-            account_binding_verified=(
-                self.account_binding_verified
-                and account_ref is not None
-                and self.account_ref == account_ref
-            ),
+            account_binding_verified=account_binding_verified,
             application_context_matches=application_context_matches,
         )
         return WorkdayUnit1CheckpointFacts(
@@ -201,6 +213,9 @@ class _GateStore:
     async def claim_auth_submit(self, lease):
         return await self._call("claim_auth_submit", lease)
 
+    async def begin_auth_followup(self, lease):
+        return await self._call("begin_auth_followup", lease)
+
     async def claim_llm_repair(self, lease):
         return await self._call("claim_llm_repair", lease)
 
@@ -268,17 +283,39 @@ class _Persistence:
         }:
             await self._api.release_cooldown_or_defer(lease, reason=route.outcome.value)
         else:
-            hold_code = {
-                WorkdayFailureOutcome.CREDENTIAL_HOLD: "native_credentials_required",
-                WorkdayFailureOutcome.USER_HOLD: "unknown_page_state",
-                WorkdayFailureOutcome.REVIEW_REQUIRED: "unknown_page_state",
-                WorkdayFailureOutcome.SECURITY_HOLD: "unknown_page_state",
-                WorkdayFailureOutcome.SAFE_HOLD: "unknown_page_state",
-            }.get(route.outcome, "unknown_page_state")
+            if route.failure_class in {
+                WorkdayFailureClass.POST_SUBMIT_ACCOUNT_EXISTS,
+                WorkdayFailureClass.ACCOUNT_DISCOVERY_ACCOUNT_EXISTS,
+            }:
+                hold_code = "existing_account_credentials_required"
+                remediation = (
+                    "This Workday account already exists. Import its correct password "
+                    "in AutoPilot Credential Vault, or reset it on Workday, then retry."
+                )
+            elif (
+                route.failure_class
+                is WorkdayFailureClass.ACCOUNT_DISCOVERY_RETRY_EXHAUSTED
+            ):
+                hold_code = "account_discovery_retry_exhausted"
+                remediation = (
+                    "AutoPilot reached the three-attempt limit for this unconfirmed "
+                    "Workday account. Review or import the credential before retrying."
+                )
+            else:
+                hold_code = {
+                    WorkdayFailureOutcome.CREDENTIAL_HOLD: "native_credentials_required",
+                    WorkdayFailureOutcome.USER_HOLD: "unknown_page_state",
+                    WorkdayFailureOutcome.REVIEW_REQUIRED: "unknown_page_state",
+                    WorkdayFailureOutcome.SECURITY_HOLD: "unknown_page_state",
+                    WorkdayFailureOutcome.SAFE_HOLD: "unknown_page_state",
+                }.get(route.outcome, "unknown_page_state")
+                remediation = (
+                    "Review this bounded Workday Unit 1 blocker before retrying."
+                )
             await self._api.create_hold(
                 lease,
                 hold_code=hold_code,
-                remediation="Review this bounded Workday Unit 1 blocker before retrying.",
+                remediation=remediation,
             )
 
     async def complete_unit(
@@ -327,9 +364,14 @@ class _Persistence:
                 lease,
                 authentication_submitted=True,
                 hold_code=(
-                    "native_credentials_required"
-                    if route.outcome is WorkdayFailureOutcome.CREDENTIAL_HOLD
-                    else "unknown_page_state"
+                    "existing_account_credentials_required"
+                    if route.failure_class
+                    is WorkdayFailureClass.POST_SUBMIT_ACCOUNT_EXISTS
+                    else (
+                        "native_credentials_required"
+                        if route.outcome is WorkdayFailureOutcome.CREDENTIAL_HOLD
+                        else "unknown_page_state"
+                    )
                 ),
             )
             return
@@ -417,6 +459,31 @@ class ProductionWorkdayUnit1Executor:
         portal_scope: str,
     ) -> WorkdayUnit1Result:
         """Compose the existing Unit 1 services after runtime startup."""
+        metadata_reader = getattr(
+            self._credential_reader, "account_metadata_for_worker", None
+        )
+        account_metadata = (
+            await metadata_reader(
+                user_id=str(lease.user_id),
+                portal_scope=portal_scope,
+            )
+            if callable(metadata_reader)
+            else None
+        )
+        discovery_state = (
+            account_metadata.discovery_state if account_metadata is not None else None
+        )
+        registration_required = bool(
+            account_metadata is not None
+            and account_metadata.status == "pending_registration"
+            and (discovery_state or "login_pending")
+            not in {"login_pending", "registration_submitted"}
+        )
+        logger.info(
+            "workday_account_operation_selected portal_scope=%s operation=%s",
+            portal_scope,
+            "registration" if registration_required else "login",
+        )
         observer = WorkdayStateObserver(browser, expected_tenant_scope=portal_scope)
         catalog = (
             self._catalog_factory(self._session_factory)
@@ -479,4 +546,5 @@ class ProductionWorkdayUnit1Executor:
             private_context=private_context,
             persistence=persistence,
             events=_Unit1Events(),
+            registration_required=registration_required,
         ).run(lease)

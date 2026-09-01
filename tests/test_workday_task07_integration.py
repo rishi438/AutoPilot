@@ -53,7 +53,7 @@ TARGET_URL = (
 )
 
 
-def _lease() -> LeasedWorkdayApplication:
+def _lease(*, decision: str = "allow") -> LeasedWorkdayApplication:
     return LeasedWorkdayApplication(
         application_id=APP_ID,
         lease_id=LEASE_ID,
@@ -66,7 +66,7 @@ def _lease() -> LeasedWorkdayApplication:
         gate_id=GATE_ID,
         gate_generation=1,
         gate_lease_token="opaque-gate-token",
-        gate_decision="allow",
+        gate_decision=decision,
         gate_lease_expires_at=None,
         gate_next_eligible_at=None,
     )
@@ -444,3 +444,160 @@ async def test_real_executor_composition_completes_known_path_with_one_submit():
     assert captured["gate_session_factory"] is session_factory
     assert captured["private_session_factory"] is session_factory
     assert captured["cooldown_hours"] == 12
+
+
+@pytest.mark.asyncio
+async def test_production_private_context_observe_only_derives_account_binding() -> (
+    None
+):
+    from services.workday_unit1_runtime import _PrivateContext as ProdPrivateContext
+    from services.workday_unit1_checkpoint import WorkdayPrivateCheckpointEvidence
+
+    lease = _lease(decision="observe_only")
+
+    captured_verify = {}
+
+    class _MockVerifier:
+        async def verify(self, **kwargs):
+            captured_verify.update(kwargs)
+            return WorkdayPrivateCheckpointEvidence(
+                approved_https_origin=True,
+                canonical_tenant_verified=True,
+                leased_job_context_matches=True,
+                leased_application_context_matches=kwargs[
+                    "application_context_matches"
+                ],
+                external_account_matches=kwargs["account_binding_verified"],
+                no_login_or_auth_error=True,
+                no_captcha_or_otp_or_lock=True,
+                basic_information_control_hydrated=True,
+                safe_signature="wdcp1:test",
+            )
+
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def scalar_one_or_none(self):
+            return self._value
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+        async def execute(self, statement):
+            stmt_str = str(statement)
+            if "workday_account_gates" in stmt_str:
+                return _FakeResult(
+                    SimpleNamespace(
+                        id=GATE_ID,
+                        user_id=USER_ID,
+                        account_ref=str(ACCOUNT_REF),
+                        portal_scope=SCOPE,
+                    )
+                )
+            if "job_applications" in stmt_str:
+                return _FakeResult(
+                    SimpleNamespace(
+                        id=APP_ID,
+                        user_id=USER_ID,
+                        workday_account_gate_id=GATE_ID,
+                        job_url=TARGET_URL,
+                        external_ats_url=None,
+                        job_title="Engineer",
+                        company_name="Wells Fargo",
+                        deleted_at=None,
+                    )
+                )
+            return _FakeResult(None)
+
+    ctx = ProdPrivateContext(
+        checkpoint_verifier=_MockVerifier(),
+        session_factory=_FakeSession,
+    )
+
+    facts = await ctx.checkpoint_facts(lease=lease, observation=object())
+    assert captured_verify["account_binding_verified"] is True
+    assert captured_verify["application_context_matches"] is True
+    assert facts.external_account_matches is True
+
+
+@pytest.mark.asyncio
+async def test_production_private_context_observe_only_missing_account_ref_fails() -> (
+    None
+):
+    from services.workday_unit1_runtime import _PrivateContext as ProdPrivateContext
+    from services.workday_unit1_checkpoint import WorkdayPrivateCheckpointEvidence
+
+    lease = _lease(decision="observe_only")
+
+    captured_verify = {}
+
+    class _MockVerifier:
+        async def verify(self, **kwargs):
+            captured_verify.update(kwargs)
+            return WorkdayPrivateCheckpointEvidence(
+                approved_https_origin=True,
+                canonical_tenant_verified=True,
+                leased_job_context_matches=True,
+                leased_application_context_matches=kwargs[
+                    "application_context_matches"
+                ],
+                external_account_matches=kwargs["account_binding_verified"],
+                no_login_or_auth_error=True,
+                no_captcha_or_otp_or_lock=True,
+                basic_information_control_hydrated=True,
+                safe_signature="wdcp1:test",
+            )
+
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def scalar_one_or_none(self):
+            return self._value
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+        async def execute(self, statement):
+            stmt_str = str(statement)
+            if "workday_account_gates" in stmt_str:
+                return _FakeResult(
+                    SimpleNamespace(
+                        id=GATE_ID,
+                        user_id=USER_ID,
+                        account_ref="",  # Missing account_ref
+                        portal_scope=SCOPE,
+                    )
+                )
+            if "job_applications" in stmt_str:
+                return _FakeResult(
+                    SimpleNamespace(
+                        id=APP_ID,
+                        user_id=USER_ID,
+                        workday_account_gate_id=GATE_ID,
+                        job_url=TARGET_URL,
+                        external_ats_url=None,
+                        job_title="Engineer",
+                        company_name="Wells Fargo",
+                        deleted_at=None,
+                    )
+                )
+            return _FakeResult(None)
+
+    ctx = ProdPrivateContext(
+        checkpoint_verifier=_MockVerifier(),
+        session_factory=_FakeSession,
+    )
+
+    facts = await ctx.checkpoint_facts(lease=lease, observation=object())
+    assert captured_verify["account_binding_verified"] is False
+    assert facts.external_account_matches is False

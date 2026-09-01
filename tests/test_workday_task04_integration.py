@@ -200,7 +200,6 @@ def _run_with_evidence(evidence: list[WorkdayPrivateCheckpointEvidence]):
         "external_account_matches",
         "no_login_or_auth_error",
         "no_captcha_or_otp_or_lock",
-        "basic_information_control_hydrated",
     ],
 )
 async def test_each_private_checkpoint_fact_blocks_completion(fact):
@@ -212,6 +211,21 @@ async def test_each_private_checkpoint_fact_blocks_completion(fact):
     assert result.status is WorkdayUnit1Status.REVIEW_REQUIRED
     assert persistence.completions == []
     assert len(context.facts) == 1
+
+
+@pytest.mark.asyncio
+async def test_transient_unhydrated_basic_information_control_polls_until_hydrated():
+    unhydrated = _evidence(basic_information_control_hydrated=False)
+    hydrated = _evidence(basic_information_control_hydrated=True)
+    orchestrator, persistence, context = _run_with_evidence(
+        [unhydrated, hydrated, hydrated]
+    )
+
+    result = await orchestrator.run(_lease())
+
+    assert result.status is WorkdayUnit1Status.COMPLETE
+    assert persistence.completions == [False]
+    assert len(context.facts) == 3
 
 
 @pytest.mark.asyncio

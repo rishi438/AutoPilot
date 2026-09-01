@@ -274,7 +274,18 @@
 // =============================================================================
 
 /**
- * @typedef {'draft' | 'processing' | 'completed' | 'failed' | 'applied' | 'interview' | 'rejected' | 'accepted'} ApplicationStatus
+ * @typedef {'draft' | 'processing' | 'completed' | 'failed' | 'applied' | 'interview' | 'rejected' | 'accepted' | 'queued' | 'preparing' | 'applying' | 'blocked' | 'skipped' | 'retrying'} ApplicationStatus
+ */
+
+/**
+ * @typedef {Object} AutomationProgress
+ * @property {string} [stage] - Automation stage (e.g. 'workday_unit1')
+ * @property {string} [stage_status] - Current stage status (e.g. 'completed')
+ * @property {string} [next_stage] - Next planned stage (e.g. 'workday_unit2')
+ * @property {string} [next_stage_status] - Status of next stage (e.g. 'not_started')
+ * @property {string} [label] - UI label (e.g. 'Stage 1 complete — ready for Stage 2')
+ * @property {boolean} [unit1_completed] - Whether Unit 1 completed
+ * @property {string} [completed_at] - ISO timestamp when completed
  */
 
 /**
@@ -292,6 +303,7 @@
  * @property {string} [notes] - User notes
  * @property {string} created_at - Creation timestamp
  * @property {string} updated_at - Last update timestamp
+ * @property {AutomationProgress} [automation_progress] - Automation stage progress
  */
 
 // =============================================================================

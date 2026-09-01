@@ -12,7 +12,7 @@ from urllib.parse import unquote, urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
@@ -111,6 +111,8 @@ class CreateHoldRequest(BaseModel):
         "otp",
         "expired_session",
         "native_credentials_required",
+        "existing_account_credentials_required",
+        "account_discovery_retry_exhausted",
         "unsupported_step",
         "validation_failure",
         "upload_failure",
@@ -288,7 +290,12 @@ class CompleteWorkdayUnit1Request(BaseModel):
     authentication_submitted: bool
     outcome: Literal["complete", "review"] = "complete"
     hold_code: Literal[
-        "unknown_page_state", "native_credentials_required", "captcha", "otp"
+        "unknown_page_state",
+        "native_credentials_required",
+        "existing_account_credentials_required",
+        "account_discovery_retry_exhausted",
+        "captcha",
+        "otp",
     ] = "unknown_page_state"
 
 
@@ -863,6 +870,7 @@ async def rescan_unknown_required_question(
 @router.post(
     "/applications/{application_id}/retry-latest-review",
     summary="[Test] Retry latest review hold",
+    tags=["Test"],
 )
 async def retry_latest_review_hold(
     application_id: uuid.UUID,
@@ -879,7 +887,12 @@ async def retry_latest_review_hold(
                 ApplicationHold.user_id == user_id,
                 ApplicationHold.status.in_({"open", "resolved"}),
                 ApplicationHold.hold_code.in_(
-                    {"unknown_page_state", "unsupported_step"}
+                    {
+                        "unknown_page_state",
+                        "unsupported_step",
+                        "existing_account_credentials_required",
+                        "account_discovery_retry_exhausted",
+                    }
                 ),
             )
             .order_by(ApplicationHold.created_at.desc())
@@ -906,7 +919,12 @@ async def retry_review_hold(
                 ApplicationHold.user_id == user_id,
                 ApplicationHold.status.in_({"open", "resolved"}),
                 ApplicationHold.hold_code.in_(
-                    {"unknown_page_state", "unsupported_step"}
+                    {
+                        "unknown_page_state",
+                        "unsupported_step",
+                        "existing_account_credentials_required",
+                        "account_discovery_retry_exhausted",
+                    }
                 ),
             )
         )
@@ -1297,6 +1315,15 @@ async def lease_next_application(
         ),
     ]
     if worker_kind == "local_playwright":
+        # Never lease an application that already completed Stage 1 (Workday Unit 1)
+        unit1_completed_exists = exists(
+            select(ApplicationAutomationEvent.id).where(
+                ApplicationAutomationEvent.application_id == JobApplication.id,
+                ApplicationAutomationEvent.event_type == "workday_unit1_completed",
+            )
+        )
+        eligibility_filters.append(~unit1_completed_exists)
+
         target_url = func.coalesce(
             JobApplication.external_ats_url, JobApplication.job_url, ""
         )
@@ -1661,6 +1688,7 @@ async def worker_retry_latest_review_hold(
             "No review hold found for this application."
         )
         already_recovered_review = exc.status_code == 409 and exc.detail in {
+            "The application is not safely blocked and unleased.",
             "No review-required Workday gate attempt is available.",
             "The Workday gate is not awaiting review.",
         }
@@ -1678,28 +1706,92 @@ async def worker_retry_latest_review_hold(
     ).scalar_one_or_none()
     if application is None:
         raise HTTPException(404, "Application not found.")
+    retry_status = "not_needed"
     if recovery_error is not None and recovery_error.status_code == 409:
         gate = (
             await db.get(WorkdayAccountGate, application.workday_account_gate_id)
             if application.workday_account_gate_id is not None
             else None
         )
+        owned_unleased_gate = (
+            application.automation_lease_id is None
+            and application.automation_lease_expires_at is None
+            and gate is not None
+            and gate.user_id == _user_id(worker_user)
+        )
+        active_attempt = (
+            (
+                await db.execute(
+                    select(WorkdayAuthAttempt)
+                    .where(
+                        WorkdayAuthAttempt.gate_id == gate.id,
+                        WorkdayAuthAttempt.status == "active",
+                    )
+                    .order_by(WorkdayAuthAttempt.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if owned_unleased_gate
+            else None
+        )
+        now = datetime.now(UTC)
+        attempt_reclaimable = (
+            active_attempt is None or active_attempt.lease_expires_at <= now
+        )
+        cooldown_elapsed = bool(
+            gate is not None
+            and gate.state == "cooling_down"
+            and all(
+                value is None or value <= now
+                for value in (
+                    gate.cooldown_until,
+                    gate.user_min_until,
+                    gate.next_eligible_at,
+                )
+            )
+        )
+        gate_retryable = bool(
+            gate is not None
+            and (
+                (gate.state in {"open", "probe_in_progress"} and attempt_reclaimable)
+                or (
+                    gate.state == "auth_outcome_pending"
+                    and active_attempt is not None
+                    and active_attempt.application_id == application.id
+                )
+                or (cooldown_elapsed and attempt_reclaimable)
+            )
+        )
         if (
-            application.status != ApplicationStatus.RETRYING.value
-            or application.automation_lease_id is not None
-            or application.automation_lease_expires_at is not None
-            or gate is None
-            or gate.user_id != _user_id(worker_user)
-            or gate.state != "open"
+            owned_unleased_gate
+            and application.status == ApplicationStatus.RETRYING.value
+            and gate_retryable
         ):
+            retry_status = "already_ready"
+        elif (
+            owned_unleased_gate
+            and application.status == ApplicationStatus.APPLYING.value
+            and gate.state in {"open", "cooling_down"}
+        ):
+            completed_attempt = (
+                await db.execute(
+                    select(WorkdayAuthAttempt.id)
+                    .where(
+                        WorkdayAuthAttempt.application_id == application.id,
+                        WorkdayAuthAttempt.gate_id == gate.id,
+                        WorkdayAuthAttempt.status == "completed",
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if completed_attempt is None:
+                raise recovery_error
+            retry_status = "unit1_complete"
+        else:
             raise recovery_error
     return {
         "application_status": application.status,
-        "retry_status": (
-            "already_ready"
-            if recovery_error is not None and recovery_error.status_code == 409
-            else "not_needed"
-        ),
+        "retry_status": retry_status,
     }
 
 
@@ -2032,8 +2124,20 @@ async def worker_complete_unit1(
                 application_id=application.id,
                 portal=application.portal,
                 hold_code=body.hold_code,
-                remediation=(
-                    "Review the Workday page and gate outcome before retrying."
+                remediation={
+                    "existing_account_credentials_required": (
+                        "This Workday account already exists. Import its correct "
+                        "password in AutoPilot Credential Vault, or reset it on "
+                        "Workday, then retry."
+                    ),
+                    "account_discovery_retry_exhausted": (
+                        "AutoPilot reached the three-attempt limit for this "
+                        "unconfirmed Workday account. Review or import the "
+                        "credential before retrying."
+                    ),
+                }.get(
+                    body.hold_code,
+                    "Review the Workday page and gate outcome before retrying.",
                 ),
             )
         )

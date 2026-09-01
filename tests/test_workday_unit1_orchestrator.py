@@ -660,3 +660,64 @@ async def test_unstable_hydration_cannot_satisfy_final_checkpoint():
     result = await harness[0].run(harness[1])
     assert result.status is WorkdayUnit1Status.REVIEW_REQUIRED
     assert harness[8].completions == []
+
+
+@pytest.mark.asyncio
+async def test_evolving_hydration_signatures_update_baseline_and_succeed_when_stable():
+    states = _states()
+    # Replace final state with 3 states: sig1 -> sig2 -> sig2
+    states[-1] = _observed(
+        WorkdayTransitionState.AUTHENTICATED_APPLICATION_READY, "wds1:partial"
+    )
+    states.append(
+        _observed(WorkdayTransitionState.AUTHENTICATED_APPLICATION_READY, "wds1:full")
+    )
+    states.append(
+        _observed(WorkdayTransitionState.AUTHENTICATED_APPLICATION_READY, "wds1:full")
+    )
+    harness = _harness(states=states)
+    result = await harness[0].run(harness[1])
+    assert result.status is WorkdayUnit1Status.COMPLETE
+    assert harness[8].completions == [harness[1]]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_retries_transient_observation_error_until_hydrated():
+    from services.workday_state_observer import WorkdayStateObservationError
+
+    states = _states()
+    # Introduce a transient observation error between observations
+    states.insert(
+        -1,
+        WorkdayStateObservationError("Transitory hydration state"),
+    )
+    states.append(
+        _observed(
+            WorkdayTransitionState.AUTHENTICATED_APPLICATION_READY,
+            "wds1:stable",
+        )
+    )
+    harness = _harness(states=states)
+    result = await harness[0].run(harness[1])
+    assert result.status is WorkdayUnit1Status.COMPLETE
+    assert harness[8].completions == [harness[1]]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_security_error_fails_immediately():
+    states = _states()
+    states[-1] = WorkdayStateSecurityError()
+    harness = _harness(states=states)
+    result = await harness[0].run(harness[1])
+    assert result.status is WorkdayUnit1Status.REVIEW_REQUIRED
+    assert harness[8].completions == []
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_unexpected_exception_fails_immediately():
+    states = _states()
+    states[-1] = RuntimeError("Unexpected DOM explosion")
+    harness = _harness(states=states)
+    result = await harness[0].run(harness[1])
+    assert result.status is WorkdayUnit1Status.REVIEW_REQUIRED
+    assert harness[8].completions == []

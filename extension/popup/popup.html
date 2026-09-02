@@ -104,6 +104,16 @@
               Maps fields from your profile (AI plus reliable rules for screening and contact). Review before submit.
             </p>
           </div>
+
+          <section id="autofillReview" class="autofill-review hidden" aria-live="polite">
+            <h3>Review proposed answers</h3>
+            <p id="autofillReviewContext" class="autofill-hint"></p>
+            <div id="autofillReviewList" class="autofill-review-list"></div>
+            <div class="autofill-review-actions">
+              <button type="button" id="cancelAutofillReview" class="btn btn-secondary">Cancel</button>
+              <button type="button" id="applyReviewedAutofill" class="btn btn-primary">Apply reviewed answers</button>
+            </div>
+          </section>
         </div>
 
         <!-- Extraction Status -->
@@ -164,7 +174,7 @@
 
     <!-- Footer -->
     <footer class="popup-footer">
-      <span>v2.0.0</span>
+      <span>v2.0.9</span>
     </footer>
   </div>
 

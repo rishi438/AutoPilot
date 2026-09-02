@@ -317,11 +317,13 @@
         loadGoogleAccountStatus();
         loadWorkflowPreferences();
         loadJobSearchPreferences();
+        loadSensitivePortalDetails();
 
         document.getElementById('passwordForm')?.addEventListener('submit', handlePasswordChange);
         document.getElementById('apiKeyForm')?.addEventListener('submit', handleApiKeySave);
         document.getElementById('jobSearchPreferencesForm')?.addEventListener('submit', saveJobSearchPreferences);
         document.getElementById('refreshJobSearchBtn')?.addEventListener('click', refreshJobSearch);
+        document.getElementById('saveSensitivePortalDetailsBtn')?.addEventListener('click', saveSensitivePortalDetails);
 
         // Resume file input change (replaces inline onchange="handleResumeUpload(this)")
         const resumeInput = document.getElementById('resumeUploadInput');
@@ -428,6 +430,78 @@
         return (window.app && typeof window.app.getAuthToken === 'function')
             ? window.app.getAuthToken()
             : (localStorage.getItem('access_token') || localStorage.getItem('authToken'));
+    }
+
+    async function loadSensitivePortalDetails() {
+        const enabled = /** @type {HTMLInputElement|null} */ (document.getElementById('sensitivePortalAutofillEnabled'));
+        const status = document.getElementById('sensitivePortalStatus');
+        if (!enabled) return;
+        try {
+            const response = await fetch(`${API_BASE}/profile/`, {
+                headers: { 'Authorization': `Bearer ${getAuthToken()}` },
+            });
+            if (!response.ok) return;
+            const data = await response.json();
+            const profile = data.profile_data || {};
+            enabled.checked = Boolean(profile.sensitive_portal_autofill_enabled);
+            if (status && profile.has_sensitive_portal_details) {
+                status.textContent = enabled.checked ? 'Protected details saved.' : 'Protected details are disabled.';
+            }
+        } catch (error) {
+            console.error('loadSensitivePortalDetails:', error);
+        }
+    }
+
+    async function saveSensitivePortalDetails() {
+        const enabled = /** @type {HTMLInputElement|null} */ (document.getElementById('sensitivePortalAutofillEnabled'));
+        const dob = /** @type {HTMLInputElement|null} */ (document.getElementById('sensitivePortalDob'));
+        const pan = /** @type {HTMLInputElement|null} */ (document.getElementById('sensitivePortalPan'));
+        const gender = /** @type {HTMLSelectElement|null} */ (document.getElementById('sensitivePortalGender'));
+        const status = document.getElementById('sensitivePortalStatus');
+        if (!enabled || !dob || !pan || !gender) return;
+
+        const payload = {
+            enabled: enabled.checked,
+            date_of_birth: dob.value.trim() || null,
+            pan: pan.value.trim().toUpperCase() || null,
+            gender: gender.value.trim() || null,
+        };
+        if (payload.enabled && !payload.date_of_birth && !payload.pan && !payload.gender) {
+            showAlert('Enter a date of birth, PAN, or gender before enabling protected autofill.', 'warning');
+            return;
+        }
+        if (payload.date_of_birth && !/^\d{2}\/\d{2}\/\d{4}$/.test(payload.date_of_birth)) {
+            showAlert('Date of birth must use DD/MM/YYYY.', 'warning');
+            return;
+        }
+        if (payload.pan && !/^[A-Z]{5}\d{4}[A-Z]$/.test(payload.pan)) {
+            showAlert('PAN must use the format ABCDE1234F.', 'warning');
+            return;
+        }
+        try {
+            const response = await fetch(`${API_BASE}/profile/sensitive-portal-details`, {
+                method: 'PUT',
+                headers: {
+                    'Authorization': `Bearer ${getAuthToken()}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            });
+            const result = await response.json();
+            if (!response.ok) {
+                const message = Array.isArray(result.detail)
+                    ? result.detail.map(function (item) { return item.msg || 'Invalid protected detail.'; }).join(' ')
+                    : (result.detail || result.message || 'Could not save protected details.');
+                throw new Error(message);
+            }
+            dob.value = '';
+            pan.value = '';
+            gender.value = '';
+            if (status) status.textContent = result.enabled ? 'Protected details saved.' : 'Protected details removed and autofill disabled.';
+            showAlert(result.enabled ? 'Protected portal details saved.' : 'Protected portal details removed.', 'success');
+        } catch (error) {
+            showAlert(error instanceof Error ? error.message : 'Could not save protected details.', 'danger');
+        }
     }
 
     // =============================================================================

@@ -126,7 +126,7 @@ async def test_gpt_oss_uses_medium_thinking_by_default(
 
     def handler(request: httpx.Request) -> httpx.Response:
         payloads.append(json.loads(request.content))
-        return httpx.Response(200, json={"response": "{}", "done": True})
+        return httpx.Response(200, json={"response": '{"ok": true}', "done": True})
 
     _install_http_transport(monkeypatch, handler)
     client = _make_client(model="gpt-oss:20b")
@@ -171,6 +171,26 @@ async def test_gpt_oss_forwards_high_reasoning_and_extends_timeout(
     assert requested_timeouts == [600.0]
     assert payloads[0]["think"] == "high"
     assert payloads[0]["options"]["num_predict"] == 24576
+
+
+@pytest.mark.asyncio
+async def test_namespaced_qwen3_disables_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Qwen3 registry names must not leak reasoning into plain-text responses."""
+    payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"response": "ok", "done": True})
+
+    _install_http_transport(monkeypatch, handler)
+    client = _make_client(model="dengcao/Qwen3-14B:Q5_K_M")
+
+    result = await client.generate(prompt="hello")
+
+    assert result["response"] == "ok"
+    assert payloads[0]["think"] is False
 
 
 @pytest.mark.asyncio

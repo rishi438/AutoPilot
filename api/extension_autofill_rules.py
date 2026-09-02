@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Sequence, TYPE_CHECKING
 
+from utils.country_phone_codes import resolve_country_phone
+
 if TYPE_CHECKING:
     from api.extension_autofill import AutofillFieldIn
 
@@ -30,6 +32,10 @@ _LAST_NAME_RE = re.compile(r"\blast(\s+|-)?name\b", re.IGNORECASE)
 _MIDDLE_NAME_RE = re.compile(r"\bmiddle(\s+|-)?name\b", re.IGNORECASE)
 _EMAIL_RE = re.compile(r"\b(e[-]?mail|email address)\b", re.IGNORECASE)
 _PHONE_RE = re.compile(r"\b(phone|mobile|telephone|cell)\b", re.IGNORECASE)
+_COUNTRY_CODE_FIELD_RE = re.compile(r"\bcountry(?:\s+phone)?\s+code\b", re.IGNORECASE)
+_POSTAL_CODE_FIELD_RE = re.compile(
+    r"\b(?:postal(?:\s+code)?|zip(?:\s+code)?|pin\s*code)\b", re.IGNORECASE
+)
 _US_BASED_RE = re.compile(
     r"\b("
     r"based in the united states"
@@ -118,6 +124,8 @@ _COUNTRY_LABEL_RE = re.compile(
     r"\b(country|country of residence|country/region)\b",
     re.IGNORECASE,
 )
+_NATIONALITY_LABEL_RE = re.compile(r"\bnationality\b", re.IGNORECASE)
+_CITIZENSHIP_LABEL_RE = re.compile(r"\bcitizenship\b", re.IGNORECASE)
 _CITY_LOCATION_RE = re.compile(
     r"("
     r"location\s*\(\s*city\s*\)"
@@ -131,6 +139,8 @@ _CITY_LOCATION_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+_PLAIN_CITY_LABEL_RE = re.compile(r"^city\s*\*?\s*$", re.IGNORECASE)
+_PLAIN_STATE_LABEL_RE = re.compile(r"^(state|province|region)\s*\*?\s*$", re.IGNORECASE)
 _STATE_ONLY_RE = re.compile(
     r"\b(state|province|region)\s*(\*|$)",
     re.IGNORECASE,
@@ -274,7 +284,6 @@ _COUNTRY_CODE_TO_DISPLAY: Dict[str, str] = {
     "india": "India",
 }
 
-
 # =============================================================================
 # HELPERS
 # =============================================================================
@@ -323,7 +332,9 @@ def _family_name_from_full_name(full_name: str) -> str:
     return " ".join(parts[1:])
 
 
-def _sponsorship_answer(field: "AutofillFieldIn", prof: Dict[str, Any]) -> Optional[str]:
+def _sponsorship_answer(
+    field: "AutofillFieldIn", prof: Dict[str, Any]
+) -> Optional[str]:
     """
     Visa / employment sponsorship screening.
 
@@ -333,7 +344,9 @@ def _sponsorship_answer(field: "AutofillFieldIn", prof: Dict[str, Any]) -> Optio
     if not _SPONSORSHIP_RE.search(label):
         return None
 
-    if "requires_visa_sponsorship" in prof and not bool(prof.get("requires_visa_sponsorship")):
+    if "requires_visa_sponsorship" in prof and not bool(
+        prof.get("requires_visa_sponsorship")
+    ):
         flag = False
     else:
         flag = None
@@ -352,7 +365,9 @@ def _sponsorship_answer(field: "AutofillFieldIn", prof: Dict[str, Any]) -> Optio
         want_yes = flag
         picked = _pick_option(
             options,
-            lambda t: t.lower().startswith("yes") if want_yes else t.lower().startswith("no"),
+            lambda t: (
+                t.lower().startswith("yes") if want_yes else t.lower().startswith("no")
+            ),
         )
         if picked:
             return picked
@@ -391,7 +406,9 @@ def _is_profile_city_location_field(label: str) -> bool:
         return False
     if re.search(r"(?:^|[\s_./-])(?:systemfield_)?location(?:[\s_*/-]|$)", label, re.I):
         return True
-    return bool(re.search(r"\blocation\b", label, re.I) and re.search(r"\bcity\b", label, re.I))
+    return bool(
+        re.search(r"\blocation\b", label, re.I) and re.search(r"\bcity\b", label, re.I)
+    )
 
 
 def _location_city_answer(prof: Dict[str, Any]) -> Optional[str]:
@@ -408,6 +425,9 @@ def _location_city_answer(prof: Dict[str, Any]) -> Optional[str]:
 def _country_display_name(country: Optional[str]) -> Optional[str]:
     if not country or not str(country).strip():
         return None
+    resolved = resolve_country_phone(str(country))
+    if resolved is not None:
+        return resolved["name"]
     norm = re.sub(r"[^a-z ]", "", str(country).lower()).strip()
     if norm in _COUNTRY_CODE_TO_DISPLAY:
         return _COUNTRY_CODE_TO_DISPLAY[norm]
@@ -416,6 +436,36 @@ def _country_display_name(country: Optional[str]) -> Optional[str]:
     if len(raw) >= 3 and " " in raw:
         return raw
     return raw.upper() if len(raw) <= 3 else raw
+
+
+def _country_phone_code_answer(
+    field: "AutofillFieldIn", prof: Dict[str, Any]
+) -> Optional[str]:
+    country_raw = str(prof.get("country") or "").strip()
+    resolved = resolve_country_phone(country_raw)
+    dial_code = (
+        resolved["dial_code"]
+        if resolved is not None
+        else str(prof.get("country_phone_code") or "").strip()
+    )
+    if not dial_code:
+        return None
+    options = _option_texts(field)
+    if options:
+        country_name = (
+            resolved["name"].lower()
+            if resolved is not None
+            else (_country_display_name(country_raw) or "").lower()
+        )
+        escaped_code = re.escape(dial_code)
+        picked = _pick_option(
+            options,
+            lambda text: bool(re.search(rf"(?:^|\D){escaped_code}(?:\D|$)", text))
+            and (not country_name or country_name in text or text.strip() == dial_code),
+        )
+        if picked:
+            return picked
+    return dial_code
 
 
 def _education_entries(prof: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -480,7 +530,9 @@ def _salary_text_field(field: "AutofillFieldIn") -> bool:
     return _free_text_field(field)
 
 
-def _salary_expectations_answer(prof: Dict[str, Any], field: "AutofillFieldIn") -> Optional[str]:
+def _salary_expectations_answer(
+    prof: Dict[str, Any], field: "AutofillFieldIn"
+) -> Optional[str]:
     """
     Map profile.desired_salary_range {min, max} to numeric salary text fields.
     Returns None when the user has not set a range (field stays empty).
@@ -720,7 +772,9 @@ def _central_office_relocation_answer(
                 return picked
         picked = _pick_option(
             options,
-            lambda t: "not willing" in t or "cannot relocate" in t or t.strip().lower().startswith("no"),
+            lambda t: "not willing" in t
+            or "cannot relocate" in t
+            or t.strip().lower().startswith("no"),
         )
         if picked:
             return picked
@@ -802,7 +856,8 @@ def _in_office_answer(field: "AutofillFieldIn", prof: Dict[str, Any]) -> Optiona
     if central_office:
         if options:
             has_office_codes = any(
-                re.search(r"\bnyc\b|\bsf\b|san francisco", o, re.IGNORECASE) for o in options
+                re.search(r"\bnyc\b|\bsf\b|san francisco", o, re.IGNORECASE)
+                for o in options
             )
             if has_office_codes and in_metro:
                 picked = _pick_option(
@@ -847,7 +902,10 @@ def _in_office_answer(field: "AutofillFieldIn", prof: Dict[str, Any]) -> Optiona
     if target_is_nyc and in_metro:
         picked = _pick_option(
             options,
-            lambda t: "currently live" in t or "currently in" in t or "currently local" in t or "metropolitan" in t,
+            lambda t: "currently live" in t
+            or "currently in" in t
+            or "currently local" in t
+            or "metropolitan" in t,
         )
         if picked:
             return picked
@@ -904,6 +962,26 @@ def _form_has_middle_name_field(fields: Optional[Sequence["AutofillFieldIn"]]) -
     return False
 
 
+def _phone_value_for_form(
+    phone: str, fields: Optional[Sequence["AutofillFieldIn"]]
+) -> Optional[str]:
+    """Use the national number when the form has a separate country-code control."""
+    value = phone.strip()
+    if not value:
+        return None
+    has_country_code = bool(
+        fields
+        and any(_COUNTRY_CODE_FIELD_RE.search(_label_blob(field)) for field in fields)
+    )
+    if not has_country_code:
+        return value
+    separated = re.match(r"^\+\d{1,3}[\s().-]+(.+)$", value)
+    if not separated:
+        return value
+    national = re.sub(r"\D", "", separated.group(1))
+    return national or value
+
+
 def deterministic_value_for_field(
     field: "AutofillFieldIn",
     profile_bundle: Dict[str, Any],
@@ -927,15 +1005,51 @@ def deterministic_value_for_field(
     prof = _profile_dict(profile_bundle)
     full_name = (profile_bundle.get("full_name") or "").strip()
     input_type = (field.input_type or "").lower()
+    label_text = _norm_label(field.label_text or "")
+
+    # Exact visible address labels take precedence over generated Workday
+    # name/id attributes, which may contain the generic token "name".
+    if _PLAIN_CITY_LABEL_RE.fullmatch(label_text) and input_type in (
+        "",
+        "text",
+        "search",
+        "combobox",
+    ):
+        return (prof.get("city") or "").strip() or None
+
+    if _PLAIN_STATE_LABEL_RE.fullmatch(label_text) and input_type in (
+        "",
+        "text",
+        "search",
+        "select",
+        "combobox",
+    ):
+        return (prof.get("state") or "").strip() or None
 
     # --- Contact ---
+    if _COUNTRY_CODE_FIELD_RE.search(label) and input_type in (
+        "",
+        "text",
+        "tel",
+        "select",
+        "combobox",
+    ):
+        return _country_phone_code_answer(field, prof)
+
     if _EMAIL_RE.search(label) and input_type in ("", "text", "email"):
         email = (profile_bundle.get("email") or "").strip()
         return email or None
 
     if _PHONE_RE.search(label) and input_type in ("", "text", "tel"):
         phone = (prof.get("phone") or "").strip()
-        return phone or None
+        return _phone_value_for_form(phone, all_fields)
+
+    if _POSTAL_CODE_FIELD_RE.search(label) and input_type in (
+        "",
+        "text",
+        "search",
+    ):
+        return (prof.get("postal_code") or "").strip() or None
 
     if _FIRST_NAME_RE.search(label) and not _LAST_NAME_RE.search(label):
         first, _, _ = _split_full_name(full_name)
@@ -949,8 +1063,7 @@ def deterministic_value_for_field(
         return family or None
 
     if _MIDDLE_NAME_RE.search(label):
-        _, middle, _ = _split_full_name(full_name)
-        return middle or None
+        return None
 
     if _NAME_LABEL_RE.search(label) and not _BAD_NAME_LABEL_RE.search(label):
         return full_name or None
@@ -959,16 +1072,41 @@ def deterministic_value_for_field(
         linkedin = (prof.get("linkedin_url") or "").strip()
         return linkedin or None
 
-    if _GITHUB_USERNAME_FIELD_RE.search(label) and input_type in ("", "text", "combobox"):
-        return _github_username_from_profile(prof)
-
-    if _WEBSITE_RE.search(label) and not _LINKEDIN_RE.search(label) and input_type in (
+    if _GITHUB_USERNAME_FIELD_RE.search(label) and input_type in (
         "",
         "text",
-        "url",
         "combobox",
     ):
+        return _github_username_from_profile(prof)
+
+    if (
+        _WEBSITE_RE.search(label)
+        and not _LINKEDIN_RE.search(label)
+        and input_type
+        in (
+            "",
+            "text",
+            "url",
+            "combobox",
+        )
+    ):
         return _website_url(prof)
+
+    if _NATIONALITY_LABEL_RE.search(label) and input_type in (
+        "",
+        "text",
+        "select",
+        "combobox",
+    ):
+        return (prof.get("nationality") or "").strip() or None
+
+    if _CITIZENSHIP_LABEL_RE.search(label) and input_type in (
+        "",
+        "text",
+        "select",
+        "combobox",
+    ):
+        return (prof.get("citizenship") or "").strip() or None
 
     if (
         _COUNTRY_LABEL_RE.search(label)
@@ -1022,13 +1160,18 @@ def deterministic_value_for_field(
 
         if _US_BASED_RE.search(label) and not _SPONSORSHIP_RE.search(label):
             us_from_country = _country_is_us(prof.get("country"))
-            if us_from_country is True or _work_auth_implies_us(prof.get("work_authorization")):
+            if us_from_country is True or _work_auth_implies_us(
+                prof.get("work_authorization")
+            ):
                 return "Yes"
-            if us_from_country is False and not _work_auth_implies_us(prof.get("work_authorization")):
+            if us_from_country is False and not _work_auth_implies_us(
+                prof.get("work_authorization")
+            ):
                 return "No"
 
         if _STARTUP_RE.search(label) or (
-            _STARTUP_ASHBY_HELPER_RE.search(label) and input_type in ("yes_no_buttons", "radio", "role_radio")
+            _STARTUP_ASHBY_HELPER_RE.search(label)
+            and input_type in ("yes_no_buttons", "radio", "role_radio")
         ):
             return _startup_answer(prof)
 
@@ -1090,7 +1233,11 @@ def build_deterministic_raw_assignments(
             val = _education_field_value(field, prof, kind="discipline", index=int(idx))
             discipline_idx += 1
 
-        if val is None and _SCHOOL_RE.search(label) and not _BAD_NAME_LABEL_RE.search(label):
+        if (
+            val is None
+            and _SCHOOL_RE.search(label)
+            and not _BAD_NAME_LABEL_RE.search(label)
+        ):
             idx = getattr(field, "duplicate_label_index", None)
             if idx is None:
                 idx = school_idx
@@ -1104,7 +1251,9 @@ def build_deterministic_raw_assignments(
                 "field_uid": field.field_uid,
                 "value": val,
                 "label_text": (field.label_text or "")[:240],
-                "duplicate_label_index": int(getattr(field, "duplicate_label_index", 0) or 0),
+                "duplicate_label_index": int(
+                    getattr(field, "duplicate_label_index", 0) or 0
+                ),
             }
         )
     return out

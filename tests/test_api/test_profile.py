@@ -21,8 +21,11 @@ Endpoints:
 """
 
 from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
 
 import pytest
+
+from api.profile import BasicInfoRequest, _check_basic_info_completion
 
 BASE = "/api/v1/profile"
 
@@ -98,6 +101,7 @@ class TestUpdateBasicInfo:
                 "city": "San Francisco",
                 "state": "CA",
                 "country": "USA",
+                "postal_code": "94105",
                 "professional_title": "Senior Engineer",
                 "years_experience": 5,
                 "is_student": False,
@@ -107,6 +111,13 @@ class TestUpdateBasicInfo:
             },
         )
         assert resp.status_code in (200, 201, 204)
+
+        profile_resp = await authed_client_with_user.get(f"{BASE}/")
+        assert profile_resp.status_code == 200
+        profile = profile_resp.json()["profile_data"]
+        assert profile["country"] == "USA"
+        assert profile["country_phone_code"] == "+1"
+        assert profile["postal_code"] == "94105"
 
     @pytest.mark.asyncio
     async def test_negative_years_experience_returns_422(self, authed_client_with_user):
@@ -123,6 +134,50 @@ class TestUpdateBasicInfo:
             },
         )
         assert resp.status_code == 422
+
+    def test_country_and_postal_code_are_validated_as_basic_info(self):
+        request = BasicInfoRequest(
+            city="Bengaluru",
+            state="Karnataka",
+            country="India",
+            postal_code="560095",
+            professional_title="Engineer",
+            years_experience=5,
+            summary="Experienced software engineer.",
+        )
+
+        assert request.country == "India"
+        assert request.country_phone_code == "+91"
+        assert request.postal_code == "560095"
+
+    def test_basic_info_completion_requires_postal_code(self):
+        profile = SimpleNamespace(
+            city="Bengaluru",
+            state="Karnataka",
+            country="India",
+            country_phone_code="+91",
+            postal_code=None,
+            professional_title="Engineer",
+            years_experience=5,
+            summary="Experienced software engineer.",
+        )
+
+        assert _check_basic_info_completion(profile) is False
+        profile.postal_code = "560095"
+        assert _check_basic_info_completion(profile) is True
+
+
+class TestCountryCatalog:
+    @pytest.mark.asyncio
+    async def test_authenticated_catalog_contains_india(self, authed_client_with_user):
+        response = await authed_client_with_user.get(f"{BASE}/countries")
+
+        assert response.status_code == 200
+        india = next(
+            item for item in response.json()["countries"] if item["alpha2"] == "IN"
+        )
+        assert india["name"] == "India"
+        assert india["dial_code"] == "+91"
 
 
 # ---------------------------------------------------------------------------

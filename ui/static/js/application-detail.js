@@ -2300,7 +2300,7 @@
 
             if (newLetter) {
                 const cltEl = document.getElementById('coverLetterText');
-                if (cltEl) cltEl.textContent = newLetter;
+                if (cltEl) cltEl.textContent = decodeEntities(newLetter);
                 if (applicationData) (/** @type {Record<string,unknown>} */ (applicationData))['cover_letter'] = data.cover_letter;
                 showToast('Cover letter regenerated!');
             } else {

@@ -816,6 +816,22 @@ body {
   margin-top: 10px;
 }
 
+.autofill-review {
+  border-top: 1px solid var(--border-color);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+.autofill-review.hidden { display: none; }
+
+.autofill-review h3 { font-size: 14px; margin: 0; }
+.autofill-review-list { display: grid; gap: 8px; margin: 10px 0; max-height: 250px; overflow-y: auto; }
+.autofill-review-item { background: rgba(255, 255, 255, 0.04); border: 1px solid var(--border-color); border-radius: var(--radius-sm); display: grid; gap: 6px; padding: 9px; }
+.autofill-review-item label { font-size: 12px; font-weight: 600; }
+.autofill-review-item input[type='text'] { background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: var(--radius-sm); box-sizing: border-box; color: var(--text-primary); padding: 7px; width: 100%; }
+.autofill-review-meta { color: var(--text-muted); font-size: 11px; }
+.autofill-review-save { color: var(--text-secondary); font-size: 11px; }
+.autofill-review-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
 .portal-queue {
   border-top: 1px solid var(--border-color);
   margin-top: 16px;

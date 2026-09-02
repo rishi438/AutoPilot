@@ -59,6 +59,8 @@
  * @property {string} [city] - User's city
  * @property {string} [state] - User's state/province
  * @property {string} [country] - User's country
+ * @property {string} [country_phone_code] - Calling code derived from country
+ * @property {string} [postal_code] - User's postal or PIN code
  * @property {string} [professional_title] - Professional title
  * @property {string} [professional_summary] - Professional summary
  * @property {number} [years_experience] - Years of experience
@@ -272,7 +274,20 @@
 // =============================================================================
 
 /**
- * @typedef {'draft' | 'processing' | 'completed' | 'failed' | 'applied' | 'interview' | 'rejected' | 'accepted'} ApplicationStatus
+ * @typedef {'draft' | 'processing' | 'completed' | 'failed' | 'applied' | 'interview' | 'rejected' | 'accepted' | 'queued' | 'preparing' | 'applying' | 'blocked' | 'skipped' | 'retrying'} ApplicationStatus
+ */
+
+/**
+ * @typedef {Object} AutomationProgress
+ * @property {string} [stage] - Automation stage (e.g. 'workday_unit1', 'workday_unit2')
+ * @property {string} [stage_status] - Current stage status (e.g. 'completed', 'in_progress', 'review_required', 'not_started')
+ * @property {string} [next_stage] - Next planned stage (e.g. 'workday_unit2')
+ * @property {string} [next_stage_status] - Status of next stage (e.g. 'not_started', 'in_progress')
+ * @property {string} [label] - UI label (e.g. 'Stage 1 complete — ready for Stage 2', 'Stage 2 complete — My Information saved')
+ * @property {boolean} [unit1_completed] - Whether Unit 1 completed
+ * @property {boolean} [unit2_completed] - Whether Unit 2 completed
+ * @property {string} [unit2_completed_at] - ISO timestamp when Unit 2 completed
+ * @property {string} [completed_at] - ISO timestamp when current/displayed stage completed
  */
 
 /**
@@ -290,6 +305,7 @@
  * @property {string} [notes] - User notes
  * @property {string} created_at - Creation timestamp
  * @property {string} updated_at - Last update timestamp
+ * @property {AutomationProgress} [automation_progress] - Automation stage progress
  */
 
 // =============================================================================

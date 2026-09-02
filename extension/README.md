@@ -4,7 +4,7 @@ A Chrome extension that connects your browsing to Autopilot in two ways: **Analy
 
 ## Current Version
 
-**v2.0.0** — hybrid **Match Form To Profile**: `lib/form-autofill.js` deep-scroll, label rematch, and specialized combobox apply; `POST /api/v1/extension/autofill/map` with `extension_autofill_rules.py` overlay on the LLM; stored resume attach; profile work authorization and visa sponsorship.
+**v2.0.9** — hybrid **Match Form To Profile**: `lib/form-autofill.js` recursively discovers accessible light DOM and open shadow-root controls, rematches labels, and attaches stored resumes across accessible frames without advancing or submitting the form; `POST /api/v1/extension/autofill/map` retains the review-first rules/LLM boundary.
 
 ## Features
 
@@ -44,7 +44,7 @@ A Chrome extension that connects your browsing to Autopilot in two ways: **Analy
 
 **Match an application form**
 
-1. Open a normal tab with a visible application form (main page only; no iframes in the MVP).
+1. Open the active application step. Accessible frames and open shadow roots are scanned; protected frames and closed shadow roots remain inaccessible.
 2. Click **Match Form To Profile** — the extension scrolls the page to reveal below-the-fold questions, scans field labels and options, and sends them to the API with your profile snapshot.
 3. The server returns assignments (LLM suggestions merged with deterministic profile rules). Values are applied on the page; review every field before you submit.
 4. If you uploaded a resume in Profile Setup, the extension may attach it to resume file fields after text fields are filled.

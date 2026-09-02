@@ -251,7 +251,7 @@ After any code change, click the ↺ refresh icon on the extension card.
 
 ### Using the Extension — Match Form To Profile
 
-1. Browse to an application form with visible fields (main page only in the current release)
+1. Browse to the active application step; accessible frames and open shadow roots are supported
 2. Click the Autopilot icon in the toolbar
 3. Click **Match Form To Profile** — the extension scrolls long forms to reveal hidden questions, scans labels and dropdown options, and sends them to the server with your profile
 4. The server returns field assignments: an AI map merged with **deterministic profile rules** (name, contact, work authorization, visa sponsorship, country, location, education, and common screening questions). Values are written into the page for you to review and edit before you submit
@@ -270,7 +270,7 @@ The extension has optimized content selectors for many employer career sites and
 - If extraction fails, try navigating directly to the job description page before clicking the icon
 - You must be logged into the web app for the extension to work — it uses the same account
 - Analyzed jobs appear in your dashboard immediately
-- **Match Form To Profile** runs on the main document only; nested iframes are not scanned in the current release
+- **Match Form To Profile** scans accessible frames and open shadow roots; protected frames and closed shadow roots remain inaccessible
 - After updating the extension code, reload it at `chrome://extensions` before testing again
 - Open DevTools on the application tab and filter the console for `Autopilot` to see scan/apply debug details when troubleshooting
 

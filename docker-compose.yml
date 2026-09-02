@@ -56,6 +56,46 @@ services:
       timeout: 5s
       retries: 10
 
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+  # ---------------------------------------------------------------------------
+  # MongoDB — isolated encrypted portal credential vault
+  # ---------------------------------------------------------------------------
+  portal-vault:
+    image: mongo:8.0
+    restart: unless-stopped
+    ports:
+      # 27018 is in a Windows reserved range on common Podman/WSL setups.
+      - "27118:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${PORTAL_VAULT_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${PORTAL_VAULT_ROOT_PASSWORD}
+      PORTAL_VAULT_APP_USERNAME: ${PORTAL_VAULT_APP_USERNAME}
+      PORTAL_VAULT_APP_PASSWORD: ${PORTAL_VAULT_APP_PASSWORD}
+      PORTAL_VAULT_MONGODB_DATABASE: ${PORTAL_VAULT_MONGODB_DATABASE:-autopilot_vault}
+    volumes:
+      - portal_vault_data:/data/db
+      - portal_vault_config_data:/data/configdb
+      - ./scripts/mongo-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mongosh --quiet --username "$${MONGO_INITDB_ROOT_USERNAME}" --password "$${MONGO_INITDB_ROOT_PASSWORD}" --authenticationDatabase admin --eval "db.adminCommand('ping').ok" | grep 1
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
   # ---------------------------------------------------------------------------
   # Autopilot app
   # ---------------------------------------------------------------------------
@@ -76,10 +116,25 @@ services:
       ALLOWED_HOSTS: "localhost,127.0.0.1,0.0.0.0,app"
       CORS_ORIGINS: "http://localhost:8000"
       WATCHFILES_FORCE_POLLING: "true"
+      RESUME_STORAGE_BACKEND: minio
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: autopilot-resumes
+      MINIO_SECURE: "false"
+      PORTAL_VAULT_ENABLED: "true"
+      PORTAL_VAULT_MONGODB_URL: mongodb://${PORTAL_VAULT_APP_USERNAME}:${PORTAL_VAULT_APP_PASSWORD}@portal-vault:27017/${PORTAL_VAULT_MONGODB_DATABASE:-autopilot_vault}?authSource=${PORTAL_VAULT_MONGODB_DATABASE:-autopilot_vault}
+      PORTAL_VAULT_MONGODB_DATABASE: ${PORTAL_VAULT_MONGODB_DATABASE:-autopilot_vault}
+      PORTAL_VAULT_ENCRYPTION_KEY: ${PORTAL_VAULT_ENCRYPTION_KEY}
+      PORTAL_VAULT_PASSWORD_RECOVERY_KEY: ${PORTAL_VAULT_PASSWORD_RECOVERY_KEY}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      portal-vault:
         condition: service_healthy
     volumes:
       # Live, bidirectional development mounts. Python reloads automatically;
@@ -101,7 +156,8 @@ services:
       - ./logs:/app/logs
       - ./uploads:/app/uploads
       - ./generated:/app/generated
-      # Durable, appuser-owned storage for uploaded resume originals.
+      # Legacy resume files stay mounted until `scripts/migrate_resume_storage.py`
+      # has moved every row to MinIO and the migration has been verified.
       - resume_data:/app/data
     command: ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app", "--reload-include", ".env"]
 
@@ -109,3 +165,6 @@ volumes:
   postgres_data:
   redis_data:
   resume_data:
+  minio_data:
+  portal_vault_data:
+  portal_vault_config_data:

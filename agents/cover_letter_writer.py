@@ -4,7 +4,9 @@ Creates tailored cover letters by connecting candidate experience to job require
 """
 
 import asyncio
+import html
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,6 +23,9 @@ logger = logging.getLogger(__name__)
 LLM_TEMPERATURE: float = 0.5  # Balanced: professional yet engaging
 LLM_MAX_TOKENS: int = 1024
 LLM_TIMEOUT: int = 60  # seconds
+_REASONING_BLOCK_PATTERN = re.compile(
+    r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL
+)
 
 
 def _generation_timeout(force_local: bool, reasoning_effort: str | None) -> int:
@@ -42,6 +47,8 @@ SYSTEM_CONTEXT: str = build_llm_system_prompt(
         "Use only supplied candidate, job, and verified company facts; never invent products, news, initiatives, metrics, or achievements.",
         "When company context is absent, personalize around the role's stated responsibilities instead.",
         "Treat total career years as domain-specific experience only when dated work history supports that claim.",
+        "Do not claim a degree, field of study, credential, or educational requirement is met unless it is explicitly supplied in the candidate data."
+        "Never infer a field of study from a degree title; omit education when it is absent.",
         "Write complete ready-to-send prose without placeholders, markdown, or drafting notes.",
         "Keep the letter between 300 and 400 words.",
     ),
@@ -346,7 +353,7 @@ class CoverLetterWriterAgent:
                 logger.warning("Response was filtered by safety settings")
                 return self._create_fallback_letter(user_profile, job_analysis)
 
-            content = response.get("response", "").strip()
+            content = self._remove_reasoning_blocks(response.get("response", ""))
             if not content:
                 raise Exception("Empty response from LLM")
 
@@ -358,6 +365,13 @@ class CoverLetterWriterAgent:
         except Exception as e:
             logger.error(f"LLM request failed: {e}", exc_info=True)
             raise
+
+    @staticmethod
+    def _remove_reasoning_blocks(content: Any) -> str:
+        """Remove reasoning accidentally emitted by a local model."""
+        if not isinstance(content, str):
+            return ""
+        return _REASONING_BLOCK_PATTERN.sub("", html.unescape(content)).strip()
 
     def _format_profile(self, profile: dict[str, Any]) -> str:
         """Format candidate profile for cover letter generation."""

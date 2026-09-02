@@ -22,7 +22,9 @@ from fastapi.templating import Jinja2Templates
 from api.admin import router as admin_router
 from api.applications import router as applications_router
 from api.automation import router as automation_router
+from api.automation_test import router as automation_test_router
 from api.auth import router as auth_router
+from api.credential_vault import router as credential_vault_router
 from api.extension_autofill import router as extension_autofill_router
 from api.interview_prep import router as interview_prep_router
 from api.job_search import router as job_search_router
@@ -38,6 +40,7 @@ from config.constants import (
 )
 from config.settings import get_settings
 from utils.bcrypt_patch import apply_bcrypt_patch
+from utils.country_phone_codes import country_phone_catalog
 from utils.database import (
     check_database_health,
     close_database_connection,
@@ -54,6 +57,7 @@ from utils.json_utils import serialize_object_for_json
 from utils.llm_client import check_gemini_health, close_gemini_client
 from utils.logging_config import log_startup_info, request_id_var, setup_logging
 from utils.redis_client import check_redis_health, close_redis_connection
+from utils.portal_vault_database import close_portal_vault, connect_to_portal_vault
 from utils.request_middleware import RequestLoggingMiddleware, SlowRequestMiddleware
 from workflows.job_application_workflow import get_initialized_workflow
 
@@ -82,6 +86,18 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 templates: Jinja2Templates | None = None
+
+OPENAPI_TAGS = [
+    {
+        "name": "Test",
+        "description": (
+            "Debug-only Workday Stage 1 checks. Queue a public job URL with "
+            "generated dummy metadata, run the returned launcher command in a "
+            "visible foreground PowerShell, retry a review hold when required, "
+            "or clean up an incomplete test application."
+        ),
+    }
+]
 
 # =============================================================================
 # ASSET MANIFEST (Vite/esbuild content-hashed output)
@@ -266,6 +282,17 @@ async def lifespan(app: FastAPI):
         await connect_to_database()
         logger.info("PostgreSQL database connection initialized successfully")
 
+        # Build and retain the complete canonical country/calling-code catalog
+        # once at startup. A user's selected pair is persisted on their profile.
+        country_catalog = country_phone_catalog()
+        logger.info(
+            "Loaded country phone-code catalog with %d entries",
+            len(country_catalog),
+        )
+
+        # Initialize the isolated MongoDB credential vault only when enabled.
+        await connect_to_portal_vault()
+
         # Initialize Redis connection
         try:
             from utils.redis_client import connect_to_redis
@@ -309,6 +336,9 @@ async def lifespan(app: FastAPI):
         # Close database connections
         await close_database_connection()
 
+        # Close the isolated portal credential vault connection.
+        await close_portal_vault()
+
         # Close Redis connections
         await close_redis_connection()
 
@@ -340,9 +370,15 @@ def create_app() -> FastAPI:
         title=settings.app_name,
         description=settings.app_description,
         version=settings.app_version,
+        openapi_tags=OPENAPI_TAGS,
         docs_url="/api/docs" if settings.debug else None,
         redoc_url="/api/redoc" if settings.debug else None,
         openapi_url="/api/openapi.json" if settings.debug else None,
+        swagger_ui_parameters={
+            "docExpansion": "none",
+            "operationsSorter": "alpha",
+            "tagsSorter": "alpha",
+        },
         swagger_ui_oauth2_redirect_url=(
             "/api/docs/oauth2-redirect" if settings.debug else None
         ),
@@ -672,6 +708,16 @@ def include_routers(app: FastAPI):
         automation_router,
         prefix=f"{API_V1_PREFIX}/automation",
         tags=["Application Automation"],
+    )
+    if settings.debug:
+        app.include_router(
+            automation_test_router,
+            prefix=f"{API_V1_PREFIX}/automation",
+        )
+    app.include_router(
+        credential_vault_router,
+        prefix=f"{API_V1_PREFIX}/credential-vault",
+        tags=["Portal Credential Vault"],
     )
     app.include_router(
         job_search_router, prefix=f"{API_V1_PREFIX}/job-search", tags=["Job Search"]
@@ -1248,6 +1294,26 @@ def add_custom_routes(app: FastAPI):
             logger.error(f"Error serving settings page: {e}", exc_info=True)
             return HTMLResponse(
                 content="<h1>Settings</h1><p>Service temporarily unavailable</p>",
+                status_code=503,
+            )
+
+    @app.get("/dashboard/credential-vault", response_class=HTMLResponse)
+    async def credential_vault_page(request: Request):
+        """Serve the password-reauthenticated portal credential vault page."""
+        if templates is None:
+            return HTMLResponse(
+                content="<h1>Credential Vault</h1><p>Service initializing...</p>",
+                status_code=503,
+            )
+        try:
+            return templates.TemplateResponse(
+                "dashboard/credential-vault.html",
+                {"request": request, "app_name": settings.app_name},
+            )
+        except Exception as exc:
+            logger.error("Error serving credential vault page: %s", exc, exc_info=True)
+            return HTMLResponse(
+                content="<h1>Credential Vault</h1><p>Service temporarily unavailable</p>",
                 status_code=503,
             )
 

@@ -53,6 +53,7 @@ logs/
 # Local development
 tmp/
 temp/
+.tmp/
 
 # Runtime directories — user uploads and server-generated files
 uploads/

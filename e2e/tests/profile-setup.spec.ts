@@ -5,7 +5,7 @@ import { test, expect } from '@playwright/test';
  *
  * Wizard: step-0 (resume) + step-1 … step-5 (five content steps after resume).
  *   Step 0: Resume upload  (optional — can skip)
- *   Step 1: Basic Info     (city, state, country, title, experience, summary, student toggle)
+ *   Step 1: Basic Info     (city, state, country, postal/PIN code, title, experience, summary, student toggle)
  *   Step 2: Experience     (job entries + "no experience" checkbox)
  *   Step 3: Education        (entries + "no formal education" checkbox)
  *   Step 4: Skills         (tag input)
@@ -50,14 +50,28 @@ async function setupAuth(page: any) {
   }, MOCK_TOKEN);
 
   // The profile setup JS calls /api/v1/profile/ (with trailing slash) to load existing data
-  await page.route('**/api/v1/profile/**', (route: any) => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({
-      user_info: MOCK_PROFILE,
-      profile_data: { city: '', state: '', country: '', professional_title: '', years_experience: null },
-    }),
-  }));
+  await page.route('**/api/v1/profile/**', (route: any) => {
+    if (new URL(route.request().url()).pathname.endsWith('/profile/countries')) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          countries: [
+            { name: 'India', alpha2: 'IN', alpha3: 'IND', dial_code: '+91' },
+            { name: 'Israel', alpha2: 'IL', alpha3: 'ISR', dial_code: '+972' },
+          ],
+        }),
+      });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        user_info: MOCK_PROFILE,
+        profile_data: { city: '', state: '', country: '', country_phone_code: '', postal_code: '', professional_title: '', years_experience: null },
+      }),
+    });
+  });
 
   await page.route('**/api/v1/profile', (route: any) => route.fulfill({
     status: 200,
@@ -203,6 +217,7 @@ async function fillStep1Required(page: any) {
   await page.locator('#city').fill('Tel Aviv');
   await page.locator('#state').fill('Tel Aviv District');
   await page.locator('#country').fill('Israel');
+  await page.locator('#postal-code').fill('6100001');
   await page.locator('#professional-title').fill('Software Engineer');
   await page.locator('#years-experience').fill('3');
   await page.locator('#summary').fill('Experienced developer building cool products.');
@@ -275,6 +290,30 @@ test.describe('C. Step 1 — Basic Info', () => {
   test('country input is present', async ({ page }) => {
     await goToStep1(page);
     await expect(page.locator('#country')).toBeVisible();
+  });
+
+  test('country selection derives calling code', async ({ page }) => {
+    await goToStep1(page);
+    await page.locator('#country').fill('India');
+    await page.locator('#country').dispatchEvent('change');
+    await expect(page.locator('#country-phone-code')).toHaveValue('+91');
+  });
+
+  test('resume-parsed country auto-selects calling code', async ({ page }) => {
+    await setupAuth(page);
+    await page.addInitScript(() => {
+      sessionStorage.setItem('parsedResumeData', JSON.stringify({ country: 'India' }));
+    });
+    await page.goto('/profile/setup?fromResume=true');
+    await page.waitForLoadState('domcontentloaded');
+
+    await expect(page.locator('#country')).toHaveValue('India');
+    await expect(page.locator('#country-phone-code')).toHaveValue('+91');
+  });
+
+  test('postal/PIN code input is present', async ({ page }) => {
+    await goToStep1(page);
+    await expect(page.locator('#postal-code')).toBeVisible();
   });
 
   test('professional title input is present', async ({ page }) => {

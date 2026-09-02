@@ -104,6 +104,11 @@ def resolve_approved_answer(
 PROGRESS_AUTOMATION_EVENT_TYPES: tuple[str, ...] = (
     "workday_unit1_completed",
     "workday_unit1_review_required",
+    "workday_unit2_started",
+    "workday_unit2_save_claimed",
+    "workday_unit2_review_required",
+    "workday_unit2_retry_ready",
+    "workday_unit2_completed",
 )
 
 _WORKDAY_URL_PATTERN = re.compile(
@@ -124,7 +129,28 @@ def _is_workday_application(
         if url and _WORKDAY_URL_PATTERN.match(url):
             return True
     return any(
-        bool(e.event_type and e.event_type.startswith("workday_unit1_")) for e in events
+        bool(
+            e.event_type
+            and (
+                e.event_type.startswith("workday_unit1_")
+                or e.event_type.startswith("workday_unit2_")
+            )
+        )
+        for e in events
+    )
+
+
+def _sort_events(
+    events: Iterable[ApplicationAutomationEvent] | None,
+) -> list[ApplicationAutomationEvent]:
+    """Sort events deterministically by (created_at, id)."""
+    min_date = datetime.min.replace(tzinfo=UTC)
+    return sorted(
+        list(events) if events is not None else [],
+        key=lambda e: (
+            e.created_at if e.created_at is not None else min_date,
+            str(getattr(e, "id", "") or ""),
+        ),
     )
 
 
@@ -137,6 +163,37 @@ def has_unit1_completed(
     return any(e.event_type == "workday_unit1_completed" for e in events)
 
 
+def has_unit2_completed(
+    events: Iterable[ApplicationAutomationEvent] | None = None,
+) -> bool:
+    """Return True if durable workday_unit2_completed evidence exists."""
+    if not events:
+        return False
+    return any(e.event_type == "workday_unit2_completed" for e in events)
+
+
+def has_unresolved_unit2_review(
+    events: Iterable[ApplicationAutomationEvent] | None = None,
+) -> bool:
+    """Return True if the latest Unit 2 review/retry lifecycle event is review_required."""
+    if not events:
+        return False
+    sorted_events = _sort_events(events)
+    for event in reversed(sorted_events):
+        if event.event_type == "workday_unit2_review_required":
+            return True
+        if event.event_type in (
+            "workday_unit2_retry_ready",
+            "workday_unit2_started",
+            "workday_unit2_completed",
+        ):
+            return False
+    return False
+
+
+_has_unresolved_unit2_review = has_unresolved_unit2_review
+
+
 def derive_automation_progress(
     application: JobApplication,
     events: Iterable[ApplicationAutomationEvent] | None = None,
@@ -146,28 +203,98 @@ def derive_automation_progress(
     Derives sub-stage progress while keeping JobApplication.status = 'applying'
     without mutating the main ApplicationStatus enum.
     """
-    min_date = datetime.min.replace(tzinfo=UTC)
-    sorted_events = sorted(
-        list(events) if events is not None else [],
-        key=lambda e: e.created_at if e.created_at is not None else min_date,
-    )
+    sorted_events = _sort_events(events)
 
     if not _is_workday_application(application, sorted_events):
         return None
 
-    # Current application status takes precedence over historic events
+    unit1_completed_event = next(
+        (
+            e
+            for e in reversed(sorted_events)
+            if e.event_type == "workday_unit1_completed"
+        ),
+        None,
+    )
+    unit2_completed_event = next(
+        (
+            e
+            for e in reversed(sorted_events)
+            if e.event_type == "workday_unit2_completed"
+        ),
+        None,
+    )
+    unit1_completed = unit1_completed_event is not None
+    unit2_completed = unit2_completed_event is not None
+    unit2_completed_at = unit2_completed_event.created_at if unit2_completed else None
+
+    unit2_lifecycle_events = [
+        e
+        for e in sorted_events
+        if e.event_type
+        in (
+            "workday_unit2_started",
+            "workday_unit2_save_claimed",
+            "workday_unit2_review_required",
+            "workday_unit2_retry_ready",
+            "workday_unit2_completed",
+        )
+    ]
+    latest_u2_event = unit2_lifecycle_events[-1] if unit2_lifecycle_events else None
+
+    # Current application status takes precedence over historic events,
+    # but durable completion receipts are preserved across top-level holds/failures.
     if application.status == ApplicationStatus.BLOCKED.value:
+        # Require an actual Unit 2 review receipt rather than inferring from top-level blocked
+        if _has_unresolved_unit2_review(sorted_events):
+            return {
+                "stage": "workday_unit2",
+                "stage_status": "review_required",
+                "next_stage": None,
+                "next_stage_status": None,
+                "label": "Review required",
+                "unit1_completed": unit1_completed,
+                "completed_at": None,
+                "unit2_completed": unit2_completed,
+                "unit2_completed_at": unit2_completed_at,
+            }
         return {
             "stage": "workday_unit1",
             "stage_status": "review_required",
             "next_stage": None,
             "next_stage_status": None,
             "label": "Review required",
-            "unit1_completed": False,
+            "unit1_completed": unit1_completed,
             "completed_at": None,
+            "unit2_completed": unit2_completed,
+            "unit2_completed_at": unit2_completed_at,
         }
 
     if application.status == ApplicationStatus.FAILED.value:
+        if unit1_completed and not unit2_completed:
+            return {
+                "stage": "workday_unit2",
+                "stage_status": "failed",
+                "next_stage": None,
+                "next_stage_status": None,
+                "label": "Failed",
+                "unit1_completed": True,
+                "completed_at": None,
+                "unit2_completed": False,
+                "unit2_completed_at": None,
+            }
+        if unit2_completed:
+            return {
+                "stage": "workday_unit2",
+                "stage_status": "completed",
+                "next_stage": None,
+                "next_stage_status": None,
+                "label": "Stage 2 complete",
+                "unit1_completed": True,
+                "completed_at": unit2_completed_event.created_at,
+                "unit2_completed": True,
+                "unit2_completed_at": unit2_completed_at,
+            }
         return {
             "stage": "workday_unit1",
             "stage_status": "failed",
@@ -176,18 +303,40 @@ def derive_automation_progress(
             "label": "Failed",
             "unit1_completed": False,
             "completed_at": None,
+            "unit2_completed": False,
+            "unit2_completed_at": None,
         }
 
     if application.status == ApplicationStatus.APPLYING.value:
-        unit1_completed_event = next(
-            (
-                e
-                for e in reversed(sorted_events)
-                if e.event_type == "workday_unit1_completed"
-            ),
-            None,
-        )
-        if unit1_completed_event is not None:
+        if unit2_completed:
+            return {
+                "stage": "workday_unit2",
+                "stage_status": "completed",
+                "next_stage": None,
+                "next_stage_status": None,
+                "label": "Stage 2 complete",
+                "unit1_completed": True,
+                "completed_at": unit2_completed_event.created_at,
+                "unit2_completed": True,
+                "unit2_completed_at": unit2_completed_at,
+            }
+        if unit1_completed:
+            if latest_u2_event and latest_u2_event.event_type in (
+                "workday_unit2_started",
+                "workday_unit2_save_claimed",
+                "workday_unit2_retry_ready",
+            ):
+                return {
+                    "stage": "workday_unit2",
+                    "stage_status": "in_progress",
+                    "next_stage": None,
+                    "next_stage_status": None,
+                    "label": "Stage 2 in progress",
+                    "unit1_completed": True,
+                    "completed_at": None,
+                    "unit2_completed": False,
+                    "unit2_completed_at": None,
+                }
             return {
                 "stage": "workday_unit1",
                 "stage_status": "completed",
@@ -196,6 +345,8 @@ def derive_automation_progress(
                 "label": "Stage 1 complete — ready for Stage 2",
                 "unit1_completed": True,
                 "completed_at": unit1_completed_event.created_at,
+                "unit2_completed": False,
+                "unit2_completed_at": None,
             }
         return {
             "stage": "workday_unit1",
@@ -205,9 +356,23 @@ def derive_automation_progress(
             "label": "Applying",
             "unit1_completed": False,
             "completed_at": None,
+            "unit2_completed": False,
+            "unit2_completed_at": None,
         }
 
     if application.status == ApplicationStatus.RETRYING.value:
+        if unit1_completed:
+            return {
+                "stage": "workday_unit2",
+                "stage_status": "retrying",
+                "next_stage": None,
+                "next_stage_status": None,
+                "label": "Retrying Stage 2",
+                "unit1_completed": True,
+                "completed_at": None,
+                "unit2_completed": unit2_completed,
+                "unit2_completed_at": unit2_completed_at,
+            }
         return {
             "stage": "workday_unit1",
             "stage_status": "retrying",
@@ -216,9 +381,23 @@ def derive_automation_progress(
             "label": "Retrying Stage 1",
             "unit1_completed": False,
             "completed_at": None,
+            "unit2_completed": False,
+            "unit2_completed_at": None,
         }
 
     if application.status == ApplicationStatus.QUEUED.value:
+        if unit1_completed:
+            return {
+                "stage": "workday_unit2",
+                "stage_status": "queued",
+                "next_stage": None,
+                "next_stage_status": None,
+                "label": "Queued for Stage 2",
+                "unit1_completed": True,
+                "completed_at": None,
+                "unit2_completed": unit2_completed,
+                "unit2_completed_at": unit2_completed_at,
+            }
         return {
             "stage": "workday_unit1",
             "stage_status": "queued",
@@ -227,9 +406,23 @@ def derive_automation_progress(
             "label": "Queued for Stage 1",
             "unit1_completed": False,
             "completed_at": None,
+            "unit2_completed": False,
+            "unit2_completed_at": None,
         }
 
     if application.status == ApplicationStatus.PREPARING.value:
+        if unit1_completed:
+            return {
+                "stage": "workday_unit2",
+                "stage_status": "in_progress",
+                "next_stage": None,
+                "next_stage_status": None,
+                "label": "Stage 2 in progress",
+                "unit1_completed": True,
+                "completed_at": None,
+                "unit2_completed": unit2_completed,
+                "unit2_completed_at": unit2_completed_at,
+            }
         return {
             "stage": "workday_unit1",
             "stage_status": "in_progress",
@@ -238,6 +431,8 @@ def derive_automation_progress(
             "label": "Stage 1 in progress",
             "unit1_completed": False,
             "completed_at": None,
+            "unit2_completed": False,
+            "unit2_completed_at": None,
         }
 
     return None
@@ -247,7 +442,16 @@ def is_stage2_eligible(
     application: JobApplication,
     events: Iterable[ApplicationAutomationEvent] | None = None,
 ) -> bool:
-    """Return True if application is applying and Stage 1 is durably completed."""
+    """Return True if application is applying, Workday, Stage 1 complete, Stage 2 incomplete, and no open Unit 2 review."""
     if application.status != ApplicationStatus.APPLYING.value:
         return False
-    return has_unit1_completed(events)
+    sorted_events = _sort_events(events)
+    if not _is_workday_application(application, sorted_events):
+        return False
+    if not has_unit1_completed(sorted_events):
+        return False
+    if has_unit2_completed(sorted_events):
+        return False
+    if _has_unresolved_unit2_review(sorted_events):
+        return False
+    return True

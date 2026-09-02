@@ -263,3 +263,73 @@ async def test_progress_events_query_filters_to_allowlisted_event_types() -> Non
     assert "application_automation_events.event_type in (" in compiled
     assert "workday_unit1_completed" in compiled
     assert "workday_unit1_review_required" in compiled
+    assert "workday_unit2_started" in compiled
+    assert "workday_unit2_save_claimed" in compiled
+    assert "workday_unit2_review_required" in compiled
+    assert "workday_unit2_retry_ready" in compiled
+    assert "workday_unit2_completed" in compiled
+
+
+@pytest.mark.asyncio
+async def test_format_application_response_projects_unit2_completed() -> None:
+    app_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    u1_completed_at = datetime(2026, 8, 30, 9, 0, 0, tzinfo=UTC)
+    u2_completed_at = datetime(2026, 8, 30, 9, 30, 0, tzinfo=UTC)
+
+    app = JobApplication(
+        id=app_id,
+        user_id=user_id,
+        status=ApplicationStatus.APPLYING.value,
+        job_title="Software Engineer",
+        company_name="Acme Corp",
+        portal="workday",
+        created_at=datetime(2026, 8, 30, 8, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 8, 30, 9, 30, 0, tzinfo=UTC),
+    )
+    events = [
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit1_completed",
+            created_at=u1_completed_at,
+        ),
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit2_started",
+            created_at=datetime(2026, 8, 30, 9, 10, 0, tzinfo=UTC),
+        ),
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit2_completed",
+            created_at=u2_completed_at,
+        ),
+    ]
+    db = _MockDatabase(events=events)
+
+    response = await _format_application_response(app, db)
+
+    assert isinstance(response, ApplicationResponse)
+    assert response.status == "applying"
+    assert response.automation_progress is not None
+    assert response.automation_progress.stage == "workday_unit2"
+    assert response.automation_progress.stage_status == "completed"
+    assert response.automation_progress.label == "Stage 2 complete"
+    assert response.automation_progress.unit1_completed is True
+    assert response.automation_progress.unit2_completed is True
+    assert response.automation_progress.unit2_completed_at == u2_completed_at
+    assert response.automation_progress.completed_at == u2_completed_at
+
+
+def test_automation_progress_model_backward_compatibility() -> None:
+    # Model parses payload without unit2 fields with proper defaults
+    progress = AutomationProgressResponse(
+        stage="workday_unit1",
+        stage_status="completed",
+        next_stage="workday_unit2",
+        next_stage_status="not_started",
+        label="Stage 1 complete — ready for Stage 2",
+        unit1_completed=True,
+    )
+    assert progress.unit1_completed is True
+    assert progress.unit2_completed is False
+    assert progress.unit2_completed_at is None

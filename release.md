@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] - 2026-09-02
+
+### Added
+
+- **Workday Unit 2 Automation**: A targeted foreground workflow for the My Information stage, with durable application-bound attempts and leases.
+- **Approved-Only Autofill**: Private resume, prepared-form, and next-section proofs bound to the exact application, attempt, lease, tenant, job, and account continuity.
+- **Exactly-Once Save Fence**: A transactional Save claim permits at most one `Save and Continue` click across the complete recovery lineage.
+- **Crash-Safe Recovery**: Expired post-claim work enters review and can resume only through the same attempt in `observe_only` mode; it cannot claim or click Save again.
+- **Atomic Finalization**: Idempotent completion/review/release outcomes with database-backed replay fingerprints and conflicting replay rejection.
+- **Operations Support**: Migration 043, the targeted `scripts/run_workday_unit2.py` entry point, operator documentation, and focused PostgreSQL concurrency coverage.
+
+### Changed
+
+- **Automation Progress**: API and dashboard now expose honest Unit 2 in-progress, review, failed, and completed states while preserving durable completion receipts.
+- **Browser Safety**: Exact Workday route and structural continuity checks, exact accessible-name control selection, factual required-field verification, and fail-closed validation/challenge handling.
+- **Recovery Isolation**: Unit 2 review resolution no longer enters or mutates the Unit 1 authentication-gate lifecycle.
+- **Legacy Compatibility**: Existing Unit 1 form-step behavior remains supported while fully bound Unit 2 execution keeps the stricter proof contract.
+
+### Safety and Validation
+
+- Unit 2 has no LLM, vault, credential, authentication, or account-gate ownership and stops immediately after proving the allowlisted next section; it never fills that section or clicks Review/Submit.
+- Current focused Unit 1/Unit 2 regression suite: **130 passed**.
+- Disposable PostgreSQL lease, claim, stale recovery, observe-only, replay, and terminal-contention proof: **5 consecutive cycles passed**.
+- Live Workday execution remains separately user-controlled and was not performed for this release.
+
 ## [0.1.0] — 2026-09-01
 
 ### Added

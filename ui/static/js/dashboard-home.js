@@ -486,11 +486,22 @@
      * @param {Record<string,unknown>|null} [automationProgress]
      */
     function aiStatusBadge(status, automationProgress) {
+        if (automationProgress && (automationProgress.unit2_completed || (automationProgress.stage === 'workday_unit2' && automationProgress.stage_status === 'completed'))) {
+            const label = automationProgress.label || 'Stage 2 complete — My Information saved';
+            return `<span class="card-ai-badge ai-stage1-complete" title="${escapeHtml(String(label))}"><i class="fas fa-check-double me-1" aria-hidden="true"></i>Stage 2 complete</span>`;
+        }
         if (status === 'blocked' || (automationProgress && automationProgress.stage_status === 'review_required')) {
-            return `<span class="card-ai-badge ai-blocked"><i class="fas fa-pause-circle me-1" aria-hidden="true"></i>Review required</span>`;
+            const isStage2 = automationProgress && (automationProgress.stage === 'workday_unit2' || automationProgress.unit1_completed);
+            const badgeText = isStage2 ? 'Stage 2 review required' : 'Review required';
+            const label = (automationProgress && automationProgress.label) || badgeText;
+            return `<span class="card-ai-badge ai-blocked" title="${escapeHtml(String(label))}"><i class="fas fa-pause-circle me-1" aria-hidden="true"></i>${escapeHtml(badgeText)}</span>`;
         }
         if (status === 'failed' || (automationProgress && automationProgress.stage_status === 'failed')) {
             return `<span class="card-ai-badge ai-failed"><i class="fas fa-exclamation-circle me-1" aria-hidden="true"></i>Failed</span>`;
+        }
+        if (automationProgress && automationProgress.stage === 'workday_unit2' && (automationProgress.stage_status === 'in_progress' || automationProgress.stage_status === 'save_claimed' || automationProgress.stage_status === 'retry_ready')) {
+            const label = automationProgress.label || 'Stage 2 in progress';
+            return `<span class="card-ai-badge ai-processing" title="${escapeHtml(String(label))}"><i class="fas fa-spinner fa-spin me-1" aria-hidden="true"></i>Stage 2 in progress</span>`;
         }
         if (automationProgress && automationProgress.unit1_completed) {
             const label = automationProgress.label || 'Stage 1 complete — ready for Stage 2';

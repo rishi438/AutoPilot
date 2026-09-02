@@ -8,7 +8,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from enum import Enum
 from types import TracebackType
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from services.portal_account_automation import NativePortalAccountCoordinator
 from services.portal_credentials import PortalCredentialError
@@ -28,6 +28,7 @@ from services.workday_unit1_orchestrator import (
     WorkdayUnit1Result,
     WorkdayUnit1Status,
 )
+from services.workday_form_step_policy import execute_workday_form_step
 
 logger = logging.getLogger(__name__)
 
@@ -435,91 +436,17 @@ class LocalWorkdayRunner:
         *,
         step_number: int,
     ) -> tuple[str | None, str | None]:
-        page_url, fields = await browser.scan_application_fields()
-        if not fields:
-            return "unsupported_step", None
-        assignments = await self._api.map_approved_form_fields(
-            lease,
-            page_url=page_url,
-            fields=fields,
+        async def _map_fields(page_url: str, fields: list[Any]) -> list[Any]:
+            return await self._api.map_approved_form_fields(
+                lease,
+                page_url=page_url,
+                fields=fields,
+            )
+
+        result = await execute_workday_form_step(
+            browser=browser,
+            map_fields_fn=_map_fields,
+            application_id=lease.application_id,
+            step_number=step_number,
         )
-        fill_result = await browser.fill_and_verify_application_fields(assignments)
-        required = {field.field_uid for field in fields if field.required}
-        assigned = {
-            item.field_uid
-            for item in assignments
-            if item.answer_source in {"profile", "approved_rule"} and item.value
-        }
-        required_files = {
-            field.field_uid
-            for field in fields
-            if field.required and field.input_type == "file"
-        }
-        if required_files:
-            return "upload_failure", None
-        if fill_result.failed_field_uids:
-            failed_uid = fill_result.failed_field_uids[0]
-            failed_field = next(
-                (field for field in fields if field.field_uid == failed_uid),
-                None,
-            )
-            failed_question = (
-                next(
-                    (
-                        " ".join(candidate.split())[:2000]
-                        for candidate in (
-                            failed_field.label_text,
-                            failed_field.aria_label,
-                            failed_field.placeholder,
-                            failed_field.name_attr,
-                            failed_field.id_attr,
-                        )
-                        if candidate and candidate.strip()
-                    ),
-                    None,
-                )
-                if failed_field is not None
-                else None
-            )
-            logger.warning(
-                "workday_form_field_validation_failed application_id=%s step=%s field_uid=%s input_type=%s",
-                lease.application_id,
-                step_number,
-                failed_uid,
-                failed_field.input_type if failed_field is not None else "unknown",
-            )
-            return "validation_failure", failed_question
-        if required.intersection(fill_result.unsupported_field_uids):
-            return "unsupported_step", None
-        missing_required = [
-            field
-            for field in fields
-            if field.required and field.field_uid not in assigned
-        ]
-        if missing_required:
-            missing_field = missing_required[0]
-            question = next(
-                (
-                    " ".join(candidate.split())[:2000]
-                    for candidate in (
-                        missing_field.label_text,
-                        missing_field.aria_label,
-                        missing_field.placeholder,
-                        missing_field.name_attr,
-                        missing_field.id_attr,
-                    )
-                    if candidate and candidate.strip()
-                ),
-                None,
-            )
-            if question is None:
-                return "unsupported_step", None
-            return "unknown_required_question", question
-        logger.info(
-            "workday_form_step_verified application_id=%s step=%s field_count=%s filled_count=%s",
-            lease.application_id,
-            step_number,
-            len(fields),
-            fill_result.verified_count,
-        )
-        return None, None
+        return result.hold_code, result.hold_question

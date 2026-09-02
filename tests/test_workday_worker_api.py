@@ -229,6 +229,8 @@ async def test_worker_autofill_mapping_is_lease_bound_and_workday_only(
         id=application_id,
         user_id=user_id,
         deleted_at=None,
+        job_url="https://wd1.myworkdaysite.com/recruiting/wf/site/job/R-1/apply",
+        external_ats_url=None,
         automation_lease_id=lease_id,
         automation_lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
     )

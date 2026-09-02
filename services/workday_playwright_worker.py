@@ -219,6 +219,7 @@ class WorkdayFormField:
     def to_payload(self) -> dict[str, Any]:
         payload = dict(self.__dict__)
         payload["options"] = list(self.options) or None
+        payload["current_value"] = None
         return payload
 
 
@@ -448,6 +449,21 @@ class PlaywrightWorkdayBrowser:
         self._form_locators: dict[str, Any] = {}
         self._verified_auth_scope: str | None = None
         self._verified_registration_scope: str | None = None
+
+    @property
+    def raw_page(self) -> Any:
+        """Expose the underlying Playwright Page through one explicit safe boundary."""
+        return self._page
+
+    @property
+    def page(self) -> Any:
+        """Alias for raw_page."""
+        return self._page
+
+    async def count_buttons(self) -> int:
+        """Count visible and non-hidden button controls on the active page."""
+        buttons = await self._page.query_selector_all("button, [role='button']")
+        return len(buttons)
 
     def _report_control_decision(self, event: dict[str, Any]) -> None:
         if self._decision_reporter is not None:

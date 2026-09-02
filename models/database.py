@@ -1346,6 +1346,69 @@ class WorkdayAuthAttempt(Base):
     )
 
 
+class WorkdayUnit2Attempt(Base):
+    """Crash-safe private lease and bounded counters for one Unit 2 attempt."""
+
+    __tablename__ = "workday_unit2_attempts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("job_applications.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    lease_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="leased")
+    mode: Mapped[str] = mapped_column(String(20), nullable=False, default="normal")
+    save_claim_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    terminal_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=ist_now, onupdate=ist_now
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "lease_id",
+            name="uq_workday_unit2_attempt_lease_id",
+        ),
+        CheckConstraint(
+            "save_claim_count BETWEEN 0 AND 1",
+            name="ck_workday_unit2_attempt_save_claim_count",
+        ),
+        CheckConstraint(
+            "status IN ('leased', 'save_claimed', 'review_required', 'released', 'completed')",
+            name="ck_workday_unit2_attempt_status",
+        ),
+        CheckConstraint(
+            "mode IN ('normal', 'observe_only')",
+            name="ck_workday_unit2_attempt_mode",
+        ),
+        Index(
+            "uq_workday_unit2_attempt_one_active_per_application",
+            "application_id",
+            unique=True,
+            postgresql_where=text("status IN ('leased', 'save_claimed')"),
+            sqlite_where=text("status IN ('leased', 'save_claimed')"),
+        ),
+    )
+
+
 class WorkdayCooldownNotice(Base):
     """Private, deduplicated user decision for one account-lock generation."""
 

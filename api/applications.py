@@ -165,6 +165,12 @@ class AutomationProgressResponse(BaseModel):
     completed_at: datetime | None = Field(
         None, description="Timestamp when stage completed"
     )
+    unit2_completed: bool = Field(
+        False, description="Whether Unit 2 (Stage 2) is completed"
+    )
+    unit2_completed_at: datetime | None = Field(
+        None, description="Timestamp when Unit 2 (Stage 2) completed"
+    )
 
 
 class ApplicationResponse(BaseModel):
@@ -409,7 +415,10 @@ async def list_applications(
                         PROGRESS_AUTOMATION_EVENT_TYPES
                     ),
                 )
-                .order_by(ApplicationAutomationEvent.created_at.asc())
+                .order_by(
+                    ApplicationAutomationEvent.created_at.asc(),
+                    ApplicationAutomationEvent.id.asc(),
+                )
             )
             for event in events_result.scalars().all():
                 events_map.setdefault(event.application_id, []).append(event)
@@ -974,7 +983,10 @@ async def _format_application_response(
                         PROGRESS_AUTOMATION_EVENT_TYPES
                     ),
                 )
-                .order_by(ApplicationAutomationEvent.created_at.asc())
+                .order_by(
+                    ApplicationAutomationEvent.created_at.asc(),
+                    ApplicationAutomationEvent.id.asc(),
+                )
             )
             app_events = list(events_result.scalars().all())
         except Exception as e:

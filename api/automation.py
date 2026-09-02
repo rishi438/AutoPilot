@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
@@ -35,10 +36,13 @@ from models.database import (
     ApplicationDraftAnswer,
     WorkdayAccountGate,
     WorkdayAuthAttempt,
+    WorkdayUnit2Attempt,
 )
 from services.application_automation import (
     classify_sensitivity,
+    has_unresolved_unit2_review,
     is_prohibited_answer_material,
+    is_stage2_eligible,
     normalize_question,
     protect_reusable_answer,
 )
@@ -49,6 +53,7 @@ from services.portal_account_automation import (
 from services.portal_credentials import (
     PortalAccountMetadataRepository,
     PortalCredentialError,
+    normalize_portal_scope,
 )
 from services.workday_account_gate_store import (
     create_workday_account_gate_store,
@@ -68,6 +73,7 @@ from services.workday_cooldown_notices import (
 from utils.auth import get_current_user_with_complete_profile
 from utils.cache import invalidate_workflow_state
 from utils.database import get_database
+from utils.logging_config import redact_sensitive_data
 from utils.portal_vault_database import get_portal_vault_collections
 from utils.worker_auth import (
     WORKDAY_ACCOUNT_GATE_SCOPE,
@@ -297,6 +303,166 @@ class CompleteWorkdayUnit1Request(BaseModel):
         "captcha",
         "otp",
     ] = "unknown_page_state"
+
+
+class LeasedWorkdayUnit2ApplicationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: uuid.UUID
+    attempt_id: uuid.UUID
+    lease_id: uuid.UUID
+    lease_expires_at: datetime
+    mode: str = "normal"
+    user_id: uuid.UUID
+    portal: str
+    job_url: str
+    external_ats_url: str | None = None
+    job_title: str | None = None
+    company_name: str | None = None
+
+
+class LeasedWorkdayUnit2EnvelopeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    application: LeasedWorkdayUnit2ApplicationResponse | None = None
+
+
+class WorkerUnit2StartupReleaseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lease_id: uuid.UUID
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class WorkerUnit2SaveClaimRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attempt_id: uuid.UUID
+    lease_id: uuid.UUID
+
+
+class WorkerUnit2SaveClaimResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["claimed_now", "already_claimed"]
+
+
+class WorkerUnit2FinalizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attempt_id: uuid.UUID
+    lease_id: uuid.UUID
+    outcome: Literal["complete", "review_required", "preclick_release"]
+    checkpoint_version: str | None = None
+    hold_code: str | None = None
+    question: str | None = Field(default=None, max_length=2000)
+    detail: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def enforce_outcome_shape(self) -> "WorkerUnit2FinalizeRequest":
+        """Make terminal requests canonical so durable rows can prove exact replay."""
+        if self.outcome == "complete":
+            if (
+                self.hold_code is not None
+                or self.question is not None
+                or self.detail is not None
+            ):
+                raise ValueError("Complete finalization cannot include hold fields.")
+        elif self.outcome == "preclick_release":
+            if any(
+                value is not None
+                for value in (
+                    self.checkpoint_version,
+                    self.hold_code,
+                    self.question,
+                    self.detail,
+                )
+            ):
+                raise ValueError(
+                    "Pre-click release cannot include terminal detail fields."
+                )
+        elif self.outcome == "review_required":
+            if self.checkpoint_version is not None:
+                raise ValueError(
+                    "Review finalization cannot include a checkpoint version."
+                )
+            if self.hold_code is None:
+                raise ValueError(
+                    "Review finalization requires an allowlisted hold code."
+                )
+        return self
+
+
+class WorkerUnit2FinalizeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["completed", "review_required", "released"]
+
+
+UNIT2_HOLD_REMEDIATIONS: dict[str, str] = {
+    "expired_session": "The Workday session expired. Please sign in to renew the session.",
+    "captcha": "CAPTCHA challenge encountered. Please complete the verification manually.",
+    "otp": "One-time passcode / verification required. Please verify manually.",
+    "email_verification": "Email verification required. Please check your inbox and verify.",
+    "account_temporarily_locked": "The Workday account is temporarily locked. Please wait or unlock the account.",
+    "unfamiliar_consent": "An unfamiliar consent or agreement required your explicit approval.",
+    "unknown_required_question": "A required question has no approved answer in your profile.",
+    "unsupported_step": "An unsupported form control or step was encountered.",
+    "validation_failure": "One or more form fields failed browser validation.",
+    "upload_failure": "A required document upload was encountered.",
+    "unknown_page_state": "The application page was in an unexpected or unverified state.",
+}
+
+
+def compute_finalize_request_fingerprint(body: WorkerUnit2FinalizeRequest) -> str:
+    """Compute deterministic SHA-256 fingerprint for a finalization request."""
+    fields = [
+        str(body.attempt_id),
+        str(body.lease_id),
+        str(body.outcome),
+        str(body.checkpoint_version or ""),
+        str(body.hold_code or ""),
+        str(body.question or ""),
+        str(body.detail or ""),
+    ]
+    raw = json.dumps(fields, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    return sha256(raw).hexdigest()
+
+
+def _compute_legacy_finalize_request_fingerprint(
+    body: WorkerUnit2FinalizeRequest,
+) -> str:
+    fields = [
+        str(body.attempt_id),
+        str(body.lease_id),
+        str(body.outcome),
+        str(body.checkpoint_version or ""),
+        str(body.hold_code or ""),
+        str(body.question or ""),
+        str(body.detail or ""),
+    ]
+    return sha256(":".join(fields).encode("utf-8")).hexdigest()
+
+
+_UNIT2_TERMINAL_FINGERPRINT_PREFIX = "unit2_terminal_fp:"
+
+
+def _unit2_terminal_fingerprint_marker(attempt_id: uuid.UUID, fingerprint: str) -> str:
+    return f"{_UNIT2_TERMINAL_FINGERPRINT_PREFIX}{attempt_id}:{fingerprint}"
+
+
+def _fingerprint_from_hold_detail(
+    detail: str | None, *, attempt_id: uuid.UUID
+) -> str | None:
+    if not detail:
+        return None
+    prefix = f"{_UNIT2_TERMINAL_FINGERPRINT_PREFIX}{attempt_id}:"
+    if not detail.startswith(prefix):
+        return None
+    fingerprint = detail[len(prefix) :]
+    if re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        return fingerprint
+    return None
 
 
 class WorkdayCooldownDecisionRequest(BaseModel):
@@ -683,6 +849,21 @@ async def create_hold(
     return _hold_response(hold)
 
 
+async def _is_workday_stage2_application(
+    application_id: uuid.UUID, db: AsyncSession
+) -> bool:
+    events_res = await db.execute(
+        select(ApplicationAutomationEvent.event_type).where(
+            ApplicationAutomationEvent.application_id == application_id
+        )
+    )
+    event_types = set(events_res.scalars().all())
+    return (
+        "workday_unit1_completed" in event_types
+        and "workday_unit2_completed" not in event_types
+    )
+
+
 @router.post("/holds/{hold_id}/answer")
 async def resolve_hold_with_answer(
     hold_id: uuid.UUID,
@@ -732,8 +913,12 @@ async def resolve_hold_with_answer(
         source_portal=answer_hostname,
     )
     if hold.retry_count <= MAX_HOLD_RETRIES:
-        application.status = ApplicationStatus.RETRYING.value
-        event_type = "retry_enqueued"
+        if await _is_workday_stage2_application(application.id, db):
+            application.status = ApplicationStatus.APPLYING.value
+            event_type = "workday_unit2_retry_ready"
+        else:
+            application.status = ApplicationStatus.RETRYING.value
+            event_type = "retry_enqueued"
     else:
         application.status = ApplicationStatus.FAILED.value
         event_type = "retry_exhausted"
@@ -786,8 +971,12 @@ async def retry_after_relogin(
     else:
         hold.status = "resolved"
         hold.resolved_at = datetime.now(UTC)
-        application.status = ApplicationStatus.RETRYING.value
-        event_type = "retry_enqueued_after_relogin"
+        if await _is_workday_stage2_application(application.id, db):
+            application.status = ApplicationStatus.APPLYING.value
+            event_type = "workday_unit2_retry_ready"
+        else:
+            application.status = ApplicationStatus.RETRYING.value
+            event_type = "retry_enqueued_after_relogin"
     db.add(
         ApplicationAutomationEvent(
             application_id=application.id,
@@ -848,8 +1037,12 @@ async def rescan_unknown_required_question(
     else:
         hold.status = "resolved"
         hold.resolved_at = datetime.now(UTC)
-        application.status = ApplicationStatus.RETRYING.value
-        event_type = "retry_enqueued_for_form_rescan"
+        if await _is_workday_stage2_application(application.id, db):
+            application.status = ApplicationStatus.APPLYING.value
+            event_type = "workday_unit2_retry_ready"
+        else:
+            application.status = ApplicationStatus.RETRYING.value
+            event_type = "retry_enqueued_for_form_rescan"
     db.add(
         ApplicationAutomationEvent(
             application_id=application.id,
@@ -914,7 +1107,8 @@ async def retry_review_hold(
     user_id = _user_id(current_user)
     hold = (
         await db.execute(
-            select(ApplicationHold).where(
+            select(ApplicationHold)
+            .where(
                 ApplicationHold.id == hold_id,
                 ApplicationHold.user_id == user_id,
                 ApplicationHold.status.in_({"open", "resolved"}),
@@ -927,11 +1121,14 @@ async def retry_review_hold(
                     }
                 ),
             )
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if hold is None:
         raise HTTPException(404, "Open review hold not found.")
-    application = await db.get(JobApplication, hold.application_id)
+    application = await db.get(
+        JobApplication, hold.application_id, with_for_update=True
+    )
     if application is None or application.user_id != user_id:
         raise HTTPException(404, "Application not found.")
     if hold.status == "open" and (
@@ -940,6 +1137,59 @@ async def retry_review_hold(
         or application.automation_lease_expires_at is not None
     ):
         raise HTTPException(409, "The application is not safely blocked and unleased.")
+
+    if await _is_workday_stage2_application(application.id, db):
+        unit2_review_attempt = (
+            await db.execute(
+                select(WorkdayUnit2Attempt)
+                .where(
+                    WorkdayUnit2Attempt.application_id == application.id,
+                    WorkdayUnit2Attempt.status == "review_required",
+                )
+                .order_by(
+                    WorkdayUnit2Attempt.created_at.desc(),
+                    WorkdayUnit2Attempt.id.desc(),
+                )
+                .with_for_update()
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if unit2_review_attempt is None:
+            raise HTTPException(
+                409, "No review-required Workday Unit 2 attempt is available."
+            )
+
+        if hold.status == "open":
+            hold.retry_count += 1
+            if hold.retry_count > MAX_HOLD_RETRIES:
+                hold.status = "exhausted"
+                application.status = ApplicationStatus.FAILED.value
+                event_type = "retry_exhausted"
+            else:
+                hold.status = "resolved"
+                hold.resolved_at = datetime.now(UTC)
+                application.status = ApplicationStatus.APPLYING.value
+                event_type = "workday_unit2_retry_ready"
+        else:
+            application.status = ApplicationStatus.APPLYING.value
+            event_type = "workday_unit2_retry_ready"
+        application.automation_lease_id = None
+        application.automation_lease_expires_at = None
+        db.add(
+            ApplicationAutomationEvent(
+                application_id=application.id,
+                batch_id=application.automation_batch_id,
+                event_type=event_type,
+                detail=hold.hold_code,
+            )
+        )
+        await db.commit()
+        return {
+            "hold_id": str(hold.id),
+            "application_id": str(application.id),
+            "application_status": application.status,
+            "retry_count": hold.retry_count,
+        }
 
     review_attempt = (
         await db.execute(
@@ -2036,6 +2286,18 @@ async def worker_map_approved_form_fields(
         raise HTTPException(409, "Application lease is invalid or expired.")
     if not re.match(WORKDAY_HTTPS_URL_PATTERN, body.page_url, re.IGNORECASE):
         raise HTTPException(422, "Only an HTTPS Workday application page is accepted.")
+    target_url = application.external_ats_url or application.job_url or ""
+    try:
+        expected_tenant = derive_workday_portal_scope(target_url)
+        page_tenant = derive_workday_portal_scope(body.page_url)
+        if normalize_portal_scope(expected_tenant) != normalize_portal_scope(
+            page_tenant
+        ):
+            raise HTTPException(
+                422, "Submitted page tenant does not match the leased application."
+            )
+    except PortalCredentialError:
+        raise HTTPException(422, "Invalid Workday portal URL.")
     result = await map_form_fields_from_approved_sources(
         AutofillMapRequest(
             fields=body.fields,
@@ -2216,3 +2478,726 @@ async def worker_record_application_result(
         current_user=worker_user,
         db=db,
     )
+
+
+@router.post(
+    "/worker/unit2/queue/next",
+    response_model=LeasedWorkdayUnit2EnvelopeResponse,
+    summary="Lease next eligible Unit 2 application",
+)
+async def worker_lease_next_unit2_application(
+    application_id: uuid.UUID | None = Query(default=None),
+    worker_user: dict[str, Any] = Depends(get_workday_application_worker_user),
+    db: AsyncSession = Depends(get_database),
+) -> LeasedWorkdayUnit2EnvelopeResponse:
+    """Lease one eligible application for Workday Unit 2."""
+    now = datetime.now(UTC)
+    user_id = _user_id(worker_user)
+
+    unit1_completed_subquery = exists(
+        select(ApplicationAutomationEvent.id).where(
+            ApplicationAutomationEvent.application_id == JobApplication.id,
+            ApplicationAutomationEvent.event_type == "workday_unit1_completed",
+        )
+    )
+    unit2_completed_subquery = exists(
+        select(ApplicationAutomationEvent.id).where(
+            ApplicationAutomationEvent.application_id == JobApplication.id,
+            ApplicationAutomationEvent.event_type == "workday_unit2_completed",
+        )
+    )
+    open_hold_subquery = exists(
+        select(ApplicationHold.id).where(
+            ApplicationHold.application_id == JobApplication.id,
+            ApplicationHold.status == "open",
+        )
+    )
+
+    target_url = func.coalesce(
+        JobApplication.external_ats_url, JobApplication.job_url, ""
+    )
+
+    eligibility_filters = [
+        JobApplication.user_id == user_id,
+        JobApplication.deleted_at.is_(None),
+        ApplicationAutomationBatch.worker_kind == "local_playwright",
+        or_(
+            JobApplication.portal.ilike("%workday%"),
+            target_url.op("~*")(WORKDAY_HTTPS_URL_PATTERN),
+        ),
+        or_(
+            JobApplication.status == ApplicationStatus.APPLYING.value,
+            and_(
+                JobApplication.status == ApplicationStatus.PREPARING.value,
+                JobApplication.automation_lease_expires_at < now,
+            ),
+        ),
+        ~open_hold_subquery,
+        unit1_completed_subquery,
+        ~unit2_completed_subquery,
+    ]
+    if application_id is not None:
+        eligibility_filters.append(JobApplication.id == application_id)
+
+    statement = (
+        select(JobApplication)
+        .join(ApplicationAutomationBatch)
+        .where(*eligibility_filters)
+        .order_by(JobApplication.created_at)
+        .with_for_update(of=JobApplication, skip_locked=True)
+        .limit(10)
+    )
+    result = await db.execute(statement)
+    candidates = list(result.scalars().all())
+
+    for app in candidates:
+        events_res = await db.execute(
+            select(ApplicationAutomationEvent)
+            .where(ApplicationAutomationEvent.application_id == app.id)
+            .order_by(
+                ApplicationAutomationEvent.created_at.asc(),
+                ApplicationAutomationEvent.id.asc(),
+            )
+        )
+        app_events = list(events_res.scalars().all())
+
+        if app.status == ApplicationStatus.PREPARING.value and (
+            app.automation_lease_expires_at is None
+            or app.automation_lease_expires_at < now
+        ):
+            if has_unresolved_unit2_review(app_events):
+                continue
+        elif not is_stage2_eligible(app, app_events):
+            continue
+
+        attempts_res = await db.execute(
+            select(WorkdayUnit2Attempt)
+            .where(WorkdayUnit2Attempt.application_id == app.id)
+            .order_by(
+                WorkdayUnit2Attempt.created_at.asc(),
+                WorkdayUnit2Attempt.id.asc(),
+            )
+            .with_for_update()
+        )
+        attempts = list(attempts_res.scalars().all())
+
+        # Check for permanent Save claim fence
+        claimed_attempts = [att for att in attempts if att.save_claim_count >= 1]
+        if claimed_attempts:
+            # Active attempt with claim
+            active_claimed = [
+                att
+                for att in claimed_attempts
+                if att.status in ("leased", "save_claimed")
+            ]
+            has_unexpired = any(att.lease_expires_at > now for att in active_claimed)
+            if has_unexpired:
+                continue
+
+            # Expired active attempt with claim -> atomically convert to review_required
+            has_expired_active = False
+            for att in active_claimed:
+                if att.lease_expires_at <= now:
+                    att.status = "review_required"
+                    att.terminal_at = now
+                    att.updated_at = now
+                    has_expired_active = True
+
+            if has_expired_active:
+                app.status = ApplicationStatus.BLOCKED.value
+                app.automation_lease_id = None
+                app.automation_lease_expires_at = None
+                db.add(
+                    ApplicationHold(
+                        application_id=app.id,
+                        user_id=user_id,
+                        portal=app.portal or "workday",
+                        hold_code="unknown_page_state",
+                        remediation=(
+                            "Workday Unit 2 Save was claimed but the attempt lease expired. "
+                            "Please review the application state before retrying."
+                        ),
+                        status="open",
+                    )
+                )
+                db.add(
+                    ApplicationAutomationEvent(
+                        application_id=app.id,
+                        batch_id=app.automation_batch_id,
+                        event_type="workday_unit2_review_required",
+                        detail="claimed_lease_expired",
+                        created_at=now,
+                    )
+                )
+                await db.commit()
+                continue
+
+            # If all claimed attempts are terminal (review_required) and the application was requeued
+            # (no open holds and status is applying/preparing):
+            if app.status in (
+                ApplicationStatus.APPLYING.value,
+                ApplicationStatus.PREPARING.value,
+            ):
+                # Issue ONLY observe_only lease bound to the same claimed attempt
+                claimed_att = claimed_attempts[-1]
+                lease_id = uuid.uuid4()
+                lease_duration = timedelta(minutes=AUTOMATION_LEASE_MINUTES)
+                lease_expires_at = now + lease_duration
+
+                claimed_att.lease_id = lease_id
+                claimed_att.status = "save_claimed"
+                claimed_att.mode = "observe_only"
+                claimed_att.lease_expires_at = lease_expires_at
+                claimed_att.terminal_at = None
+                claimed_att.updated_at = now
+
+                app.status = ApplicationStatus.PREPARING.value
+                app.automation_lease_id = lease_id
+                app.automation_lease_expires_at = lease_expires_at
+
+                db.add(
+                    ApplicationAutomationEvent(
+                        application_id=app.id,
+                        batch_id=app.automation_batch_id,
+                        event_type="workday_unit2_started",
+                        detail="observe_only_lease_started",
+                        created_at=now,
+                    )
+                )
+                await db.commit()
+
+                return LeasedWorkdayUnit2EnvelopeResponse(
+                    application=LeasedWorkdayUnit2ApplicationResponse(
+                        application_id=app.id,
+                        attempt_id=claimed_att.id,
+                        lease_id=lease_id,
+                        lease_expires_at=lease_expires_at,
+                        mode="observe_only",
+                        user_id=user_id,
+                        portal=app.portal or "workday",
+                        job_url=app.job_url,
+                        external_ats_url=app.external_ats_url,
+                        job_title=app.job_title,
+                        company_name=app.company_name,
+                    )
+                )
+            else:
+                continue
+
+        # Normal pre-claim path (save_claim_count == 0 across all attempts)
+        active_attempts = [
+            att for att in attempts if att.status in ("leased", "save_claimed")
+        ]
+        has_unexpired_active = any(
+            att.lease_expires_at > now for att in active_attempts
+        )
+        if has_unexpired_active:
+            continue
+
+        for att in active_attempts:
+            if att.lease_expires_at <= now:
+                att.status = "released"
+                att.terminal_at = now
+                att.updated_at = now
+
+        # Step 7: Allow at most three persisted pre-click attempts. After that, require review
+        preclaim_attempts = [att for att in attempts if att.save_claim_count == 0]
+        if len(preclaim_attempts) >= 3:
+            app.status = ApplicationStatus.BLOCKED.value
+            app.automation_lease_id = None
+            app.automation_lease_expires_at = None
+            db.add(
+                ApplicationHold(
+                    application_id=app.id,
+                    user_id=user_id,
+                    portal=app.portal or "workday",
+                    hold_code="unknown_page_state",
+                    remediation=(
+                        "Unit 2 maximum attempt count reached. Please review the"
+                        " application state."
+                    ),
+                    status="open",
+                )
+            )
+            db.add(
+                ApplicationAutomationEvent(
+                    application_id=app.id,
+                    event_type="workday_unit2_review_required",
+                    detail="attempt_limit_exhausted",
+                    created_at=now,
+                )
+            )
+            await db.commit()
+            continue
+
+        lease_id = uuid.uuid4()
+        lease_duration = timedelta(minutes=AUTOMATION_LEASE_MINUTES)
+        lease_expires_at = now + lease_duration
+
+        new_attempt = WorkdayUnit2Attempt(
+            id=uuid.uuid4(),
+            application_id=app.id,
+            lease_id=lease_id,
+            status="leased",
+            mode="normal",
+            save_claim_count=0,
+            lease_expires_at=lease_expires_at,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(new_attempt)
+
+        app.status = ApplicationStatus.PREPARING.value
+        app.automation_lease_id = lease_id
+        app.automation_lease_expires_at = lease_expires_at
+
+        db.add(
+            ApplicationAutomationEvent(
+                application_id=app.id,
+                event_type="workday_unit2_started",
+                detail="unit2_lease_started",
+                created_at=now,
+            )
+        )
+
+        await db.commit()
+
+        return LeasedWorkdayUnit2EnvelopeResponse(
+            application=LeasedWorkdayUnit2ApplicationResponse(
+                application_id=app.id,
+                attempt_id=new_attempt.id,
+                lease_id=lease_id,
+                lease_expires_at=lease_expires_at,
+                mode="normal",
+                user_id=user_id,
+                portal=app.portal or "workday",
+                job_url=app.job_url,
+                external_ats_url=app.external_ats_url,
+                job_title=app.job_title,
+                company_name=app.company_name,
+            )
+        )
+
+    return LeasedWorkdayUnit2EnvelopeResponse(application=None)
+
+
+@router.post(
+    "/worker/unit2/queue/{application_id}/startup-release",
+    summary="Release Unit 2 lease before form action starts",
+)
+async def worker_release_unit2_startup_lease(
+    application_id: uuid.UUID,
+    body: WorkerUnit2StartupReleaseRequest,
+    worker_user: dict[str, Any] = Depends(get_workday_application_worker_user),
+    db: AsyncSession = Depends(get_database),
+) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    user_id = _user_id(worker_user)
+    application = (
+        await db.execute(
+            select(JobApplication)
+            .where(
+                JobApplication.id == application_id,
+                JobApplication.user_id == user_id,
+                JobApplication.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if application is None:
+        await db.rollback()
+        raise HTTPException(404, "Application not found.")
+
+    if not _has_active_lease(application, body.lease_id, now=now):
+        await db.rollback()
+        raise HTTPException(409, "Application lease is invalid or expired.")
+
+    attempt = (
+        await db.execute(
+            select(WorkdayUnit2Attempt)
+            .where(
+                WorkdayUnit2Attempt.application_id == application.id,
+                WorkdayUnit2Attempt.lease_id == body.lease_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+
+    if (
+        attempt is None
+        or attempt.save_claim_count != 0
+        or attempt.status not in ("leased", "save_claimed")
+    ):
+        await db.rollback()
+        raise HTTPException(409, "Cannot release a claimed or inactive Unit 2 attempt.")
+
+    attempt.status = "released"
+    attempt.terminal_at = now
+    attempt.updated_at = now
+
+    application.automation_lease_id = None
+    application.automation_lease_expires_at = None
+    application.status = ApplicationStatus.APPLYING.value
+
+    logger.info(
+        "unit2_startup_lease_released application_id=%s lease_id=%s reason=%s",
+        application_id,
+        body.lease_id,
+        body.reason,
+    )
+
+    await db.commit()
+    return {"status": "released"}
+
+
+@router.post(
+    "/worker/unit2/queue/{application_id}/save-claim",
+    response_model=WorkerUnit2SaveClaimResponse,
+    summary="Atomically claim the single Save click for an active Workday Unit 2 attempt",
+)
+async def worker_claim_unit2_save(
+    application_id: uuid.UUID,
+    body: WorkerUnit2SaveClaimRequest,
+    worker_user: dict[str, Any] = Depends(get_workday_application_worker_user),
+    db: AsyncSession = Depends(get_database),
+) -> WorkerUnit2SaveClaimResponse:
+    """Atomically record the one authorized Save click for this attempt."""
+    user_id = _user_id(worker_user)
+    now = datetime.now(UTC)
+
+    application = (
+        await db.execute(
+            select(JobApplication)
+            .where(
+                JobApplication.id == application_id,
+                JobApplication.user_id == user_id,
+                JobApplication.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+
+    if application is None:
+        await db.rollback()
+        raise HTTPException(404, "Application not found.")
+
+    if not _has_active_lease(application, body.lease_id, now=now):
+        await db.rollback()
+        raise HTTPException(409, "Application lease is invalid or expired.")
+
+    attempt = (
+        await db.execute(
+            select(WorkdayUnit2Attempt)
+            .where(
+                WorkdayUnit2Attempt.id == body.attempt_id,
+                WorkdayUnit2Attempt.application_id == application_id,
+                WorkdayUnit2Attempt.lease_id == body.lease_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+
+    if attempt is None:
+        await db.rollback()
+        raise HTTPException(404, "Active Unit 2 attempt not found.")
+
+    if attempt.mode == "observe_only":
+        await db.rollback()
+        raise HTTPException(409, "Observe-only attempt cannot claim a Save click.")
+
+    if attempt.status not in ("leased", "save_claimed") or attempt.mode != "normal":
+        await db.rollback()
+        raise HTTPException(409, "Attempt is not in an active leasable normal state.")
+
+    if attempt.save_claim_count == 0:
+        attempt.save_claim_count = 1
+        attempt.status = "save_claimed"
+        attempt.updated_at = now
+        db.add(
+            ApplicationAutomationEvent(
+                application_id=application_id,
+                batch_id=application.automation_batch_id,
+                event_type="workday_unit2_save_claimed",
+                detail="worker_claimed",
+            )
+        )
+        await db.commit()
+        return WorkerUnit2SaveClaimResponse(status="claimed_now")
+
+    await db.rollback()
+    return WorkerUnit2SaveClaimResponse(status="already_claimed")
+
+
+@router.post(
+    "/worker/unit2/queue/{application_id}/finalize",
+    response_model=WorkerUnit2FinalizeResponse,
+    summary="Atomically finalize one Workday Unit 2 attempt (complete, hold, or pre-click release)",
+)
+async def worker_finalize_unit2_application(
+    application_id: uuid.UUID,
+    body: WorkerUnit2FinalizeRequest,
+    worker_user: dict[str, Any] = Depends(get_workday_application_worker_user),
+    db: AsyncSession = Depends(get_database),
+) -> WorkerUnit2FinalizeResponse:
+    """Atomically record the final result of a Unit 2 attempt without stranding the application."""
+    user_id = _user_id(worker_user)
+    now = datetime.now(UTC)
+
+    application = (
+        await db.execute(
+            select(JobApplication)
+            .where(
+                JobApplication.id == application_id,
+                JobApplication.user_id == user_id,
+                JobApplication.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+
+    if application is None:
+        await db.rollback()
+        raise HTTPException(404, "Application not found.")
+
+    attempt = (
+        await db.execute(
+            select(WorkdayUnit2Attempt)
+            .where(
+                WorkdayUnit2Attempt.id == body.attempt_id,
+                WorkdayUnit2Attempt.application_id == application_id,
+                WorkdayUnit2Attempt.lease_id == body.lease_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+
+    if attempt is None:
+        await db.rollback()
+        raise HTTPException(404, "Active Unit 2 attempt not found.")
+
+    # Idempotent replay checking with persisted request fingerprint
+    terminal_status = attempt.status
+    if terminal_status in ("completed", "review_required", "released"):
+        current_fingerprint = compute_finalize_request_fingerprint(body)
+        persisted_fingerprint: str | None = None
+
+        # Review requests contain bounded optional fields, so persist their exact
+        # hash in the transactional hold row and search all hold states on replay.
+        if terminal_status == "review_required":
+            hold_rows = list(
+                (
+                    await db.execute(
+                        select(ApplicationHold)
+                        .where(ApplicationHold.application_id == application_id)
+                        .order_by(ApplicationHold.created_at.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for hold_row in hold_rows:
+                persisted_fingerprint = _fingerprint_from_hold_detail(
+                    getattr(hold_row, "error_detail", None),
+                    attempt_id=attempt.id,
+                )
+                if persisted_fingerprint is not None:
+                    break
+            # Compatibility with the immediately preceding unbound fp:<hash>
+            # format is safe only when exactly one hold exists for the application.
+            if persisted_fingerprint is None and len(hold_rows) == 1:
+                legacy_detail = str(getattr(hold_rows[0], "error_detail", "") or "")
+                if re.fullmatch(r"fp:[0-9a-f]{64}", legacy_detail):
+                    if (
+                        _compute_legacy_finalize_request_fingerprint(body)
+                        == legacy_detail[3:]
+                    ):
+                        await db.rollback()
+                        return WorkerUnit2FinalizeResponse(status=terminal_status)
+                    await db.rollback()
+                    raise HTTPException(
+                        409,
+                        f"Conflicting terminal replay for attempt status '{terminal_status}'.",
+                    )
+        elif terminal_status == "released":
+            expected_req = WorkerUnit2FinalizeRequest(
+                attempt_id=attempt.id,
+                lease_id=attempt.lease_id,
+                outcome="preclick_release",
+            )
+            persisted_fingerprint = compute_finalize_request_fingerprint(expected_req)
+        elif terminal_status == "completed":
+            expected_req = WorkerUnit2FinalizeRequest(
+                attempt_id=attempt.id,
+                lease_id=attempt.lease_id,
+                outcome="complete",
+                checkpoint_version="workday_unit2_v1",
+            )
+            persisted_fingerprint = compute_finalize_request_fingerprint(expected_req)
+
+        if persisted_fingerprint is not None:
+            if current_fingerprint != persisted_fingerprint:
+                await db.rollback()
+                raise HTTPException(
+                    409,
+                    f"Conflicting terminal replay for attempt status '{terminal_status}'.",
+                )
+            await db.rollback()
+            return WorkerUnit2FinalizeResponse(status=terminal_status)
+
+        await db.rollback()
+        raise HTTPException(
+            409, f"Attempt is already finalized as '{terminal_status}'."
+        )
+
+    # Validate active lease
+    if not _has_active_lease(application, body.lease_id, now=now):
+        await db.rollback()
+        raise HTTPException(409, "Application lease is invalid or expired.")
+
+    # Check Unit 1 completed receipt
+    unit1_event = (
+        await db.execute(
+            select(ApplicationAutomationEvent.id).where(
+                ApplicationAutomationEvent.application_id == application_id,
+                ApplicationAutomationEvent.event_type == "workday_unit1_completed",
+            )
+        )
+    ).scalar_one_or_none()
+    if unit1_event is None:
+        await db.rollback()
+        raise HTTPException(
+            409, "Application does not have a completed Unit 1 receipt."
+        )
+
+    # Check Unit 2 incomplete state
+    unit2_event = (
+        await db.execute(
+            select(ApplicationAutomationEvent.id).where(
+                ApplicationAutomationEvent.application_id == application_id,
+                ApplicationAutomationEvent.event_type == "workday_unit2_completed",
+            )
+        )
+    ).scalar_one_or_none()
+    if unit2_event is not None:
+        await db.rollback()
+        raise HTTPException(409, "Unit 2 is already completed for this application.")
+
+    # Check open-hold conflict
+    open_hold = (
+        await db.execute(
+            select(ApplicationHold.id).where(
+                ApplicationHold.application_id == application_id,
+                ApplicationHold.status == "open",
+            )
+        )
+    ).scalar_one_or_none()
+    if open_hold is not None:
+        await db.rollback()
+        raise HTTPException(409, "Application has an active open hold conflict.")
+
+    if body.outcome == "complete":
+        if attempt.save_claim_count != 1:
+            await db.rollback()
+            raise HTTPException(
+                409, "Cannot complete Unit 2 without a claimed Save action."
+            )
+
+        if body.checkpoint_version != "workday_unit2_v1":
+            await db.rollback()
+            raise HTTPException(
+                422, "Valid checkpoint_version 'workday_unit2_v1' is required."
+            )
+
+        attempt.status = "completed"
+        attempt.terminal_at = now
+        attempt.updated_at = now
+
+        application.status = ApplicationStatus.APPLYING.value
+        application.automation_lease_id = None
+        application.automation_lease_expires_at = None
+
+        db.add(
+            ApplicationAutomationEvent(
+                application_id=application_id,
+                batch_id=application.automation_batch_id,
+                event_type="workday_unit2_completed",
+                detail="my_information_saved_next_section_ready",
+                created_at=now,
+            )
+        )
+        await db.commit()
+        return WorkerUnit2FinalizeResponse(status="completed")
+
+    elif body.outcome == "review_required":
+        hold_code = body.hold_code or "unknown_page_state"
+        if hold_code not in UNIT2_HOLD_REMEDIATIONS:
+            await db.rollback()
+            raise HTTPException(422, f"Invalid or unallowlisted hold code: {hold_code}")
+
+        sanitized_question = (
+            str(redact_sensitive_data(body.question))[:2000] if body.question else None
+        )
+        sanitized_detail = (
+            str(redact_sensitive_data(body.detail))[:500] if body.detail else None
+        )
+
+        attempt.status = "review_required"
+        attempt.terminal_at = now
+        attempt.updated_at = now
+
+        application.status = ApplicationStatus.BLOCKED.value
+        application.automation_lease_id = None
+        application.automation_lease_expires_at = None
+
+        fp = compute_finalize_request_fingerprint(body)
+        db.add(
+            ApplicationHold(
+                application_id=application_id,
+                user_id=user_id,
+                portal=application.portal or "workday",
+                hold_code=hold_code,
+                remediation=UNIT2_HOLD_REMEDIATIONS.get(hold_code, "Review required."),
+                question=sanitized_question,
+                normalized_question=(
+                    normalize_question(sanitized_question)
+                    if sanitized_question
+                    else None
+                ),
+                error_detail=_unit2_terminal_fingerprint_marker(attempt.id, fp),
+                status="open",
+            )
+        )
+        db.add(
+            ApplicationAutomationEvent(
+                application_id=application_id,
+                batch_id=application.automation_batch_id,
+                event_type="workday_unit2_review_required",
+                detail=sanitized_detail or hold_code,
+                created_at=now,
+            )
+        )
+        await db.commit()
+        return WorkerUnit2FinalizeResponse(status="review_required")
+
+    elif body.outcome == "preclick_release":
+        if attempt.save_claim_count > 0 or attempt.mode == "observe_only":
+            await db.rollback()
+            raise HTTPException(
+                409,
+                "Cannot preclick_release an attempt that already claimed a Save click or is observe-only.",
+            )
+
+        attempt.status = "released"
+        attempt.terminal_at = now
+        attempt.updated_at = now
+
+        application.status = ApplicationStatus.APPLYING.value
+        application.automation_lease_id = None
+        application.automation_lease_expires_at = None
+
+        await db.commit()
+        return WorkerUnit2FinalizeResponse(status="released")
+
+    else:
+        await db.rollback()
+        raise HTTPException(422, f"Unsupported finalize outcome: {body.outcome}")

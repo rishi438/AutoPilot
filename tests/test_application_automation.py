@@ -19,6 +19,7 @@ from services.application_automation import (
     classify_sensitivity,
     derive_automation_progress,
     has_unit1_completed,
+    has_unit2_completed,
     is_prohibited_answer_material,
     is_stage2_eligible,
     normalize_question,
@@ -301,7 +302,8 @@ def test_derive_automation_progress_status_blocked_takes_precedence_over_histori
         status=ApplicationStatus.BLOCKED.value,
         portal="workday",
     )
-    # Historic completion event exists, but current status is blocked
+    # Historic completion event exists, but current status is blocked.
+    # Current stage status is review_required, but durable unit1_completed remains True.
     events = [
         ApplicationAutomationEvent(
             application_id=app_id,
@@ -319,7 +321,8 @@ def test_derive_automation_progress_status_blocked_takes_precedence_over_histori
     assert progress is not None
     assert progress["stage_status"] == "review_required"
     assert progress["label"] == "Review required"
-    assert progress["unit1_completed"] is False
+    assert progress["unit1_completed"] is True
+    assert progress["unit2_completed"] is False
     assert is_stage2_eligible(application, events) is False
 
 
@@ -347,3 +350,210 @@ def test_derive_automation_progress_handles_unordered_events() -> None:
     assert progress["stage_status"] == "completed"
     assert progress["unit1_completed"] is True
     assert progress["completed_at"] == datetime(2026, 8, 30, 10, 0, 0, tzinfo=UTC)
+
+
+def test_derive_automation_progress_deterministic_equal_timestamps() -> None:
+    app_id = uuid.uuid4()
+    application = JobApplication(
+        id=app_id,
+        user_id=uuid.uuid4(),
+        status=ApplicationStatus.APPLYING.value,
+        portal="workday",
+    )
+    same_time = datetime(2026, 8, 30, 10, 0, 0, tzinfo=UTC)
+    event_started = ApplicationAutomationEvent(
+        id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+        application_id=app_id,
+        event_type="workday_unit2_started",
+        created_at=same_time,
+    )
+    event_u1_done = ApplicationAutomationEvent(
+        id=uuid.UUID("00000000-0000-0000-0000-000000000000"),
+        application_id=app_id,
+        event_type="workday_unit1_completed",
+        created_at=same_time,
+    )
+    # When passed in reverse ID order, ID tiebreaker ensures event_u1_done comes first, then event_started
+    progress = derive_automation_progress(application, [event_started, event_u1_done])
+    assert progress is not None
+    assert progress["stage"] == "workday_unit2"
+    assert progress["stage_status"] == "in_progress"
+    assert progress["label"] == "Stage 2 in progress"
+    assert progress["unit1_completed"] is True
+    assert progress["unit2_completed"] is False
+
+
+def test_derive_automation_progress_unit2_in_progress() -> None:
+    app_id = uuid.uuid4()
+    application = JobApplication(
+        id=app_id,
+        user_id=uuid.uuid4(),
+        status=ApplicationStatus.APPLYING.value,
+        portal="workday",
+    )
+    events = [
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit1_completed",
+            created_at=datetime(2026, 8, 30, 9, 0, 0, tzinfo=UTC),
+        ),
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit2_started",
+            created_at=datetime(2026, 8, 30, 9, 10, 0, tzinfo=UTC),
+        ),
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit2_save_claimed",
+            created_at=datetime(2026, 8, 30, 9, 15, 0, tzinfo=UTC),
+        ),
+    ]
+    progress = derive_automation_progress(application, events)
+    assert progress is not None
+    assert progress["stage"] == "workday_unit2"
+    assert progress["stage_status"] == "in_progress"
+    assert progress["label"] == "Stage 2 in progress"
+    assert progress["unit1_completed"] is True
+    assert progress["unit2_completed"] is False
+
+
+def test_derive_automation_progress_unit2_review_required() -> None:
+    app_id = uuid.uuid4()
+    application = JobApplication(
+        id=app_id,
+        user_id=uuid.uuid4(),
+        status=ApplicationStatus.BLOCKED.value,
+        portal="workday",
+    )
+    events = [
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit1_completed",
+            created_at=datetime(2026, 8, 30, 9, 0, 0, tzinfo=UTC),
+        ),
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit2_started",
+            created_at=datetime(2026, 8, 30, 9, 10, 0, tzinfo=UTC),
+        ),
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit2_review_required",
+            created_at=datetime(2026, 8, 30, 9, 20, 0, tzinfo=UTC),
+        ),
+    ]
+    progress = derive_automation_progress(application, events)
+    assert progress is not None
+    assert progress["stage"] == "workday_unit2"
+    assert progress["stage_status"] == "review_required"
+    assert progress["label"] == "Review required"
+    assert progress["unit1_completed"] is True
+    assert progress["unit2_completed"] is False
+
+
+def test_derive_automation_progress_unit2_completed() -> None:
+    app_id = uuid.uuid4()
+    u2_completed_at = datetime(2026, 8, 30, 9, 30, 0, tzinfo=UTC)
+    application = JobApplication(
+        id=app_id,
+        user_id=uuid.uuid4(),
+        status=ApplicationStatus.APPLYING.value,
+        portal="workday",
+    )
+    events = [
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit1_completed",
+            created_at=datetime(2026, 8, 30, 9, 0, 0, tzinfo=UTC),
+        ),
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit2_started",
+            created_at=datetime(2026, 8, 30, 9, 10, 0, tzinfo=UTC),
+        ),
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit2_completed",
+            created_at=u2_completed_at,
+        ),
+    ]
+    progress = derive_automation_progress(application, events)
+    assert progress is not None
+    assert progress["stage"] == "workday_unit2"
+    assert progress["stage_status"] == "completed"
+    assert progress["label"] == "Stage 2 complete"
+    assert progress["unit1_completed"] is True
+    assert progress["unit2_completed"] is True
+    assert progress["unit2_completed_at"] == u2_completed_at
+    assert progress["completed_at"] == u2_completed_at
+    assert has_unit2_completed(events) is True
+    # Once Unit 2 is completed, it is no longer stage 2 eligible
+    assert is_stage2_eligible(application, events) is False
+
+
+def test_derive_automation_progress_unit2_failed_after_unit1() -> None:
+    app_id = uuid.uuid4()
+    application = JobApplication(
+        id=app_id,
+        user_id=uuid.uuid4(),
+        status=ApplicationStatus.FAILED.value,
+        portal="workday",
+    )
+    events = [
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit1_completed",
+            created_at=datetime(2026, 8, 30, 9, 0, 0, tzinfo=UTC),
+        ),
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit2_started",
+            created_at=datetime(2026, 8, 30, 9, 10, 0, tzinfo=UTC),
+        ),
+    ]
+    progress = derive_automation_progress(application, events)
+    assert progress is not None
+    assert progress["stage"] == "workday_unit2"
+    assert progress["stage_status"] == "failed"
+    assert progress["label"] == "Failed"
+    assert progress["unit1_completed"] is True
+    assert progress["unit2_completed"] is False
+
+
+def test_is_stage2_eligible_with_unresolved_and_resolved_unit2_review() -> None:
+    app_id = uuid.uuid4()
+    application = JobApplication(
+        id=app_id,
+        user_id=uuid.uuid4(),
+        status=ApplicationStatus.APPLYING.value,
+        portal="workday",
+    )
+    # Unit 1 done, no Unit 2 events -> eligible
+    events_u1 = [
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit1_completed",
+            created_at=datetime(2026, 8, 30, 9, 0, 0, tzinfo=UTC),
+        )
+    ]
+    assert is_stage2_eligible(application, events_u1) is True
+
+    # Unit 2 review_required -> not eligible
+    events_review = events_u1 + [
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit2_review_required",
+            created_at=datetime(2026, 8, 30, 9, 10, 0, tzinfo=UTC),
+        )
+    ]
+    assert is_stage2_eligible(application, events_review) is False
+
+    # Unit 2 retry_ready after review -> eligible again
+    events_retry_ready = events_review + [
+        ApplicationAutomationEvent(
+            application_id=app_id,
+            event_type="workday_unit2_retry_ready",
+            created_at=datetime(2026, 8, 30, 9, 20, 0, tzinfo=UTC),
+        )
+    ]
+    assert is_stage2_eligible(application, events_retry_ready) is True

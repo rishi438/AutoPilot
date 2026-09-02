@@ -99,6 +99,54 @@ class LeasedWorkdayApplication:
         )
 
 
+class _LeaseUnit2Payload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    application_id: uuid.UUID
+    attempt_id: uuid.UUID
+    lease_id: uuid.UUID
+    lease_expires_at: datetime
+    mode: str = "normal"
+    user_id: uuid.UUID
+    portal: str = Field(min_length=1, max_length=50)
+    job_url: str = Field(min_length=1, max_length=4000)
+    external_ats_url: str | None = Field(default=None, max_length=4000)
+    job_title: str | None = Field(default=None, max_length=500)
+    company_name: str | None = Field(default=None, max_length=500)
+
+
+class _LeaseUnit2Envelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    application: _LeaseUnit2Payload | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class LeasedWorkdayUnit2Application:
+    """Validated safe metadata for Unit 2 work without secrets or gate credentials."""
+
+    application_id: uuid.UUID
+    attempt_id: uuid.UUID
+    lease_id: uuid.UUID
+    lease_expires_at: datetime
+    mode: str = "normal"
+    user_id: uuid.UUID
+    portal: str
+    job_url: str
+    external_ats_url: str | None = None
+    job_title: str | None = None
+    company_name: str | None = None
+
+    def to_workday_lease(self) -> WorkdayLease:
+        return WorkdayLease(
+            application_id=str(self.application_id),
+            user_id=str(self.user_id),
+            portal=self.portal,
+            job_url=self.job_url,
+            external_ats_url=self.external_ats_url,
+        )
+
+
 def _validate_api_base_url(base_url: str) -> str:
     normalized = base_url.strip().rstrip("/")
     parsed = urlsplit(normalized)
@@ -123,14 +171,19 @@ class WorkdayWorkerApi:
         self,
         *,
         base_url: str,
-        bearer_token: str,
+        bearer_token: str | SecretStr,
         client: httpx.AsyncClient | None = None,
         timeout_seconds: float = 15.0,
     ):
-        if not bearer_token.strip():
+        raw_token = (
+            bearer_token.get_secret_value()
+            if isinstance(bearer_token, SecretStr)
+            else str(bearer_token)
+        )
+        if not raw_token.strip():
             raise WorkdayWorkerTransportError("A worker bearer token is required.")
         self._base_url = _validate_api_base_url(base_url)
-        self._token = SecretStr(bearer_token)
+        self._token = SecretStr(raw_token)
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             timeout=timeout_seconds,
@@ -166,6 +219,56 @@ class WorkdayWorkerApi:
             path="/api/v1/automation/worker/unit1/queue/next",
             application_id=application_id,
         )
+
+    async def lease_next_unit2(
+        self, *, application_id: uuid.UUID | None = None
+    ) -> LeasedWorkdayUnit2Application | None:
+        """Lease Unit 2 through the application-scope worker endpoint."""
+        params = (
+            {"application_id": str(application_id)}
+            if application_id is not None
+            else None
+        )
+        payload = await self._request_json(
+            "POST",
+            "/api/v1/automation/worker/unit2/queue/next",
+            params=params,
+        )
+        try:
+            envelope = _LeaseUnit2Envelope.model_validate(payload)
+        except ValueError as exc:
+            raise WorkdayWorkerTransportError(
+                "The Unit 2 worker lease response was invalid."
+            ) from exc
+        if envelope.application is None:
+            logger.info("worker_api_unit2_lease_empty")
+            return None
+        item = envelope.application
+        lease = LeasedWorkdayUnit2Application(
+            application_id=item.application_id,
+            attempt_id=item.attempt_id,
+            lease_id=item.lease_id,
+            lease_expires_at=item.lease_expires_at,
+            mode=item.mode,
+            user_id=item.user_id,
+            portal=item.portal,
+            job_url=item.job_url,
+            external_ats_url=item.external_ats_url,
+            job_title=item.job_title,
+            company_name=item.company_name,
+        )
+        try:
+            lease.to_workday_lease().target_url
+        except WorkdayWorkerError as exc:
+            raise WorkdayWorkerTransportError(
+                "The Unit 2 worker lease did not contain an approved Workday target."
+            ) from exc
+        logger.info(
+            "worker_api_unit2_lease_validated application_id=%s attempt_id=%s",
+            lease.application_id,
+            lease.attempt_id,
+        )
+        return lease
 
     async def _lease_next(
         self, *, path: str, application_id: uuid.UUID | None
@@ -235,9 +338,63 @@ class WorkdayWorkerApi:
             },
         )
 
+    async def release_startup_lease_unit2(
+        self,
+        lease: LeasedWorkdayUnit2Application,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        """Release Unit 2 lease only before any form action starts."""
+        body: dict[str, Any] = {"lease_id": str(lease.lease_id)}
+        if reason is not None:
+            body["reason"] = str(reason)
+        await self._request_json(
+            "POST",
+            f"/api/v1/automation/worker/unit2/queue/{lease.application_id}/startup-release",
+            json=body,
+        )
+
+    async def claim_unit2_save(self, lease: LeasedWorkdayUnit2Application) -> str:
+        """Atomically claim the single Save click for this Unit 2 attempt."""
+        payload = await self._request_json(
+            "POST",
+            f"/api/v1/automation/worker/unit2/queue/{lease.application_id}/save-claim",
+            json={
+                "attempt_id": str(lease.attempt_id),
+                "lease_id": str(lease.lease_id),
+            },
+        )
+        return str(payload.get("status", "already_claimed"))
+
+    async def finalize_unit2(
+        self,
+        lease: LeasedWorkdayUnit2Application,
+        *,
+        outcome: str,
+        checkpoint_version: str | None = None,
+        hold_code: str | None = None,
+        question: str | None = None,
+        detail: str | None = None,
+    ) -> str:
+        """Atomically finalize one Unit 2 attempt (complete, hold, or preclick_release)."""
+        payload = await self._request_json(
+            "POST",
+            f"/api/v1/automation/worker/unit2/queue/{lease.application_id}/finalize",
+            json={
+                "attempt_id": str(lease.attempt_id),
+                "lease_id": str(lease.lease_id),
+                "outcome": outcome,
+                "checkpoint_version": checkpoint_version,
+                "hold_code": hold_code,
+                "question": question,
+                "detail": detail,
+            },
+        )
+        return str(payload.get("status", "unknown"))
+
     async def map_approved_form_fields(
         self,
-        lease: LeasedWorkdayApplication,
+        lease: LeasedWorkdayApplication | LeasedWorkdayUnit2Application,
         *,
         page_url: str,
         fields: list[WorkdayFormField],
@@ -248,7 +405,9 @@ class WorkdayWorkerApi:
             json={
                 "lease_id": str(lease.lease_id),
                 "page_url": page_url,
-                "fields": [field.to_payload() for field in fields],
+                "fields": [
+                    {**field.to_payload(), "current_value": None} for field in fields
+                ],
             },
         )
         try:

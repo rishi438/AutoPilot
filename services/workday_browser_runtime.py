@@ -32,7 +32,9 @@ def default_autopilot_browser_profile() -> Path:
     return Path(local_app_data) / "Autopilot" / _PROFILE_DIRECTORY_NAME
 
 
-def user_scoped_autopilot_browser_profile(user_id: str) -> Path:
+def user_scoped_autopilot_browser_profile(
+    user_id: str, *, must_exist: bool = False
+) -> Path:
     """Return an isolated persistent profile for exactly one AutoPilot user."""
     try:
         normalized_user_id = str(uuid.UUID(user_id))
@@ -40,11 +42,16 @@ def user_scoped_autopilot_browser_profile(user_id: str) -> Path:
         raise WorkdayWorkerError(
             "A valid AutoPilot user ID is required for browser isolation."
         ) from exc
-    return (
+    profile_path = (
         default_autopilot_browser_profile().parent
         / _USER_PROFILE_DIRECTORY_NAME
         / normalized_user_id
     )
+    if must_exist and not profile_path.exists():
+        raise WorkdayWorkerError(
+            "The existing browser profile for this user is missing."
+        )
+    return profile_path
 
 
 def validate_browser_profile_path(
@@ -176,3 +183,46 @@ class PersistentWorkdayBrowserRuntime:
             await context.close()
         if playwright is not None:
             await playwright.stop()
+
+    def verify_account_continuity(self, user_id: Any) -> bool:
+        """Factual check that this runtime owns the locked persistent profile for user_id."""
+        try:
+            expected_profile = user_scoped_autopilot_browser_profile(
+                str(user_id), must_exist=True
+            ).resolve()
+            if self._profile_dir.resolve() != expected_profile:
+                return False
+            if not getattr(self._lock, "is_locked", False):
+                return False
+            if self._context is None:
+                return False
+            return True
+        except Exception:
+            return False
+
+    @property
+    def existing_pages(self) -> list[Any]:
+        """Return the open pages in the active persistent browser context."""
+        if self._context is None:
+            return []
+        return list(self._context.pages)
+
+    def borrow_playwright_browser_for_page(
+        self, page: Any | None = None
+    ) -> PlaywrightWorkdayBrowser:
+        """Wrap an existing open page from this runtime into a PlaywrightWorkdayBrowser."""
+        target_page = page
+        if target_page is None:
+            pages = self.existing_pages
+            if not pages:
+                raise WorkdayWorkerError(
+                    "No existing browser page available to borrow."
+                )
+            target_page = pages[0]
+        return PlaywrightWorkdayBrowser(
+            target_page,
+            timeout_ms=self._timeout_ms,
+            accept_account_terms=self._accept_account_terms,
+            control_resolver=self._control_resolver,
+            decision_reporter=self._decision_reporter,
+        )

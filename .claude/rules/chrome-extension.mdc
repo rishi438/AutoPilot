@@ -23,7 +23,7 @@ Both `popup.js` and `service-worker.js` use a single flag to switch between loca
 // ⚠️  BEFORE PUBLISHING: Set IS_DEV = false and fill in PRODUCTION_URL.
 const IS_DEV = true;
 const DEV_URL = 'http://localhost:8000';
-const PRODUCTION_URL = 'https://your-applypilot-instance.com';
+const PRODUCTION_URL = 'https://your-autopilot-instance.com';
 const BASE_URL = IS_DEV ? DEV_URL : PRODUCTION_URL;
 
 const CONFIG = {
@@ -128,7 +128,7 @@ function showToast(message, type = 'info') {
 
 ### Duplicate workflow start — `RES_3002`
 
-If `POST .../workflow/start` returns **409** with `error_code === 'RES_3002'`, the user already has an application for that job. **`popup.js`** / **`service-worker.js`** must show an **info** (or warning-style) message via `showToast` / the same UX path — not a generic network error. Details: `applypilot-core.mdc` (`RES_3002`).
+If `POST .../workflow/start` returns **409** with `error_code === 'RES_3002'`, the user already has an application for that job. **`popup.js`** / **`service-worker.js`** must show an **info** (or warning-style) message via `showToast` / the same UX path — not a generic network error. Details: `autopilot-core.mdc` (`RES_3002`).
 
 ## Content extraction (`extension/lib/extract-page-content.js`)
 

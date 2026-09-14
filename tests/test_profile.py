@@ -59,8 +59,10 @@ def authenticated_user(http_client: httpx.Client, unique_email: str):
             "full_name": "Test Profile User",
         },
     )
-    assert register_response.status_code == 200, f"Registration failed: {register_response.text}"
-    
+    assert (
+        register_response.status_code == 200
+    ), f"Registration failed: {register_response.text}"
+
     token = register_response.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
 
@@ -72,6 +74,7 @@ def valid_basic_info() -> Dict[str, Any]:
         "city": "San Francisco",
         "state": "California",
         "country": "United States",
+        "postal_code": "94105",
         "professional_title": "Software Engineer",
         "years_experience": 5,
         "is_student": False,
@@ -125,7 +128,10 @@ def valid_career_preferences() -> Dict[str, Any]:
     """Return valid career preferences data for testing."""
     return {
         "desired_salary_range": {"min": 120000, "max": 180000},
-        "desired_company_sizes": ["Medium (51-200 employees)", "Large (201-1000 employees)"],
+        "desired_company_sizes": [
+            "Medium (51-200 employees)",
+            "Large (201-1000 employees)",
+        ],
         "job_types": ["Full-time"],
         "work_arrangements": ["Remote", "Hybrid"],
         "willing_to_relocate": False,
@@ -151,15 +157,15 @@ class TestGetProfile:
             "/api/v1/profile",
             headers=authenticated_user,
         )
-        
+
         assert response.status_code == 200
         data = response.json()
-        
+
         # Check response structure
         assert "user_info" in data
         assert "profile_data" in data
         assert "completion_status" in data
-        
+
         # Check user_info fields
         assert "id" in data["user_info"]
         assert "email" in data["user_info"]
@@ -168,7 +174,7 @@ class TestGetProfile:
     def test_get_profile_without_auth(self, http_client: httpx.Client):
         """Test profile retrieval without authentication fails."""
         response = http_client.get("/api/v1/profile")
-        
+
         # Should return 401 or 403
         assert response.status_code in [401, 403]
 
@@ -178,7 +184,7 @@ class TestGetProfile:
             "/api/v1/profile",
             headers={"Authorization": "Bearer invalid-token"},
         )
-        
+
         assert response.status_code in [401, 403]
 
 
@@ -202,7 +208,7 @@ class TestBasicInfo:
             headers=authenticated_user,
             json=valid_basic_info,
         )
-        
+
         assert response.status_code == 200
         data = response.json()
         assert "message" in data
@@ -221,20 +227,22 @@ class TestBasicInfo:
             headers=authenticated_user,
             json=valid_basic_info,
         )
-        
+
         # Retrieve profile and verify
         response = http_client.get(
             "/api/v1/profile",
             headers=authenticated_user,
         )
-        
+
         assert response.status_code == 200
         data = response.json()
         profile = data["profile_data"]
-        
+
         assert profile["city"] == valid_basic_info["city"]
         assert profile["state"] == valid_basic_info["state"]
         assert profile["country"] == valid_basic_info["country"]
+        assert profile["country_phone_code"] == "+1"
+        assert profile["postal_code"] == valid_basic_info["postal_code"]
         assert profile["professional_title"] == valid_basic_info["professional_title"]
 
     def test_update_basic_info_missing_required_fields(
@@ -245,13 +253,13 @@ class TestBasicInfo:
             "city": "San Francisco",
             # Missing state, country, professional_title, etc.
         }
-        
+
         response = http_client.put(
             "/api/v1/profile/basic-info",
             headers=authenticated_user,
             json=incomplete_data,
         )
-        
+
         assert response.status_code in [400, 422]
 
     def test_update_basic_info_invalid_years_experience(
@@ -263,13 +271,13 @@ class TestBasicInfo:
         """Test update with invalid years of experience fails."""
         invalid_data = valid_basic_info.copy()
         invalid_data["years_experience"] = -5  # Negative value
-        
+
         response = http_client.put(
             "/api/v1/profile/basic-info",
             headers=authenticated_user,
             json=invalid_data,
         )
-        
+
         assert response.status_code in [400, 422]
 
     def test_update_basic_info_excessive_years_experience(
@@ -281,13 +289,13 @@ class TestBasicInfo:
         """Test update with excessive years of experience fails."""
         invalid_data = valid_basic_info.copy()
         invalid_data["years_experience"] = 100  # More than MAX_YEARS_EXPERIENCE (70)
-        
+
         response = http_client.put(
             "/api/v1/profile/basic-info",
             headers=authenticated_user,
             json=invalid_data,
         )
-        
+
         assert response.status_code in [400, 422]
 
     def test_update_basic_info_invalid_location_characters(
@@ -299,13 +307,13 @@ class TestBasicInfo:
         """Test update with invalid characters in location fails."""
         invalid_data = valid_basic_info.copy()
         invalid_data["city"] = "San <script>Francisco</script>"  # XSS attempt
-        
+
         response = http_client.put(
             "/api/v1/profile/basic-info",
             headers=authenticated_user,
             json=invalid_data,
         )
-        
+
         assert response.status_code in [400, 422]
 
     def test_update_basic_info_summary_too_long(
@@ -317,13 +325,13 @@ class TestBasicInfo:
         """Test update with summary exceeding max length fails."""
         invalid_data = valid_basic_info.copy()
         invalid_data["summary"] = "A" * 1001  # Exceeds MAX_SUMMARY_LENGTH (1000)
-        
+
         response = http_client.put(
             "/api/v1/profile/basic-info",
             headers=authenticated_user,
             json=invalid_data,
         )
-        
+
         assert response.status_code in [400, 422]
 
     def test_update_basic_info_without_auth(
@@ -334,7 +342,7 @@ class TestBasicInfo:
             "/api/v1/profile/basic-info",
             json=valid_basic_info,
         )
-        
+
         assert response.status_code in [401, 403]
 
 
@@ -358,7 +366,7 @@ class TestWorkExperience:
             headers=authenticated_user,
             json=valid_work_experience,
         )
-        
+
         assert response.status_code == 200
         data = response.json()
         assert "message" in data
@@ -375,7 +383,7 @@ class TestWorkExperience:
             headers=authenticated_user,
             json={"work_experience": []},
         )
-        
+
         # Empty work experience should be allowed (user might be fresh graduate)
         assert response.status_code == 200
 
@@ -392,17 +400,17 @@ class TestWorkExperience:
             headers=authenticated_user,
             json=valid_work_experience,
         )
-        
+
         # Retrieve profile and verify
         response = http_client.get(
             "/api/v1/profile",
             headers=authenticated_user,
         )
-        
+
         assert response.status_code == 200
         data = response.json()
         work_exp = data["profile_data"].get("work_experience", [])
-        
+
         assert len(work_exp) == 2
         assert work_exp[0]["company"] == "Tech Company Inc"
 
@@ -421,13 +429,13 @@ class TestWorkExperience:
                 }
             ]
         }
-        
+
         response = http_client.put(
             "/api/v1/profile/work-experience",
             headers=authenticated_user,
             json=invalid_data,
         )
-        
+
         assert response.status_code in [400, 422]
 
     def test_update_work_experience_future_start_date(
@@ -445,20 +453,20 @@ class TestWorkExperience:
                 }
             ]
         }
-        
+
         response = http_client.put(
             "/api/v1/profile/work-experience",
             headers=authenticated_user,
             json=invalid_data,
         )
-        
+
         assert response.status_code in [400, 422]
 
     def test_update_work_experience_end_before_start(
         self, http_client: httpx.Client, authenticated_user: Dict[str, str]
     ):
         """Test update with end date before start date.
-        
+
         Note: The API currently accepts this data without validation.
         This test documents the current behavior.
         """
@@ -474,13 +482,13 @@ class TestWorkExperience:
                 }
             ]
         }
-        
+
         response = http_client.put(
             "/api/v1/profile/work-experience",
             headers=authenticated_user,
             json=data,
         )
-        
+
         # API currently accepts this without validation
         assert response.status_code == 200
 
@@ -504,13 +512,13 @@ class TestWorkExperience:
                 },
             ]
         }
-        
+
         response = http_client.put(
             "/api/v1/profile/work-experience",
             headers=authenticated_user,
             json=invalid_data,
         )
-        
+
         assert response.status_code in [400, 422]
 
     def test_update_work_experience_exceeds_max_items(
@@ -528,13 +536,13 @@ class TestWorkExperience:
             }
             for i in range(11)
         ]
-        
+
         response = http_client.put(
             "/api/v1/profile/work-experience",
             headers=authenticated_user,
             json={"work_experience": work_exp_list},
         )
-        
+
         assert response.status_code in [400, 422]
 
 
@@ -558,7 +566,7 @@ class TestSkillsQualifications:
             headers=authenticated_user,
             json=valid_skills,
         )
-        
+
         assert response.status_code == 200
         data = response.json()
         assert "message" in data
@@ -577,17 +585,17 @@ class TestSkillsQualifications:
             headers=authenticated_user,
             json=valid_skills,
         )
-        
+
         # Retrieve profile and verify
         response = http_client.get(
             "/api/v1/profile",
             headers=authenticated_user,
         )
-        
+
         assert response.status_code == 200
         data = response.json()
         skills = data["profile_data"].get("skills", [])
-        
+
         assert "Python" in skills
         assert "AWS" in skills
 
@@ -600,7 +608,7 @@ class TestSkillsQualifications:
             headers=authenticated_user,
             json={"skills": []},
         )
-        
+
         # Should fail due to MIN_SKILLS_ITEMS = 1
         assert response.status_code in [400, 422]
 
@@ -613,16 +621,16 @@ class TestSkillsQualifications:
             headers=authenticated_user,
             json={"skills": ["Python", "python", "PYTHON", "JavaScript"]},
         )
-        
+
         assert response.status_code == 200
-        
+
         # Verify deduplication
         profile_response = http_client.get(
             "/api/v1/profile",
             headers=authenticated_user,
         )
         skills = profile_response.json()["profile_data"].get("skills", [])
-        
+
         # Count Python entries (should be 1 after deduplication)
         python_count = sum(1 for s in skills if s.lower() == "python")
         assert python_count == 1
@@ -636,7 +644,7 @@ class TestSkillsQualifications:
             headers=authenticated_user,
             json={"skills": ["Python<script>alert('xss')</script>"]},
         )
-        
+
         assert response.status_code in [400, 422]
 
     def test_update_skills_exceeds_max_items(
@@ -645,13 +653,13 @@ class TestSkillsQualifications:
         """Test update with too many skills fails."""
         # Create 21 skills (exceeds MAX_SKILLS_ITEMS = 20)
         many_skills = [f"Skill{i}" for i in range(21)]
-        
+
         response = http_client.put(
             "/api/v1/profile/skills-qualifications",
             headers=authenticated_user,
             json={"skills": many_skills},
         )
-        
+
         assert response.status_code in [400, 422]
 
     def test_update_skills_technical_characters_allowed(
@@ -663,7 +671,7 @@ class TestSkillsQualifications:
             headers=authenticated_user,
             json={"skills": ["C++", "C#", "Node.js", "Vue.js", "ASP.NET"]},
         )
-        
+
         assert response.status_code == 200
 
 
@@ -687,7 +695,7 @@ class TestCareerPreferences:
             headers=authenticated_user,
             json=valid_career_preferences,
         )
-        
+
         assert response.status_code == 200
         data = response.json()
         assert "message" in data
@@ -706,17 +714,17 @@ class TestCareerPreferences:
             headers=authenticated_user,
             json=valid_career_preferences,
         )
-        
+
         # Retrieve profile and verify
         response = http_client.get(
             "/api/v1/profile",
             headers=authenticated_user,
         )
-        
+
         assert response.status_code == 200
         data = response.json()
         profile = data["profile_data"]
-        
+
         assert profile["desired_salary_range"]["min"] == 120000
         assert profile["desired_salary_range"]["max"] == 180000
         assert "Remote" in profile["work_arrangements"]
@@ -756,13 +764,13 @@ class TestCareerPreferences:
         """Test update with min salary greater than max fails."""
         invalid_data = valid_career_preferences.copy()
         invalid_data["desired_salary_range"] = {"min": 200000, "max": 100000}
-        
+
         response = http_client.put(
             "/api/v1/profile/career-preferences",
             headers=authenticated_user,
             json=invalid_data,
         )
-        
+
         assert response.status_code in [400, 422]
 
     def test_update_career_preferences_negative_salary(
@@ -774,13 +782,13 @@ class TestCareerPreferences:
         """Test update with negative salary values fails."""
         invalid_data = valid_career_preferences.copy()
         invalid_data["desired_salary_range"] = {"min": -50000, "max": 100000}
-        
+
         response = http_client.put(
             "/api/v1/profile/career-preferences",
             headers=authenticated_user,
             json=invalid_data,
         )
-        
+
         assert response.status_code in [400, 422]
 
     def test_update_career_preferences_unreasonable_salary(
@@ -792,13 +800,13 @@ class TestCareerPreferences:
         """Test update with unreasonably high salary fails."""
         invalid_data = valid_career_preferences.copy()
         invalid_data["desired_salary_range"] = {"min": 5000000, "max": 10000000}
-        
+
         response = http_client.put(
             "/api/v1/profile/career-preferences",
             headers=authenticated_user,
             json=invalid_data,
         )
-        
+
         assert response.status_code in [400, 422]
 
     def test_update_career_preferences_invalid_job_type(
@@ -810,13 +818,13 @@ class TestCareerPreferences:
         """Test update with invalid job type is handled."""
         invalid_data = valid_career_preferences.copy()
         invalid_data["job_types"] = ["InvalidJobType"]
-        
+
         response = http_client.put(
             "/api/v1/profile/career-preferences",
             headers=authenticated_user,
             json=invalid_data,
         )
-        
+
         # May return 422 or try to convert
         assert response.status_code in [200, 400, 422]
 
@@ -829,13 +837,13 @@ class TestCareerPreferences:
         """Test update with empty job types fails."""
         invalid_data = valid_career_preferences.copy()
         invalid_data["job_types"] = []
-        
+
         response = http_client.put(
             "/api/v1/profile/career-preferences",
             headers=authenticated_user,
             json=invalid_data,
         )
-        
+
         # Should fail due to MIN_JOB_TYPE_ITEMS = 1
         assert response.status_code in [400, 422]
 
@@ -857,7 +865,7 @@ class TestCareerPreferences:
                 "max_travel_preference": "0",
             },
         )
-        
+
         assert response.status_code == 200
 
 
@@ -877,15 +885,15 @@ class TestProfileCompletion:
             "/api/v1/profile/status",
             headers=authenticated_user,
         )
-        
+
         assert response.status_code == 200
         data = response.json()
-        
+
         assert "profile_completed" in data
         assert "completion_percentage" in data
         assert "completed_steps" in data
         assert "missing_steps" in data
-        
+
         # New user should not have completed profile
         assert data["profile_completed"] is False
         assert data["completion_percentage"] < 100
@@ -903,15 +911,15 @@ class TestProfileCompletion:
             headers=authenticated_user,
             json=valid_basic_info,
         )
-        
+
         response = http_client.get(
             "/api/v1/profile/status",
             headers=authenticated_user,
         )
-        
+
         assert response.status_code == 200
         data = response.json()
-        
+
         assert "basic_info" in data["completed_steps"]
         assert data["completion_percentage"] > 0
 
@@ -946,15 +954,15 @@ class TestProfileCompletion:
             headers=authenticated_user,
             json=valid_career_preferences,
         )
-        
+
         response = http_client.get(
             "/api/v1/profile/status",
             headers=authenticated_user,
         )
-        
+
         assert response.status_code == 200
         data = response.json()
-        
+
         assert data["profile_completed"] is True
         assert data["completion_percentage"] == 100
         assert len(data["missing_steps"]) == 0
@@ -962,7 +970,7 @@ class TestProfileCompletion:
     def test_get_profile_status_without_auth(self, http_client: httpx.Client):
         """Test profile status without authentication fails."""
         response = http_client.get("/api/v1/profile/status")
-        
+
         assert response.status_code in [401, 403]
 
 
@@ -982,19 +990,19 @@ class TestProfileEdgeCases:
     ):
         """Test that concurrent updates don't cause issues."""
         import concurrent.futures
-        
+
         def update_basic_info():
             return http_client.put(
                 "/api/v1/profile/basic-info",
                 headers=authenticated_user,
                 json=valid_basic_info,
             )
-        
+
         # Execute multiple concurrent requests
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             futures = [executor.submit(update_basic_info) for _ in range(3)]
             results = [f.result() for f in futures]
-        
+
         # All requests should succeed or fail gracefully
         for result in results:
             assert result.status_code in [200, 409, 500]
@@ -1014,13 +1022,13 @@ class TestProfileEdgeCases:
             "is_student": False,
             "summary": "Erfahrener Entwickler mit Expertise in Python und Cloud-Technologien.",
         }
-        
+
         response = http_client.put(
             "/api/v1/profile/basic-info",
             headers=authenticated_user,
             json=unicode_basic_info,
         )
-        
+
         # May accept or reject unicode depending on validation rules
         assert response.status_code in [200, 400, 422]
 
@@ -1038,7 +1046,7 @@ class TestProfileEdgeCases:
             json=valid_basic_info,
         )
         assert response1.status_code == 200
-        
+
         # Second update with same data
         response2 = http_client.put(
             "/api/v1/profile/basic-info",
@@ -1046,7 +1054,7 @@ class TestProfileEdgeCases:
             json=valid_basic_info,
         )
         assert response2.status_code == 200
-        
+
         # Profile should remain the same
         profile_response = http_client.get(
             "/api/v1/profile",
@@ -1063,13 +1071,13 @@ class TestProfileEdgeCases:
         """Test professional title with allowed special characters."""
         special_title_data = valid_basic_info.copy()
         special_title_data["professional_title"] = "Sr. Software Engineer (Full-Stack)"
-        
+
         response = http_client.put(
             "/api/v1/profile/basic-info",
             headers=authenticated_user,
             json=special_title_data,
         )
-        
+
         assert response.status_code == 200
 
     def test_work_experience_with_present_end_date(
@@ -1088,13 +1096,13 @@ class TestProfileEdgeCases:
                 }
             ]
         }
-        
+
         response = http_client.put(
             "/api/v1/profile/work-experience",
             headers=authenticated_user,
             json=data,
         )
-        
+
         assert response.status_code == 200
 
 
@@ -1114,7 +1122,7 @@ class TestApiKeyManagement:
             "/api/v1/profile/api-key/status",
             headers=authenticated_user,
         )
-        
+
         assert response.status_code == 200
         data = response.json()
         assert data["has_api_key"] is False
@@ -1129,7 +1137,7 @@ class TestApiKeyManagement:
             headers=authenticated_user,
             json={"api_key": "short"},  # Too short
         )
-        
+
         assert response.status_code in [400, 422]
 
     def test_delete_api_key_when_none_exists(
@@ -1140,7 +1148,7 @@ class TestApiKeyManagement:
             "/api/v1/profile/api-key",
             headers=authenticated_user,
         )
-        
+
         # Should succeed even if no key exists
         assert response.status_code == 200
 
@@ -1153,7 +1161,7 @@ class TestApiKeyManagement:
             headers=authenticated_user,
             json={"api_key": "invalid-format-key"},
         )
-        
+
         assert response.status_code in [400, 422]
 
 
@@ -1211,24 +1219,24 @@ Python, JavaScript, AWS, Docker, PostgreSQL, FastAPI, React, Git
     ):
         """Test that TXT resume format is accepted (may fail on API key in BYOK mode)."""
         files = {"resume": ("resume.txt", sample_resume_txt, "text/plain")}
-        
+
         response = http_client.post(
             "/api/v1/profile/parse-resume",
             headers=authenticated_user,
             files=files,
         )
-        
+
         # File format should be accepted - may succeed (200) or fail due to:
         # - No API key configured (400 with "No API key available")
         # - LLM service unavailable (500, 503)
         assert response.status_code in [200, 400, 500, 503]
-        
+
         data = response.json()
-        
+
         # If 400, should NOT be format error (format is valid)
         if response.status_code == 400:
             assert "unsupported file format" not in data.get("message", "").lower()
-        
+
         if response.status_code == 200:
             assert "success" in data
             assert "message" in data
@@ -1243,13 +1251,13 @@ Python, JavaScript, AWS, Docker, PostgreSQL, FastAPI, React, Git
     ):
         """Test parsing fails for unsupported file formats."""
         files = {"resume": ("resume.jpg", b"fake image content", "image/jpeg")}
-        
+
         response = http_client.post(
             "/api/v1/profile/parse-resume",
             headers=authenticated_user,
             files=files,
         )
-        
+
         assert response.status_code == 400
         data = response.json()
         # Error response uses 'message' field
@@ -1262,13 +1270,13 @@ Python, JavaScript, AWS, Docker, PostgreSQL, FastAPI, React, Git
     ):
         """Test parsing fails for empty file."""
         files = {"resume": ("resume.txt", b"", "text/plain")}
-        
+
         response = http_client.post(
             "/api/v1/profile/parse-resume",
             headers=authenticated_user,
             files=files,
         )
-        
+
         assert response.status_code == 400
         data = response.json()
         # Error response uses 'message' field
@@ -1281,12 +1289,12 @@ Python, JavaScript, AWS, Docker, PostgreSQL, FastAPI, React, Git
     ):
         """Test resume parsing without authentication fails."""
         files = {"resume": ("resume.txt", sample_resume_txt, "text/plain")}
-        
+
         response = http_client.post(
             "/api/v1/profile/parse-resume",
             files=files,
         )
-        
+
         assert response.status_code in [401, 403]
 
     def test_parse_resume_pdf_format_accepted(
@@ -1299,13 +1307,13 @@ Python, JavaScript, AWS, Docker, PostgreSQL, FastAPI, React, Git
         # Real PDF starts with %PDF-
         pdf_content = b"%PDF-1.4\n%test content"
         files = {"resume": ("resume.pdf", pdf_content, "application/pdf")}
-        
+
         response = http_client.post(
             "/api/v1/profile/parse-resume",
             headers=authenticated_user,
             files=files,
         )
-        
+
         # Should not fail on format validation (may fail on actual parsing)
         # 400 would indicate format rejection, anything else means format was accepted
         if response.status_code == 400:
@@ -1326,13 +1334,13 @@ Python, JavaScript, AWS, Docker, PostgreSQL, FastAPI, React, Git
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
         }
-        
+
         response = http_client.post(
             "/api/v1/profile/parse-resume",
             headers=authenticated_user,
             files=files,
         )
-        
+
         # Should not fail on format validation (may fail on actual parsing)
         if response.status_code == 400:
             detail = response.json().get("detail", "").lower()
@@ -1344,14 +1352,16 @@ Python, JavaScript, AWS, Docker, PostgreSQL, FastAPI, React, Git
         authenticated_user: Dict[str, str],
     ):
         """Test that executable files are rejected."""
-        files = {"resume": ("malware.exe", b"MZ\x00\x00fake", "application/octet-stream")}
-        
+        files = {
+            "resume": ("malware.exe", b"MZ\x00\x00fake", "application/octet-stream")
+        }
+
         response = http_client.post(
             "/api/v1/profile/parse-resume",
             headers=authenticated_user,
             files=files,
         )
-        
+
         assert response.status_code == 400
         data = response.json()
         # Error response uses 'message' field
@@ -1365,13 +1375,13 @@ Python, JavaScript, AWS, Docker, PostgreSQL, FastAPI, React, Git
         """Test that HTML files are rejected."""
         html_content = b"<html><body><h1>Resume</h1></body></html>"
         files = {"resume": ("resume.html", html_content, "text/html")}
-        
+
         response = http_client.post(
             "/api/v1/profile/parse-resume",
             headers=authenticated_user,
             files=files,
         )
-        
+
         assert response.status_code == 400
         data = response.json()
         # Error response uses 'message' field
@@ -1385,16 +1395,16 @@ Python, JavaScript, AWS, Docker, PostgreSQL, FastAPI, React, Git
     ):
         """Test that response has correct structure."""
         files = {"resume": ("resume.txt", sample_resume_txt, "text/plain")}
-        
+
         response = http_client.post(
             "/api/v1/profile/parse-resume",
             headers=authenticated_user,
             files=files,
         )
-        
+
         # Even on error, should be valid JSON
         data = response.json()
-        
+
         if response.status_code == 200:
             # Check expected response structure
             assert "success" in data
@@ -1409,13 +1419,13 @@ Python, JavaScript, AWS, Docker, PostgreSQL, FastAPI, React, Git
     ):
         """Test resume parsing with invalid token fails."""
         files = {"resume": ("resume.txt", sample_resume_txt, "text/plain")}
-        
+
         response = http_client.post(
             "/api/v1/profile/parse-resume",
             headers={"Authorization": "Bearer invalid-token"},
             files=files,
         )
-        
+
         assert response.status_code in [401, 403]
 
     def test_parse_resume_single_file_accepted(
@@ -1427,16 +1437,16 @@ Python, JavaScript, AWS, Docker, PostgreSQL, FastAPI, React, Git
         """Test that single file upload is accepted (format validation passes)."""
         # The endpoint expects a single file upload
         files = {"resume": ("resume.txt", sample_resume_txt, "text/plain")}
-        
+
         response = http_client.post(
             "/api/v1/profile/parse-resume",
             headers=authenticated_user,
             files=files,
         )
-        
+
         # Single file format should be accepted - may fail on API key or LLM
         assert response.status_code in [200, 400, 500, 503]
-        
+
         # If 400, should NOT be format-related
         if response.status_code == 400:
             data = response.json()

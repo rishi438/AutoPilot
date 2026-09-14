@@ -58,6 +58,12 @@ GPT_OSS_REASONING_TOKEN_FLOORS = {"low": 4096, "medium": 8192, "high": 24576}
 logger = logging.getLogger(__name__)
 structured_logger = get_structured_logger(__name__)
 
+
+def _is_qwen3_model(model_name: str) -> bool:
+    """Recognize Qwen3 tags from Ollama and namespaced model registries."""
+    return "qwen3" in model_name.casefold()
+
+
 # =============================================================================
 # CUSTOM EXCEPTIONS
 # =============================================================================
@@ -484,7 +490,7 @@ class GeminiClient:
             )
 
         is_gpt_oss = model_to_use.startswith("gpt-oss:")
-        is_qwen3 = model_to_use.startswith("qwen3:")
+        is_qwen3 = _is_qwen3_model(model_to_use)
         request_url = self.local_llm_url
         if is_gpt_oss and request_url.rstrip("/").endswith("/api/generate"):
             request_url = f"{request_url.rsplit('/', 1)[0]}/chat"

@@ -19,6 +19,9 @@ $DefaultComposeFile = Join-Path $ProjectRoot 'docker-compose.yml'
 # keeping its local metadata here also leaves the user's profile untouched.
 if ($Runtime -eq 'podman') {
     $env:XDG_CONFIG_HOME = Join-Path $ProjectRoot '.podman-config'
+    # Podman publishes inside its private VM; Windows exposure is narrowed by
+    # the explicit localhost-only portproxy rule installed by local setup.
+    $env:PORTAL_VAULT_HOST_BIND = '0.0.0.0'
     New-Item -ItemType Directory -Force -Path $env:XDG_CONFIG_HOME | Out-Null
 
     # Podman otherwise prefers the Windows App Execution Alias for

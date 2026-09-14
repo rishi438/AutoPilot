@@ -1018,7 +1018,7 @@ test.describe('E. Auth API Endpoints', () => {
 
   test('POST /api/v1/auth/forgot-password with real email also returns 200', async ({ request }) => {
     const res = await request.post('/api/v1/auth/forgot-password', {
-      data: { email: 'admin@applypilot.io' },
+      data: { email: 'admin@autopilot.io' },
     });
     // Always 200 regardless of whether email exists
     expect(res.status()).toBe(200);

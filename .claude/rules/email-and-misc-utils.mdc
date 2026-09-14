@@ -156,7 +156,7 @@ parsed = await parse_resume_from_file(file_content: bytes, filename: str)
 
 ## Workflow job file (New Application)
 
-`POST /api/v1/workflow/start` accepts optional multipart **`job_file`** for the job description. Allowed extensions: **`.pdf`**, **`.txt`**, **`.docx`**; max **5 MB** (`api/workflow.py` — stricter than resume upload). Legacy **`.doc`** is not supported. See **`applypilot-core.mdc`** (`_JOB_FILE_MAGIC`, `_job_text_from_uploaded_file`).
+`POST /api/v1/workflow/start` accepts optional multipart **`job_file`** for the job description. Allowed extensions: **`.pdf`**, **`.txt`**, **`.docx`**; max **5 MB** (`api/workflow.py` — stricter than resume upload). Legacy **`.doc`** is not supported. See **`autopilot-core.mdc`** (`_JOB_FILE_MAGIC`, `_job_text_from_uploaded_file`).
 
 ## BYOK Encryption
 ```python

@@ -51,10 +51,10 @@ start-local:
 	@brew services start redis 2>/dev/null || true
 	@sleep 2
 	@echo "Setting up database..."
-	@psql postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='applypilot'" 2>/dev/null | grep -q 1 || \
-		psql postgres -c "CREATE ROLE applypilot WITH LOGIN PASSWORD 'applypilot';" 2>/dev/null || true
-	@psql postgres -tc "SELECT 1 FROM pg_database WHERE datname='applypilot'" 2>/dev/null | grep -q 1 || \
-		psql postgres -c "CREATE DATABASE applypilot OWNER applypilot;" 2>/dev/null || true
+	@psql postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='autopilot'" 2>/dev/null | grep -q 1 || \
+		psql postgres -c "CREATE ROLE autopilot WITH LOGIN PASSWORD 'autopilot';" 2>/dev/null || true
+	@psql postgres -tc "SELECT 1 FROM pg_database WHERE datname='autopilot'" 2>/dev/null | grep -q 1 || \
+		psql postgres -c "CREATE DATABASE autopilot OWNER autopilot;" 2>/dev/null || true
 	@echo "Running migrations..."
 	@$(MAKE) migrate
 	@echo ""
@@ -115,7 +115,7 @@ _ensure_docker:
 
 # Creates .env using system python3 (no venv required).
 # Safe to call multiple times — skips if .env already exists.
-_create_env_system:
+_legacy_create_env_system:
 	@if [ ! -f .env ]; then \
 		cp .env.local.example .env; \
 		python3 -c "\
@@ -131,6 +131,11 @@ open('.env', 'w').write(content); \
 	else \
 		echo "  .env already exists — skipping."; \
 	fi
+
+# Mirrors `just _create-env`, including independently generated MinIO credentials.
+_create_env_system:
+	@python3 scripts/create_dotenv_if_missing.py
+
 # =============================================================================
 
 # Strips macOS quarantine flags AND ad-hoc re-signs all native extensions so
@@ -184,7 +189,7 @@ setup:
 
 # Auto-creates .env from the local template and injects generated secrets.
 # Skipped entirely if .env already exists.
-_create_env:
+_legacy_create_env:
 	@if [ ! -f .env ]; then \
 		cp .env.local.example .env; \
 		$(PYTHON) -c "\
@@ -200,6 +205,10 @@ open('.env', 'w').write(content); \
 	else \
 		echo "  .env already exists — skipping (not overwritten)."; \
 	fi
+
+# Mirrors `just _create-env` using the project venv.
+_create_env:
+	@$(PYTHON) scripts/create_dotenv_if_missing.py
 
 # Build the frontend (esbuild minify + content-hash).
 build-frontend:

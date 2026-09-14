@@ -1,7 +1,7 @@
 """
 Chrome extension: map visible job-application form fields to the user's profile via LLM.
 
-MVP: same-document fields only; client previews suggestions before applying values in-tab.
+The client scans accessible frames and open shadow roots, then previews suggestions before applying values in-tab.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -26,8 +27,14 @@ from api.extension_autofill_rules import (
     merge_assignment_dicts,
 )
 from config.settings import get_settings
-from models.database import User
+from models.database import JobApplication, JobFormAnswer, User
 from models.database import UserProfile as UserProfileModel
+from services.application_automation import (
+    classify_sensitivity,
+    is_prohibited_answer_material,
+    reusable_answer_value,
+    resolve_approved_answer,
+)
 from utils.auth import get_current_user_with_complete_profile
 from utils.cache import (
     cache_tool_result,
@@ -62,6 +69,17 @@ def _get_user_resume_asset_model():
     from models.database import UserResumeAsset
 
     return UserResumeAsset
+
+
+def _portal_hostname(page_url: str) -> str | None:
+    """Return a normalized HTTPS hostname for answer-library scoping."""
+    try:
+        parsed = urlparse(page_url)
+    except (TypeError, ValueError):
+        return None
+    if parsed.scheme != "https" or not parsed.hostname:
+        return None
+    return parsed.hostname.lower().removeprefix("www.")
 
 
 # =============================================================================
@@ -106,8 +124,10 @@ Rules:
 - When multiple Degree/Discipline fields appear (duplicate_label_index 0, 1, …), map profile.education[0] to index 0, profile.education[1] to index 1, etc. Fill every row when profile data exists.
 - Degree dropdown mapping: copy the profile degree text; the server normalizes common aliases to dropdown labels. Examples — Associate: AA/AS/AAS → Associate's Degree; Bachelor: BA/BS/BSc/BBA/BEng/BFA/LLB/Bachelor of Laws → Bachelor's Degree (or specific Bachelor of … when listed); Master: MA/MS/MSc/MBA/MEng → Master of Arts/Science/Business/etc. or Master's Degree; explicit JD/Juris Doctor in profile → Juris Doctor (J.D.); Doctorate: PhD/MD/EdD → matching Doctor of … option. Never invent a degree not in profile.education.
 - Years of industry experience: when options are numeric ranges (e.g. 5-7, 8-10, 11+), pick the bucket closest to profile.years_experience — if the exact count is below a range's lower bound, use the nearest range above (e.g. 4 years → 5-7 when that is the closest bucket).
-- Profile may include city, state, country, willing_to_relocate, work_arrangements, desired_company_sizes, phone, linkedin_url, github_url, portfolio_url, work_authorization (no_work_authorization | has_work_authorization | us_lawful_permanent_resident | us_citizen; omit if null), requires_visa_sponsorship (boolean), and resume_file.has_file — use only when present in PROFILE_JSON.
+- Profile may include city, state, country, country_phone_code, postal_code, willing_to_relocate, work_arrangements, desired_company_sizes, phone, linkedin_url, github_url, portfolio_url, work_authorization (no_work_authorization | has_work_authorization | us_lawful_permanent_resident | us_citizen; omit if null), requires_visa_sponsorship (boolean), and resume_file.has_file — use only when present in PROFILE_JSON.
 - Country dropdown/combobox fields: map profile.country to the full country name (e.g. US → United States).
+- Country phone-code fields: derive the dial code from profile.country; never put the phone number into a country-code control.
+- Postal/ZIP/PIN code fields: use profile.postal_code exactly when present.
 - Location (City) / current city / where you are located: use profile.city and profile.state when present (e.g. Hoboken, NJ) — not country dropdowns or relocation screening questions.
 - Website/portfolio fields: use portfolio_url when present; if empty, use github_url even when the form also has a separate GitHub Username field.
 - GitHub Username fields (not Website): use the username from github_url (e.g. eliornl from https://github.com/eliornl).
@@ -140,7 +160,7 @@ class AutofillSelectOption(BaseModel):
 
 
 class AutofillFieldIn(BaseModel):
-    """Serialized form control from the extension (main document only)."""
+    """Serialized form control from an accessible frame or open shadow root."""
 
     field_uid: str = Field(
         ...,
@@ -157,6 +177,9 @@ class AutofillFieldIn(BaseModel):
     placeholder: str | None = Field(None, max_length=500)
     aria_label: str | None = Field(None, max_length=500)
     required: bool = False
+    readonly: bool = False
+    disabled: bool = False
+    current_value: str | None = Field(None, max_length=500)
     max_length: int | None = Field(None, ge=0, le=1_000_000)
     options: list[AutofillSelectOption] | None = Field(
         None, max_length=_MAX_OPTIONS_PER_SELECT
@@ -174,6 +197,10 @@ class AutofillMapRequest(BaseModel):
 
     fields: list[AutofillFieldIn] = Field(..., min_length=1)
     page_url: str = Field(..., min_length=1, max_length=_MAX_PAGE_URL_LEN)
+    application_id: uuid.UUID | None = Field(
+        default=None,
+        description="Optional existing saved application; ownership is verified server-side.",
+    )
     extras: dict[str, str] | None = Field(
         default=None,
         description="Optional key/value hints stored in the extension (phone, URLs, etc.)",
@@ -217,6 +244,14 @@ class AutofillAssignmentOut(BaseModel):
         le=20,
         description="Which repeated label occurrence (0=first Degree row, 1=second, etc.)",
     )
+    answer_source: str = Field(
+        default="ai",
+        description="profile, approved_rule, ai, or manual; never a browser secret.",
+    )
+    review_reasons: list[str] = Field(
+        default_factory=list,
+        description="Reasons the user must inspect this proposed value before it is applied.",
+    )
 
 
 class AutofillMapResponse(BaseModel):
@@ -226,8 +261,9 @@ class AutofillMapResponse(BaseModel):
     skipped: list[dict[str, str]] = Field(default_factory=list)
     warnings: list[str] = Field(
         default_factory=list,
-        description="UX hints (e.g. same-document MVP, no iframes)",
+        description="UX hints about inaccessible protected frames or closed shadow roots",
     )
+    application_id: uuid.UUID | None = None
 
 
 # =============================================================================
@@ -258,8 +294,13 @@ async def _get_user_api_key(db: AsyncSession, user_id: uuid.UUID) -> str | None:
 def _server_has_llm() -> bool:
     """Read settings at call time so tests and env reloads see current config."""
     cfg = get_settings()
-    return bool(getattr(cfg, "gemini_api_key", None)) or bool(
-        getattr(cfg, "use_vertex_ai", False)
+    return (
+        bool(getattr(cfg, "gemini_api_key", None))
+        or bool(getattr(cfg, "use_vertex_ai", False))
+        or (
+            bool(getattr(cfg, "local_llm_url", None))
+            and bool(getattr(cfg, "local_llm_model", None))
+        )
     )
 
 
@@ -291,6 +332,24 @@ async def _load_profile_bundle(
         if isinstance(we, list) and len(we) > 12:
             d["work_experience"] = we[:12]
         snap["profile"] = d
+        if prof.sensitive_portal_autofill_enabled:
+            # Kept outside `profile` and removed before the LLM prompt. These
+            # values are mapped deterministically only after explicit opt-in.
+            snap["_sensitive_portal"] = {
+                "date_of_birth": (
+                    decrypt_api_key(prof.date_of_birth_encrypted)
+                    if prof.date_of_birth_encrypted
+                    else None
+                ),
+                "pan": (
+                    decrypt_api_key(prof.pan_encrypted) if prof.pan_encrypted else None
+                ),
+                "gender": (
+                    decrypt_api_key(prof.gender_encrypted)
+                    if prof.gender_encrypted
+                    else None
+                ),
+            }
         if prof.updated_at:
             prof_sig = prof.updated_at.isoformat()
     else:
@@ -314,6 +373,58 @@ async def _load_profile_bundle(
     return snap, prof_sig
 
 
+async def map_form_fields_from_approved_sources(
+    request: AutofillMapRequest,
+    *,
+    user_id: uuid.UUID,
+    db: AsyncSession,
+) -> AutofillMapResponse:
+    """Map fields using profile facts and explicitly approved reusable answers only."""
+    user_result = await db.execute(select(User).where(User.id == user_id))
+    user_row = user_result.scalar_one_or_none()
+    if not user_row:
+        raise not_found_error(resource_type="User")
+    if request.application_id is not None:
+        application = await db.get(JobApplication, request.application_id)
+        if (
+            application is None
+            or application.user_id != user_id
+            or application.deleted_at is not None
+        ):
+            raise not_found_error(resource_type="Application")
+
+    approved_answers = list(
+        (
+            await db.execute(
+                select(JobFormAnswer).where(
+                    JobFormAnswer.user_id == user_id,
+                    JobFormAnswer.approved_for_reuse.is_(True),
+                )
+            )
+        ).scalars()
+    )
+    portal_hostname = _portal_hostname(request.page_url)
+    approved_answers = [
+        answer
+        for answer in approved_answers
+        if answer.source_portal is None or answer.source_portal == portal_hostname
+    ]
+    profile_bundle, _ = await _load_profile_bundle(db, user_id, user_row)
+    assignment_fields = [
+        field for field in request.fields if _field_needs_assignment(field)
+    ]
+    fields_by_uid = {field.field_uid: field for field in assignment_fields}
+    assignments, skipped = _finalize_autofill_response(
+        [], [], fields_by_uid, profile_bundle, assignment_fields, approved_answers
+    )
+    return AutofillMapResponse(
+        assignments=assignments,
+        skipped=skipped,
+        warnings=_missing_required_warnings(assignment_fields, assignments),
+        application_id=request.application_id,
+    )
+
+
 def _sanitize_field_dict(f: AutofillFieldIn) -> dict[str, Any]:
     opts = None
     if f.options:
@@ -334,10 +445,21 @@ def _sanitize_field_dict(f: AutofillFieldIn) -> dict[str, Any]:
         "placeholder": sanitize_text(f.placeholder)[:500] if f.placeholder else None,
         "aria_label": sanitize_text(f.aria_label)[:500] if f.aria_label else None,
         "required": f.required,
+        "readonly": f.readonly,
+        "disabled": f.disabled,
         "max_length": f.max_length,
         "options": opts,
         "duplicate_label_index": f.duplicate_label_index,
     }
+
+
+def _field_needs_assignment(field: AutofillFieldIn) -> bool:
+    """Only empty, enabled controls should be proposed to the user."""
+    if field.disabled or field.readonly or (field.current_value or "").strip():
+        return False
+    # A full name is not proof that an optional middle-name control should be
+    # populated; only an explicit middle-name profile field could authorize it.
+    return re.search(r"\bmiddle(?:\s+|-)?name\b", field.label_text or "", re.I) is None
 
 
 def _sanitize_form_autofill_value(val: str) -> str:
@@ -371,6 +493,8 @@ def _build_user_prompt(
     extras: dict[str, str],
     page_url: str,
 ) -> str:
+    profile = dict(profile)
+    profile.pop("_sensitive_portal", None)
     return (
         "Page URL (context only): "
         + sanitize_text(page_url)[:_MAX_PAGE_URL_LEN]
@@ -401,18 +525,46 @@ def _validate_assignments(
             val = str(val) if val is not None else ""
         val = _sanitize_form_autofill_value(val)
         meta = fields_by_uid[uid]
+        # The extension attaches the stored resume separately. A file input
+        # must never appear as an empty AI answer in the review panel.
+        if (meta.input_type or "").lower() == "file":
+            continue
+        if not _field_needs_assignment(meta):
+            continue
         if (
             meta.max_length is not None
             and meta.max_length > 0
             and len(val) > meta.max_length
         ):
             val = val[: int(meta.max_length)]
+        source = item.get("answer_source")
+        if source not in {"profile", "approved_rule", "ai", "manual"}:
+            source = "ai"
+        review_reasons = item.get("review_reasons")
+        if not isinstance(review_reasons, list):
+            review_reasons = []
+        normalized_reasons = [
+            sanitize_text(str(reason))[:80]
+            for reason in review_reasons
+            if isinstance(reason, str) and sanitize_text(reason)
+        ][:8]
+        if source == "ai" and "ai_generated" not in normalized_reasons:
+            normalized_reasons.append("ai_generated")
+        if meta.required and "required_field" not in normalized_reasons:
+            normalized_reasons.append("required_field")
+        if (
+            classify_sensitivity(meta.label_text) == "sensitive"
+            and "sensitive" not in normalized_reasons
+        ):
+            normalized_reasons.append("sensitive")
         out.append(
             AutofillAssignmentOut(
                 field_uid=uid,
                 value=val,
                 label_text=meta.label_text[:_MAX_LABEL_CHARS],
                 duplicate_label_index=meta.duplicate_label_index,
+                answer_source=source,
+                review_reasons=normalized_reasons,
             )
         )
     return out
@@ -449,6 +601,7 @@ def _finalize_autofill_response(
     fields_by_uid: dict[str, AutofillFieldIn],
     profile_bundle: dict[str, Any],
     request_fields: list[AutofillFieldIn],
+    approved_answers: Sequence[JobFormAnswer] = (),
 ) -> tuple[list[AutofillAssignmentOut], list[dict[str, str]]]:
     """
     Merge deterministic profile rules over LLM assignments and drop stale skips.
@@ -464,11 +617,101 @@ def _finalize_autofill_response(
         Tuple of (validated assignments, filtered skipped list).
     """
     det_raw = build_deterministic_raw_assignments(request_fields, profile_bundle)
-    merged_raw = merge_assignment_dicts(llm_raw_assignments, det_raw)
+    for assignment in det_raw:
+        assignment["answer_source"] = "profile"
+
+    approved_raw: list[dict[str, Any]] = []
+    for field in request_fields:
+        approved = resolve_approved_answer(field.label_text, approved_answers)
+        if approved is not None:
+            approved_value = reusable_answer_value(approved)
+            if approved_value is None:
+                continue
+            reasons = ["approved_reusable_answer"]
+            if classify_sensitivity(field.label_text) == "sensitive":
+                reasons.insert(0, "sensitive")
+            approved_raw.append(
+                {
+                    "field_uid": field.field_uid,
+                    "value": approved_value,
+                    "label_text": field.label_text,
+                    "duplicate_label_index": field.duplicate_label_index,
+                    "answer_source": "approved_rule",
+                    "review_reasons": reasons,
+                }
+            )
+
+    # A reusable answer is only eligible after an explicit user approval and an
+    # exact normalized-question match. Sensitive answers remain blocked unless
+    # they have that approved entry; all assignments still go to the review UI.
+    non_sensitive_llm = [
+        assignment
+        for assignment in llm_raw_assignments
+        if isinstance(assignment, dict)
+        and (field := fields_by_uid.get(str(assignment.get("field_uid", ""))))
+        and classify_sensitivity(field.label_text) != "sensitive"
+    ]
+    non_sensitive_profile = [
+        assignment
+        for assignment in det_raw
+        if (field := fields_by_uid.get(str(assignment.get("field_uid", ""))))
+        and classify_sensitivity(field.label_text) != "sensitive"
+    ]
+    merged_raw = merge_assignment_dicts(non_sensitive_llm, non_sensitive_profile)
+    merged_raw = merge_assignment_dicts(merged_raw, approved_raw)
     assignments = _validate_assignments(
         [x for x in merged_raw if isinstance(x, dict)],
         fields_by_uid,
     )
+    sensitive = profile_bundle.get("_sensitive_portal") or {}
+    for field in request_fields:
+        label = (field.label_text or "").lower()
+        value = None
+        if "date of birth" in label or "dob" in label:
+            value = sensitive.get("date_of_birth")
+        elif "pan" in label and ("card" in label or "number" in label):
+            value = sensitive.get("pan")
+        elif re.search(r"\bgender\b", label):
+            value = sensitive.get("gender")
+        if value:
+            assignments = [
+                assignment
+                for assignment in assignments
+                if assignment.field_uid != field.field_uid
+            ]
+            assignments.append(
+                AutofillAssignmentOut(
+                    field_uid=field.field_uid,
+                    value=value,
+                    label_text=field.label_text[:_MAX_LABEL_CHARS],
+                    duplicate_label_index=field.duplicate_label_index,
+                    answer_source="profile",
+                    review_reasons=["sensitive", "user_opted_in"],
+                )
+            )
+    assigned_uids = {assignment.field_uid for assignment in assignments}
+    for field in request_fields:
+        if field.field_uid in assigned_uids:
+            continue
+        if (field.input_type or "").lower() == "file":
+            continue
+        if is_prohibited_answer_material(field.label_text):
+            continue
+        reasons = ["needs_user_input"]
+        if classify_sensitivity(field.label_text) == "sensitive":
+            reasons.append("sensitive")
+        if field.required:
+            reasons.append("required_field")
+        assignments.append(
+            AutofillAssignmentOut(
+                field_uid=field.field_uid,
+                value="",
+                label_text=field.label_text[:_MAX_LABEL_CHARS],
+                duplicate_label_index=field.duplicate_label_index,
+                answer_source="manual",
+                review_reasons=reasons,
+            )
+        )
     skipped_safe = filter_skipped_for_assigned_uids(
         skipped,
         [a.field_uid for a in assignments],
@@ -519,11 +762,38 @@ async def map_form_fields_to_profile(
     if not user_row:
         raise not_found_error(resource_type="User")
 
+    if request.application_id is not None:
+        application = await db.get(JobApplication, request.application_id)
+        if (
+            application is None
+            or application.user_id != user_id
+            or application.deleted_at is not None
+        ):
+            raise not_found_error(resource_type="Application")
+
+    approved_answers = list(
+        (
+            await db.execute(
+                select(JobFormAnswer).where(
+                    JobFormAnswer.user_id == user_id,
+                    JobFormAnswer.approved_for_reuse.is_(True),
+                )
+            )
+        ).scalars()
+    )
+    portal_hostname = _portal_hostname(request.page_url)
+    approved_answers = [
+        answer
+        for answer in approved_answers
+        if answer.source_portal is None or answer.source_portal == portal_hostname
+    ]
+
     profile_bundle, prof_sig = await _load_profile_bundle(db, user_id, user_row)
     extras_clean = _sanitize_extras(request.extras)
 
-    fields_by_uid = {f.field_uid: f for f in request.fields}
-    fields_compact = [_sanitize_field_dict(f) for f in request.fields]
+    assignment_fields = [f for f in request.fields if _field_needs_assignment(f)]
+    fields_by_uid = {f.field_uid: f for f in assignment_fields}
+    fields_compact = [_sanitize_field_dict(f) for f in assignment_fields]
     page_url_clean = sanitize_text(request.page_url.strip())[:_MAX_PAGE_URL_LEN]
 
     cache_payload: dict[str, Any] = {
@@ -537,7 +807,7 @@ async def map_form_fields_to_profile(
 
     cached = await get_cached_tool_result("extension_autofill", cache_payload)
     warnings = [
-        "Main page only: fields inside iframes or shadow roots are not included.",
+        "Accessible frames and open shadow roots are scanned; protected frames and closed shadow roots are excluded.",
         "Review every value before applying; the model can mis-map similar labels.",
     ]
 
@@ -563,11 +833,15 @@ async def map_form_fields_to_profile(
             skipped_safe,
             fields_by_uid,
             profile_bundle,
-            request.fields,
+            assignment_fields,
+            approved_answers,
         )
-        warnings.extend(_missing_required_warnings(request.fields, assignments))
+        warnings.extend(_missing_required_warnings(assignment_fields, assignments))
         return AutofillMapResponse(
-            assignments=assignments, skipped=skipped_safe, warnings=warnings
+            assignments=assignments,
+            skipped=skipped_safe,
+            warnings=warnings,
+            application_id=request.application_id,
         )
 
     user_prompt = _build_user_prompt(
@@ -634,18 +908,26 @@ async def map_form_fields_to_profile(
         skipped_safe,
         fields_by_uid,
         profile_bundle,
-        request.fields,
+        assignment_fields,
+        approved_answers,
     )
 
-    warnings.extend(_missing_required_warnings(request.fields, assignments))
+    warnings.extend(_missing_required_warnings(assignment_fields, assignments))
 
     cache_body = {
-        "assignments": [a.model_dump() for a in assignments],
+        # Sensitive plaintext is reconstructed from encrypted storage for each
+        # request and must never be copied into the shared autofill cache.
+        "assignments": [
+            a.model_dump() for a in assignments if "sensitive" not in a.review_reasons
+        ],
         "skipped": skipped_safe,
         "generated_at": datetime.now(UTC).isoformat(),
     }
     await cache_tool_result("extension_autofill", cache_payload, cache_body)
 
     return AutofillMapResponse(
-        assignments=assignments, skipped=skipped_safe, warnings=warnings
+        assignments=assignments,
+        skipped=skipped_safe,
+        warnings=warnings,
+        application_id=request.application_id,
     )

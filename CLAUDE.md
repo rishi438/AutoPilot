@@ -1,6 +1,6 @@
 # Autopilot — Claude Code Rules Index
 
-**Product name:** Autopilot (repo folder: `applypilot`).
+**Product name:** Autopilot (repo folder: `autopilot`).
 
 All detailed rules live in `.claude/rules/`. Read the relevant file(s) **before** working in that area. Never load all files — only pull what the task needs.
 
@@ -10,7 +10,7 @@ All detailed rules live in `.claude/rules/`. Read the relevant file(s) **before*
 
 | File | Read when... |
 |------|-------------|
-| `.claude/rules/applypilot-core.mdc` | any task — app name, `APIError`/`ErrorCode` (**`CFG_6001`**, **`RES_3002`**, content fingerprint NFKC + `utils/application_dedupe.py`, post-start duplicate / `uq_user_job_company`), **`POST /workflow/start` job file** (`.pdf`/`.txt`/`.docx`, 5 MB), background tasks, **workflow failure (no partial outputs, dashboard list join)**, route prefixes |
+| `.claude/rules/autopilot-core.mdc` | any task — app name, `APIError`/`ErrorCode` (**`CFG_6001`**, **`RES_3002`**, content fingerprint NFKC + `utils/application_dedupe.py`, post-start duplicate / `uq_user_job_company`), **`POST /workflow/start` job file** (`.pdf`/`.txt`/`.docx`, 5 MB), background tasks, **workflow failure (no partial outputs, dashboard list join)**, route prefixes |
 | `.claude/rules/python-conventions.mdc` | writing or editing any Python file |
 | `.claude/rules/database-patterns.mdc` | touching models, migrations, JSONB fields, SQLAlchemy queries |
 | `.claude/rules/auth-patterns.mdc` | auth endpoints, JWT, login, registration, token revocation, lockout |

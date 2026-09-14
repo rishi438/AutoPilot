@@ -6,7 +6,7 @@ alwaysApply: true
 # Autopilot Core Conventions
 
 ## App Name
-The product name is **Autopilot**. Use `settings.app_name` in templates. The repo/folder name is `applypilot`.
+The product name is **Autopilot**. Use `settings.app_name` in templates. The repo/folder name is `autopilot`.
 
 ## Standardized Error System
 **Never raise bare `HTTPException` — always use `APIError` or the factory functions from `utils/error_responses.py`.**

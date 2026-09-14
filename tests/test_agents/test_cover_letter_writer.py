@@ -41,7 +41,12 @@ def create_test_workflow_state(
         "processing_start_time": datetime.now(timezone.utc).isoformat(),
         "processing_end_time": None,
         "agent_status": {},
-        "completed_agents": ["job_analyzer", "profile_matching", "company_research", "resume_advisor"],
+        "completed_agents": [
+            "job_analyzer",
+            "profile_matching",
+            "company_research",
+            "resume_advisor",
+        ],
         "failed_agents": [],
         "current_agent": "cover_letter_writer",
         "error_messages": [],
@@ -152,9 +157,9 @@ class TestCoverLetterProcessing:
     async def test_process_success(self, mock_gemini_client, workflow_state_complete):
         """Test successful cover letter generation."""
         agent = CoverLetterWriterAgent(gemini_client=mock_gemini_client)
-        
+
         result = await agent.process(workflow_state_complete)
-        
+
         assert "cover_letter" in result
         cover_letter = result["cover_letter"]
         assert "content" in cover_letter or isinstance(cover_letter, str)
@@ -163,12 +168,12 @@ class TestCoverLetterProcessing:
     async def test_process_missing_user_profile_raises_error(self, mock_gemini_client):
         """Test that missing user profile raises error."""
         agent = CoverLetterWriterAgent(gemini_client=mock_gemini_client)
-        
+
         state = create_test_workflow_state(
             user_profile=None,
             job_analysis={"job_title": "Engineer"},
         )
-        
+
         with pytest.raises(ValueError, match="[Uu]ser profile|required"):
             await agent.process(state)
 
@@ -176,12 +181,12 @@ class TestCoverLetterProcessing:
     async def test_process_missing_job_analysis_raises_error(self, mock_gemini_client):
         """Test that missing job analysis raises error."""
         agent = CoverLetterWriterAgent(gemini_client=mock_gemini_client)
-        
+
         state = create_test_workflow_state(
             user_profile={"full_name": "Test"},
             job_analysis=None,
         )
-        
+
         with pytest.raises(ValueError, match="[Jj]ob analysis|required"):
             await agent.process(state)
 
@@ -189,7 +194,7 @@ class TestCoverLetterProcessing:
     async def test_process_without_optional_data(self, mock_gemini_client):
         """Test processing without optional profile_matching and company_research."""
         agent = CoverLetterWriterAgent(gemini_client=mock_gemini_client)
-        
+
         state = create_test_workflow_state(
             user_profile={
                 "full_name": "Test User",
@@ -203,9 +208,9 @@ class TestCoverLetterProcessing:
             },
             # No profile_matching or company_research
         )
-        
+
         result = await agent.process(state)
-        
+
         assert "cover_letter" in result
 
 
@@ -225,10 +230,10 @@ class TestErrorHandling:
             "response": "Content filtered",
             "filtered": True,
         }
-        
+
         agent = CoverLetterWriterAgent(gemini_client=mock_client)
         result = await agent.process(workflow_state_complete)
-        
+
         # Should return fallback letter or handle gracefully
         assert "cover_letter" in result
 
@@ -240,9 +245,9 @@ class TestErrorHandling:
             "response": "",
             "filtered": False,
         }
-        
+
         agent = CoverLetterWriterAgent(gemini_client=mock_client)
-        
+
         # Should either raise error or return fallback
         try:
             result = await agent.process(workflow_state_complete)
@@ -251,6 +256,23 @@ class TestErrorHandling:
         except Exception:
             # Empty response should raise an error
             pass
+
+    @pytest.mark.asyncio
+    async def test_removes_leaked_reasoning_and_decodes_entities(
+        self, workflow_state_complete
+    ):
+        """Local-model reasoning must not be included in a copy-ready letter."""
+        mock_client = AsyncMock()
+        mock_client.generate.return_value = {
+            "response": "&lt;think&gt;private planning&lt;/think&gt;\nDear Hiring Manager,\nAT&amp;T",
+            "filtered": False,
+        }
+
+        result = await CoverLetterWriterAgent(mock_client).process(
+            workflow_state_complete
+        )
+
+        assert result["cover_letter"]["content"] == "Dear Hiring Manager,\nAT&T"
 
 
 # =============================================================================
@@ -262,7 +284,9 @@ class TestCoverLetterWriterAdditional:
     """Additional coverage for edge cases not in the base tests."""
 
     @pytest.mark.asyncio
-    async def test_llm_exception_propagated(self, mock_gemini_client, workflow_state_complete):
+    async def test_llm_exception_propagated(
+        self, mock_gemini_client, workflow_state_complete
+    ):
         """Exception from gemini_client.generate should propagate."""
         failing_client = AsyncMock()
         failing_client.generate.side_effect = RuntimeError("LLM unavailable")
@@ -273,7 +297,9 @@ class TestCoverLetterWriterAdditional:
             await agent.process(workflow_state_complete)
 
     @pytest.mark.asyncio
-    async def test_llm_called_exactly_once(self, mock_gemini_client, workflow_state_complete):
+    async def test_llm_called_exactly_once(
+        self, mock_gemini_client, workflow_state_complete
+    ):
         """LLM should be called exactly once per process() call."""
         agent = CoverLetterWriterAgent(gemini_client=mock_gemini_client)
         await agent.process(workflow_state_complete)

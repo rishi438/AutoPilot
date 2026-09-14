@@ -335,6 +335,11 @@
         .border-status-rejected             { border-left-color: var(--danger); }
         .border-status-accepted             { border-left-color: #22c55e; }
         .border-status-failed               { border-left-color: var(--danger); }
+        .border-status-skipped              { border-left-color: var(--text-muted); }
+        .border-status-skipped .card-left {
+            opacity: 0.5;
+            filter: grayscale(1);
+        }
 
         /* Card: left content col + right status/actions col */
         .card-layout {
@@ -404,10 +409,15 @@
             pointer-events: none;
         }
 
-        .ai-processing { background: rgba(59,130,246,0.1);  color: var(--info);           border-color: rgba(59,130,246,0.3); }
-        .ai-ready      { background: rgba(0,212,255,0.1);   color: var(--accent-primary); border-color: rgba(0,212,255,0.3);  }
-        .ai-failed     { background: rgba(239,68,68,0.1);   color: var(--danger);         border-color: rgba(239,68,68,0.3);  }
-        .ai-draft      { background: rgba(107,114,128,0.1); color: var(--text-muted);     border-color: rgba(107,114,128,0.3); }
+        .ai-processing     { background: rgba(59,130,246,0.1);  color: var(--info);           border-color: rgba(59,130,246,0.3); }
+        .ai-ready          { background: rgba(0,212,255,0.1);   color: var(--accent-primary); border-color: rgba(0,212,255,0.3);  }
+        .ai-failed         { background: rgba(239,68,68,0.1);   color: var(--danger);         border-color: rgba(239,68,68,0.3);  }
+        .ai-draft          { background: rgba(107,114,128,0.1); color: var(--text-muted);     border-color: rgba(107,114,128,0.3); }
+        .ai-expired        { background: rgba(107,114,128,0.1); color: var(--text-muted);     border-color: rgba(107,114,128,0.3); }
+        .ai-stage1-complete{ background: rgba(16,185,129,0.12); color: var(--success);        border-color: rgba(16,185,129,0.4); }
+        .ai-applying       { background: rgba(59,130,246,0.12); color: var(--info);           border-color: rgba(59,130,246,0.4); }
+        .ai-retrying       { background: rgba(245,158,11,0.12); color: var(--warning);        border-color: rgba(245,158,11,0.4); }
+        .ai-blocked        { background: rgba(239,68,68,0.12);  color: var(--danger);         border-color: rgba(239,68,68,0.4); }
 
         /* Tracking stage buttons — inline in bottom row */
         .card-tracking-row {
@@ -772,6 +782,17 @@
             </div>
         </a>
     </div>
+
+    <section id="workdayCooldownSection" class="applications-section is-hidden" aria-labelledby="workdayCooldownTitle">
+        <div class="dash-section-header">
+            <div class="dash-section-title">
+                <h4 class="mb-0" id="workdayCooldownTitle">Workday account wait</h4>
+                <span class="results-count">Your decision</span>
+            </div>
+        </div>
+        <p class="text-muted mb-3">The enforced wait cannot be shortened. Choose what should happen to the affected application.</p>
+        <div id="workdayCooldownList" class="applications-list" role="list"></div>
+    </section>
 
     <section id="applicationHoldsSection" class="applications-section is-hidden" aria-labelledby="applicationHoldsTitle">
         <div class="dash-section-header">

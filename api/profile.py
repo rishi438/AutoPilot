@@ -31,6 +31,7 @@ from utils.cache import (
     invalidate_user_llm_cache,
     invalidate_user_profile,
 )
+from utils.country_phone_codes import country_phone_catalog, resolve_country_phone
 from utils.database import get_database
 from utils.encryption import (
     decrypt_api_key,
@@ -50,10 +51,11 @@ from utils.gemini_api_key_format import validate_gemini_api_key
 from utils.json_utils import serialize_object_for_json
 from utils.logging_config import get_structured_logger, mask_email
 from utils.resume_parser import SUPPORTED_EXTENSIONS, parse_resume_from_file
+from utils.security import sanitize_text
 from utils.user_resume_storage import (
-    delete_resume_file,
-    resume_absolute_path,
-    save_resume_bytes,
+    delete_resume_content,
+    read_resume_content,
+    save_resume_content,
 )
 
 logger = logging.getLogger(__name__)
@@ -135,6 +137,7 @@ MAX_JOB_TYPE_ITEMS: int = 5
 MAX_WORK_ARRANGEMENT_ITEMS: int = 3
 MAX_COMPANY_LENGTH: int = 100
 MAX_PHONE_LENGTH: int = 40
+MAX_POSTAL_CODE_LENGTH: int = 32
 MAX_PROFILE_URL_LENGTH: int = 500
 _VALID_WORK_AUTHORIZATION = frozenset(
     {
@@ -276,6 +279,32 @@ class JobType(str, Enum):
     INTERNSHIP = "Internship"
 
 
+class PortalProfileFactsUpdate(BaseModel):
+    """User-confirmed facts captured from a supported portal form."""
+
+    nationality: str | None = Field(default=None, min_length=1, max_length=100)
+    citizenship: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @field_validator("nationality", "citizenship")
+    @classmethod
+    def validate_portal_fact(cls, value: str | None) -> str | None:
+        return _validate_location(value, "Portal profile fact")
+
+
+class SensitivePortalDetailsUpdate(BaseModel):
+    """User-entered, opt-in data for supported portal fields only."""
+
+    enabled: bool = False
+    date_of_birth: str | None = Field(default=None, pattern=r"^\d{2}/\d{2}/\d{4}$")
+    pan: str | None = Field(default=None, pattern=r"^[A-Za-z]{5}\d{4}[A-Za-z]$")
+    gender: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @field_validator("gender")
+    @classmethod
+    def clean_gender(cls, value: str | None) -> str | None:
+        return sanitize_text(value).strip() if value else None
+
+
 class WorkArrangement(str, Enum):
     """Work arrangement enum for career preferences."""
 
@@ -330,6 +359,16 @@ class BasicInfoRequest(BaseModel):
         max_length=MAX_LOCATION_LENGTH,
         description="Country of residence",
     )
+    country_phone_code: str = Field(
+        default="",
+        max_length=8,
+        description="Calling code derived from country of residence",
+    )
+    postal_code: str = Field(
+        default="",
+        max_length=MAX_POSTAL_CODE_LENGTH,
+        description="Postal or PIN code of residence",
+    )
     professional_title: str = Field(
         ...,
         min_length=MIN_LENGTH,
@@ -381,6 +420,25 @@ class BasicInfoRequest(BaseModel):
         if result is None:
             raise ValueError("Country cannot be empty")
         return result
+
+    @model_validator(mode="after")
+    def derive_country_phone_code(self) -> "BasicInfoRequest":
+        resolved = resolve_country_phone(self.country)
+        if resolved is None:
+            raise ValueError("Select a supported country")
+        self.country = resolved["name"]
+        self.country_phone_code = resolved["dial_code"]
+        return self
+
+    @field_validator("postal_code")
+    @classmethod
+    def validate_postal_code(cls, v: str) -> str:
+        value = " ".join((v or "").strip().split())
+        if not value:
+            return ""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 -]*", value):
+            raise ValueError("Postal/PIN code contains invalid characters")
+        return value
 
     @field_validator("professional_title")
     @classmethod
@@ -546,9 +604,9 @@ class WorkExperienceItem(BaseModel):
 
     @field_validator("is_current")
     @classmethod
-    def validate_is_current(cls, v: bool, values: dict) -> bool:
+    def validate_is_current(cls, v: bool, info: ValidationInfo) -> bool:
         if v:
-            end_date = values.get("end_date")
+            end_date = info.data.get("end_date")
             if end_date and end_date.strip().lower() not in ["present", ""]:
                 raise ValueError(
                     'If this is your current position, end date should be empty or "Present"'
@@ -692,12 +750,12 @@ class EducationItem(BaseModel):
 
     @field_validator("is_current")
     @classmethod
-    def validate_edu_is_current(cls, v: bool, values: dict) -> bool:
+    def validate_edu_is_current(cls, v: bool, info: ValidationInfo) -> bool:
         """_summary_
 
         Args:
             v (bool): _description_
-            values (dict): _description_
+            info (ValidationInfo): Validated fields available to this validator.
 
         Raises:
             ValueError: _description_
@@ -706,7 +764,7 @@ class EducationItem(BaseModel):
             bool: _description_
         """
         if v:
-            end_date = values.get("end_date")
+            end_date = info.data.get("end_date")
             if end_date and str(end_date).strip():
                 raise ValueError("If currently enrolled, leave end date empty")
         return v
@@ -1020,7 +1078,7 @@ async def _upsert_user_resume_asset(
 ) -> None:
     """Write bytes to disk and upsert ``user_resume_assets`` (one row per user)."""
     base_dir = settings.user_resume_storage_dir
-    rel, sha_hex, _ext = save_resume_bytes(base_dir, user_id, content, filename)
+    rel, sha_hex, _ext = await save_resume_content(base_dir, user_id, content, filename)
     mime = _MIME_BY_RESUME_EXT.get(file_extension, "application/octet-stream")
     UserResumeAsset = _get_user_resume_asset_model()
     row = None
@@ -1031,7 +1089,7 @@ async def _upsert_user_resume_asset(
         row = res.scalar_one_or_none()
     safe_name = (filename or "resume")[:255]
     if row:
-        delete_resume_file(base_dir, row.storage_relative_path)
+        await delete_resume_content(base_dir, row.storage_relative_path)
         row.storage_relative_path = rel
         row.original_filename = safe_name
         row.mime_type = mime[:100]
@@ -1256,18 +1314,20 @@ async def download_stored_resume(
     if not row:
         raise not_found_error(resource_type="Stored resume")
     try:
-        path = resume_absolute_path(
+        content = await read_resume_content(
             settings.user_resume_storage_dir, row.storage_relative_path
         )
-    except ValueError as e:
-        logger.warning("Invalid resume storage path for user %s: %s", user_id, e)
+    except (OSError, RuntimeError, ValueError) as e:
+        logger.warning("Stored resume unavailable for user %s: %s", user_id, e)
         raise not_found_error(resource_type="Stored resume")
-    if not path.is_file():
-        raise not_found_error(resource_type="Stored resume")
-    return FileResponse(
-        str(path),
+    from fastapi.responses import Response
+
+    filename = row.original_filename or "resume"
+
+    return Response(
+        content,
         media_type=row.mime_type or "application/octet-stream",
-        filename=row.original_filename or "resume",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -1288,7 +1348,9 @@ async def delete_stored_resume(
     row = res.scalar_one_or_none()
     if not row:
         raise not_found_error(resource_type="Stored resume")
-    delete_resume_file(settings.user_resume_storage_dir, row.storage_relative_path)
+    await delete_resume_content(
+        settings.user_resume_storage_dir, row.storage_relative_path
+    )
     await db.execute(
         sa_delete(user_resume_asset).where(user_resume_asset.user_id == user_id)
     )
@@ -1300,6 +1362,82 @@ async def delete_stored_resume(
 # =============================================================================
 # API ENDPOINTS
 # =============================================================================
+
+
+@router.patch("/portal-facts")
+async def save_portal_profile_facts(
+    facts: PortalProfileFactsUpdate,
+    current_user: dict[str, Any] = Depends(get_current_user),
+    db: AsyncSession = Depends(get_database),
+):
+    """Save user-confirmed nationality/citizenship for future portal forms."""
+    if facts.nationality is None and facts.citizenship is None:
+        raise validation_error("Provide nationality or citizenship.")
+    user_id = get_user_id_from_token(current_user)
+    profile = (
+        await db.execute(
+            select(UserProfileModel).where(UserProfileModel.user_id == user_id)
+        )
+    ).scalar_one_or_none()
+    if profile is None:
+        raise not_found_error(resource_type="Profile")
+    if facts.nationality is not None:
+        profile.nationality = facts.nationality
+    if facts.citizenship is not None:
+        profile.citizenship = facts.citizenship
+    profile.updated_at = datetime.now(UTC)
+    await db.commit()
+    await invalidate_user_profile(str(user_id))
+    return {"nationality": profile.nationality, "citizenship": profile.citizenship}
+
+
+@router.put("/sensitive-portal-details")
+async def save_sensitive_portal_details(
+    details: SensitivePortalDetailsUpdate,
+    current_user: dict[str, Any] = Depends(get_current_user),
+    db: AsyncSession = Depends(get_database),
+):
+    """Store optional DOB/PAN/gender encrypted; plaintext is never returned."""
+    user_id = get_user_id_from_token(current_user)
+    profile = (
+        await db.execute(
+            select(UserProfileModel).where(UserProfileModel.user_id == user_id)
+        )
+    ).scalar_one_or_none()
+    if profile is None:
+        raise not_found_error(resource_type="Profile")
+    if details.enabled:
+        # Blank inputs mean "keep the encrypted value already stored". The UI
+        # intentionally never receives plaintext back merely to edit one field.
+        if details.date_of_birth:
+            profile.date_of_birth_encrypted = encrypt_api_key(details.date_of_birth)
+        if details.pan:
+            profile.pan_encrypted = encrypt_api_key(details.pan.upper())
+        if details.gender:
+            profile.gender_encrypted = encrypt_api_key(details.gender)
+        if not (
+            profile.date_of_birth_encrypted
+            or profile.pan_encrypted
+            or profile.gender_encrypted
+        ):
+            raise validation_error(
+                "Provide a date of birth, PAN, or gender before enabling sensitive portal autofill."
+            )
+    else:
+        # Disabling also removes these optional sensitive values.
+        profile.date_of_birth_encrypted = None
+        profile.pan_encrypted = None
+        profile.gender_encrypted = None
+    profile.sensitive_portal_autofill_enabled = details.enabled
+    profile.updated_at = datetime.now(UTC)
+    await db.commit()
+    await invalidate_user_profile(str(user_id))
+    return {
+        "enabled": profile.sensitive_portal_autofill_enabled,
+        "has_date_of_birth": bool(profile.date_of_birth_encrypted),
+        "has_pan": bool(profile.pan_encrypted),
+        "has_gender": bool(profile.gender_encrypted),
+    }
 
 
 @router.get("/")
@@ -1387,6 +1525,15 @@ async def get_profile_data(
         raise internal_error("Failed to get profile data")
 
 
+@router.get("/countries")
+async def list_profile_countries(
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    """Return the complete country catalog used by profile calling-code derivation."""
+    del current_user
+    return {"countries": country_phone_catalog()}
+
+
 @router.put("/basic-info")
 async def update_basic_info(
     basic_info: BasicInfoRequest,
@@ -1408,6 +1555,8 @@ async def update_basic_info(
             user_profile.city = basic_info.city
             user_profile.state = basic_info.state
             user_profile.country = basic_info.country
+            user_profile.country_phone_code = basic_info.country_phone_code
+            user_profile.postal_code = _blank_to_none(basic_info.postal_code)
             user_profile.professional_title = basic_info.professional_title
             user_profile.years_experience = basic_info.years_experience
             user_profile.is_student = basic_info.is_student
@@ -1425,6 +1574,8 @@ async def update_basic_info(
                 city=basic_info.city,
                 state=basic_info.state,
                 country=basic_info.country,
+                country_phone_code=basic_info.country_phone_code,
+                postal_code=_blank_to_none(basic_info.postal_code),
                 professional_title=basic_info.professional_title,
                 years_experience=basic_info.years_experience,
                 is_student=basic_info.is_student,
@@ -2164,6 +2315,8 @@ def _check_basic_info_completion(user_profile: UserProfileModel | None) -> bool:
         user_profile.city,
         user_profile.state,
         user_profile.country,
+        user_profile.country_phone_code,
+        user_profile.postal_code,
         user_profile.professional_title,
         user_profile.years_experience,
         user_profile.summary,
@@ -2770,7 +2923,7 @@ async def delete_user_account(
         )
         resume_asset = resume_row_result.scalar_one_or_none()
         if resume_asset:
-            delete_resume_file(
+            await delete_resume_content(
                 settings.user_resume_storage_dir, resume_asset.storage_relative_path
             )
 

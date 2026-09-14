@@ -5,340 +5,495 @@ import * as fs from 'fs';
 /**
  * Chrome Extension tests
  * Tests for the job extraction Chrome extension
- * 
+ *
  * Note: Extension testing requires special setup and may not work in all CI environments
  */
 test.describe('Chrome Extension', () => {
-  
+
   const extensionPath = path.join(__dirname, '../../extension');
-  
+
   test.describe('Extension Files', () => {
-    
+
     test('should have manifest.json', async () => {
       const manifestPath = path.join(extensionPath, 'manifest.json');
       expect(fs.existsSync(manifestPath)).toBe(true);
-      
+
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
       expect(manifest.manifest_version).toBe(3);
       expect(manifest.name).toBeTruthy();
       expect(manifest.version).toBeTruthy();
     });
-    
+
     test('should have popup files', async () => {
       const popupHtml = path.join(extensionPath, 'popup/popup.html');
       const popupJs = path.join(extensionPath, 'popup/popup.js');
       const popupCss = path.join(extensionPath, 'popup/popup.css');
-      
+
       expect(fs.existsSync(popupHtml)).toBe(true);
       expect(fs.existsSync(popupJs)).toBe(true);
       expect(fs.existsSync(popupCss)).toBe(true);
     });
-    
+
     test('should have content script', async () => {
       const contentJs = path.join(extensionPath, 'content/content.js');
       expect(fs.existsSync(contentJs)).toBe(true);
     });
-    
+
     test('should have service worker', async () => {
       const serviceWorker = path.join(extensionPath, 'background/service-worker.js');
       expect(fs.existsSync(serviceWorker)).toBe(true);
     });
-    
+
     test('should have icon files', async () => {
       const iconsPath = path.join(extensionPath, 'icons');
-      
+
       // Check for icon files
       const iconFiles = fs.readdirSync(iconsPath).filter(f => f.endsWith('.png') || f.endsWith('.svg'));
       expect(iconFiles.length).toBeGreaterThan(0);
     });
   });
-  
+
   test.describe('Manifest Validation', () => {
-    
+
     test('should have valid permissions', async () => {
       const manifestPath = path.join(extensionPath, 'manifest.json');
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-      
+
       // Should have required permissions
       expect(manifest.permissions).toContain('activeTab');
       expect(manifest.permissions).toContain('storage');
     });
-    
+
     test('should have valid action configuration', async () => {
       const manifestPath = path.join(extensionPath, 'manifest.json');
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-      
+
       expect(manifest.action).toBeTruthy();
       expect(manifest.action.default_popup).toBeTruthy();
     });
-    
+
     test('should have valid content scripts configuration', async () => {
       const manifestPath = path.join(extensionPath, 'manifest.json');
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-      
+
       if (manifest.content_scripts) {
         expect(manifest.content_scripts.length).toBeGreaterThan(0);
         expect(manifest.content_scripts[0].js).toBeTruthy();
         expect(manifest.content_scripts[0].matches).toBeTruthy();
       }
     });
-    
+
     test('should have valid background service worker', async () => {
       const manifestPath = path.join(extensionPath, 'manifest.json');
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-      
+
       expect(manifest.background).toBeTruthy();
       expect(manifest.background.service_worker).toBeTruthy();
     });
+
+    test('should show the manifest version in the popup footer', async () => {
+      const manifest = JSON.parse(
+        fs.readFileSync(path.join(extensionPath, 'manifest.json'), 'utf-8')
+      );
+      const popupHtml = fs.readFileSync(
+        path.join(extensionPath, 'popup/popup.html'),
+        'utf-8'
+      );
+
+      expect(popupHtml).toContain(`v${manifest.version}`);
+    });
   });
-  
+
+  test.describe('Form Autofill DOM Scanner', () => {
+    const autofillScript = path.join(extensionPath, 'lib/form-autofill.js');
+
+    test('falls back to visible body branches when no semantic form root exists', async ({ page }) => {
+      await page.setContent(`
+        <style>.transitioning { width: 0; height: 0; padding: 0; border: 0; }</style>
+        <div>
+          <label for="first-name">First Name</label>
+          <input id="first-name" name="first_name" class="transitioning">
+        </div>
+        <div hidden><input aria-label="Hidden attribute" class="transitioning"></div>
+        <div inert><input aria-label="Inert branch" class="transitioning"></div>
+        <div aria-hidden="true"><input aria-label="ARIA hidden branch" class="transitioning"></div>
+        <div style="display: none"><input aria-label="Display hidden branch" class="transitioning"></div>
+        <div style="visibility: hidden"><input aria-label="Visibility hidden branch" class="transitioning"></div>
+      `);
+      await page.addScriptTag({ path: autofillScript });
+
+      const result = await page.evaluate(() =>
+        (window as any).__jaaSerializeAutofillFields()
+      );
+
+      expect(result.fields.map((field: { label_text: string }) => field.label_text)).toEqual([
+        'First Name',
+      ]);
+      expect(result.scan_debug.trace).toContainEqual(
+        expect.objectContaining({ step: 'active_form_fallback_body' })
+      );
+    });
+
+    test('prefers an active semantic root over the body fallback', async ({ page }) => {
+      await page.setContent(`
+        <style>.transitioning { width: 0; height: 0; padding: 0; border: 0; }</style>
+        <div role="tabpanel">
+          <label for="active-field">Active Step Field</label>
+          <input id="active-field" class="transitioning">
+        </div>
+        <div>
+          <label for="body-field">Body Only Field</label>
+          <input id="body-field" class="transitioning">
+        </div>
+      `);
+      await page.addScriptTag({ path: autofillScript });
+
+      const result = await page.evaluate(() =>
+        (window as any).__jaaSerializeAutofillFields()
+      );
+      const labels = result.fields.map((field: { label_text: string }) => field.label_text);
+
+      expect(labels).toContain('Active Step Field');
+      expect(labels).not.toContain('Body Only Field');
+      expect(result.scan_debug.trace).not.toContainEqual(
+        expect.objectContaining({ step: 'active_form_fallback_body' })
+      );
+    });
+
+    test('discovers and applies a field inside recursively nested open shadow roots', async ({ page }) => {
+      await page.setContent('<main><div id="outer-host"></div></main>');
+      await page.evaluate(() => {
+        const outerHost = document.getElementById('outer-host') as HTMLElement;
+        const outerRoot = outerHost.attachShadow({ mode: 'open' });
+        outerRoot.innerHTML = '<section><div id="inner-host"></div></section>';
+        const innerHost = outerRoot.getElementById('inner-host') as HTMLElement;
+        const innerRoot = innerHost.attachShadow({ mode: 'open' });
+        innerRoot.innerHTML = `
+          <label for="given-name">Given Name</label>
+          <input id="given-name" name="given_name">
+        `;
+      });
+      await page.addScriptTag({ path: autofillScript });
+
+      const result = await page.evaluate(() =>
+        (window as any).__jaaSerializeAutofillFields()
+      );
+      expect(result.fields).toHaveLength(1);
+      expect(result.fields[0]).toEqual(
+        expect.objectContaining({ label_text: 'Given Name', input_type: 'text' })
+      );
+
+      const applied = await page.evaluate(async (field) => {
+        return await (window as any).__jaaApplyAutofillWithRematch([
+          { field_uid: field.field_uid, label_text: field.label_text, value: 'Arjun' },
+        ]);
+      }, result.fields[0]);
+      const committedValue = await page.evaluate(() => {
+        const outerHost = document.getElementById('outer-host') as HTMLElement;
+        const innerHost = outerHost.shadowRoot?.getElementById('inner-host') as HTMLElement;
+        const input = innerHost.shadowRoot?.getElementById('given-name') as HTMLInputElement;
+        return input.value;
+      });
+
+      expect(applied.applied).toBe(1);
+      expect(committedValue).toBe('Arjun');
+    });
+
+    test('discovers and attaches a resume on a resume-only shadow DOM step', async ({ page }) => {
+      await page.setContent('<main><div id="upload-host"></div></main>');
+      await page.evaluate(() => {
+        const uploadHost = document.getElementById('upload-host') as HTMLElement;
+        const uploadRoot = uploadHost.attachShadow({ mode: 'open' });
+        uploadRoot.innerHTML = `
+          <section>
+            <h1>Autofill with Resume</h1>
+            <div id="file-host"></div>
+          </section>
+        `;
+        const fileHost = uploadRoot.getElementById('file-host') as HTMLElement;
+        const fileRoot = fileHost.attachShadow({ mode: 'open' });
+        fileRoot.innerHTML = `
+          <label for="file-upload-input-ref">Select file</label>
+          <input id="file-upload-input-ref" type="file" style="display: none">
+        `;
+      });
+      await page.addScriptTag({ path: autofillScript });
+
+      const result = await page.evaluate(() =>
+        (window as any).__jaaSerializeAutofillFields()
+      );
+      const probe = await page.evaluate(() =>
+        (window as any).__jaaProbeResumeFileInput()
+      );
+      const attachment = await page.evaluate(() =>
+        (window as any).__jaaAttachResumeFile({
+          base64: 'cmVzdW1l',
+          filename: 'resume.pdf',
+          mimeType: 'application/pdf',
+        })
+      );
+      const attachedName = await page.evaluate(() => {
+        const uploadHost = document.getElementById('upload-host') as HTMLElement;
+        const fileHost = uploadHost.shadowRoot?.getElementById('file-host') as HTMLElement;
+        const input = fileHost.shadowRoot?.getElementById('file-upload-input-ref') as HTMLInputElement;
+        return input.files?.[0]?.name || '';
+      });
+
+      expect(result.fields).toHaveLength(1);
+      expect(result.fields[0].input_type).toBe('file');
+      expect(probe.found).toBe(true);
+      expect(attachment.attached).toBe(1);
+      expect(attachedName).toBe('resume.pdf');
+    });
+  });
+
   test.describe('Popup UI', () => {
-    
+
     test('should have valid popup HTML structure', async () => {
       const popupHtml = fs.readFileSync(
         path.join(extensionPath, 'popup/popup.html'),
         'utf-8'
       );
-      
+
       // Check for basic HTML structure
       expect(popupHtml).toContain('<!DOCTYPE html>');
       expect(popupHtml).toContain('<html');
       expect(popupHtml).toContain('<head>');
       expect(popupHtml).toContain('<body>');
-      
+
       // Check for required elements
       expect(popupHtml).toContain('popup.css');
       expect(popupHtml).toContain('popup.js');
     });
-    
+
     test('should have login/auth UI elements', async () => {
       const popupHtml = fs.readFileSync(
         path.join(extensionPath, 'popup/popup.html'),
         'utf-8'
       );
-      
+
       // Should have auth-related elements
       expect(
-        popupHtml.includes('login') || 
+        popupHtml.includes('login') ||
         popupHtml.includes('Login') ||
         popupHtml.includes('auth')
       ).toBe(true);
     });
-    
+
     test('should have extract button', async () => {
       const popupHtml = fs.readFileSync(
         path.join(extensionPath, 'popup/popup.html'),
         'utf-8'
       );
-      
+
       // Should have extract/analyze button
       expect(
-        popupHtml.toLowerCase().includes('extract') || 
+        popupHtml.toLowerCase().includes('extract') ||
         popupHtml.toLowerCase().includes('analyze') ||
         popupHtml.toLowerCase().includes('button')
       ).toBe(true);
     });
   });
-  
+
   test.describe('Content Script', () => {
-    
+
     test('should have job detection logic', async () => {
       const contentJs = fs.readFileSync(
         path.join(extensionPath, 'content/content.js'),
         'utf-8'
       );
-      
+
       // Should have job-related selectors or logic
       expect(
-        contentJs.includes('job') || 
+        contentJs.includes('job') ||
         contentJs.includes('Job') ||
         contentJs.includes('career') ||
         contentJs.includes('Career')
       ).toBe(true);
     });
-    
+
     test('should have content extraction logic', async () => {
       const contentJs = fs.readFileSync(
         path.join(extensionPath, 'content/content.js'),
         'utf-8'
       );
-      
+
       // Should have extraction-related code
       expect(
-        contentJs.includes('extract') || 
+        contentJs.includes('extract') ||
         contentJs.includes('innerText') ||
         contentJs.includes('textContent') ||
         contentJs.includes('querySelector')
       ).toBe(true);
     });
-    
+
     test('should handle message passing', async () => {
       const contentJs = fs.readFileSync(
         path.join(extensionPath, 'content/content.js'),
         'utf-8'
       );
-      
+
       // Should have Chrome message passing
       expect(
-        contentJs.includes('chrome.runtime') || 
+        contentJs.includes('chrome.runtime') ||
         contentJs.includes('sendMessage') ||
         contentJs.includes('onMessage')
       ).toBe(true);
     });
   });
-  
+
   test.describe('Service Worker', () => {
-    
+
     test('should have API communication logic', async () => {
       const serviceWorker = fs.readFileSync(
         path.join(extensionPath, 'background/service-worker.js'),
         'utf-8'
       );
-      
+
       // Should have fetch or API calls
       expect(
-        serviceWorker.includes('fetch') || 
+        serviceWorker.includes('fetch') ||
         serviceWorker.includes('XMLHttpRequest') ||
         serviceWorker.includes('api')
       ).toBe(true);
     });
-    
+
     test('should handle authentication', async () => {
       const serviceWorker = fs.readFileSync(
         path.join(extensionPath, 'background/service-worker.js'),
         'utf-8'
       );
-      
+
       // Should have auth-related code
       expect(
-        serviceWorker.includes('token') || 
+        serviceWorker.includes('token') ||
         serviceWorker.includes('auth') ||
         serviceWorker.includes('Authorization')
       ).toBe(true);
     });
-    
+
     test('should have message listeners', async () => {
       const serviceWorker = fs.readFileSync(
         path.join(extensionPath, 'background/service-worker.js'),
         'utf-8'
       );
-      
+
       // Should have message listeners
       expect(
-        serviceWorker.includes('onMessage') || 
+        serviceWorker.includes('onMessage') ||
         serviceWorker.includes('addListener')
       ).toBe(true);
     });
   });
-  
+
   test.describe('Popup JavaScript', () => {
-    
+
     test('should have DOM manipulation', async () => {
       const popupJs = fs.readFileSync(
         path.join(extensionPath, 'popup/popup.js'),
         'utf-8'
       );
-      
+
       // Should have DOM manipulation
       expect(
-        popupJs.includes('document.') || 
+        popupJs.includes('document.') ||
         popupJs.includes('getElementById') ||
         popupJs.includes('querySelector')
       ).toBe(true);
     });
-    
+
     test('should have event listeners', async () => {
       const popupJs = fs.readFileSync(
         path.join(extensionPath, 'popup/popup.js'),
         'utf-8'
       );
-      
+
       // Should have event listeners
       expect(
-        popupJs.includes('addEventListener') || 
+        popupJs.includes('addEventListener') ||
         popupJs.includes('onclick') ||
         popupJs.includes('click')
       ).toBe(true);
     });
-    
+
     test('should communicate with content script', async () => {
       const popupJs = fs.readFileSync(
         path.join(extensionPath, 'popup/popup.js'),
         'utf-8'
       );
-      
+
       // Should have tab/content script communication
       expect(
-        popupJs.includes('chrome.tabs') || 
+        popupJs.includes('chrome.tabs') ||
         popupJs.includes('sendMessage') ||
         popupJs.includes('chrome.runtime')
       ).toBe(true);
     });
-    
+
     test('should handle storage', async () => {
       const popupJs = fs.readFileSync(
         path.join(extensionPath, 'popup/popup.js'),
         'utf-8'
       );
-      
+
       // Should use storage API
       expect(
-        popupJs.includes('chrome.storage') || 
+        popupJs.includes('chrome.storage') ||
         popupJs.includes('localStorage') ||
         popupJs.includes('storage')
       ).toBe(true);
     });
   });
-  
+
   test.describe('CSS Styling', () => {
-    
+
     test('should have valid popup CSS', async () => {
       const popupCss = fs.readFileSync(
         path.join(extensionPath, 'popup/popup.css'),
         'utf-8'
       );
-      
+
       // Should have basic CSS
       expect(popupCss.length).toBeGreaterThan(0);
       expect(popupCss).toContain('{');
       expect(popupCss).toContain('}');
     });
-    
+
     test('should have responsive styling', async () => {
       const popupCss = fs.readFileSync(
         path.join(extensionPath, 'popup/popup.css'),
         'utf-8'
       );
-      
+
       // May or may not have media queries (popup is fixed size)
       // Just check it's valid CSS
       expect(popupCss).not.toContain('syntax error');
     });
-    
+
     test('should have button styling', async () => {
       const popupCss = fs.readFileSync(
         path.join(extensionPath, 'popup/popup.css'),
         'utf-8'
       );
-      
+
       // Should have button styles
       expect(
-        popupCss.includes('button') || 
+        popupCss.includes('button') ||
         popupCss.includes('btn') ||
         popupCss.includes('.extract')
       ).toBe(true);
     });
   });
-  
+
   test.describe('Content Script Details', () => {
-    
+
     test('content script references job-related content', async () => {
       const contentJs = fs.readFileSync(
         path.join(extensionPath, 'content/content.js'),
         'utf-8'
       );
       // Should contain job-related logic
-      const hasJobLogic = 
+      const hasJobLogic =
         contentJs.includes('greenhouse') ||
         contentJs.includes('workday') ||
         contentJs.toLowerCase().includes('job') ||
@@ -368,22 +523,22 @@ test.describe('Chrome Extension', () => {
       );
       // Should have conditional logic for different pages
       expect(
-        contentJs.includes('if ') || 
-        contentJs.includes('switch') || 
+        contentJs.includes('if ') ||
+        contentJs.includes('switch') ||
         contentJs.includes('match(')
       ).toBe(true);
     });
   });
 
   test.describe('Service Worker Details', () => {
-    
+
     test('service worker handles install event', async () => {
       const serviceWorker = fs.readFileSync(
         path.join(extensionPath, 'background/service-worker.js'),
         'utf-8'
       );
       expect(
-        serviceWorker.includes('install') || 
+        serviceWorker.includes('install') ||
         serviceWorker.includes('activate') ||
         serviceWorker.includes('oninstalled')
       ).toBe(true);
@@ -396,8 +551,8 @@ test.describe('Chrome Extension', () => {
       );
       // Should have API URL configuration
       expect(
-        serviceWorker.includes('http') || 
-        serviceWorker.includes('API_URL') || 
+        serviceWorker.includes('http') ||
+        serviceWorker.includes('API_URL') ||
         serviceWorker.includes('baseUrl') ||
         serviceWorker.includes('BASE_URL')
       ).toBe(true);
@@ -410,7 +565,7 @@ test.describe('Chrome Extension', () => {
       );
       // Should have function definitions
       expect(
-        serviceWorker.includes('function ') || 
+        serviceWorker.includes('function ') ||
         serviceWorker.includes('const ') ||
         serviceWorker.includes('=>')
       ).toBe(true);
@@ -418,7 +573,7 @@ test.describe('Chrome Extension', () => {
   });
 
   test.describe('Popup JavaScript Details', () => {
-    
+
     test('popup.js references extension-specific APIs', async () => {
       const popupJs = fs.readFileSync(
         path.join(extensionPath, 'popup/popup.js'),
@@ -499,11 +654,11 @@ test.describe('Chrome Extension', () => {
   });
 
   test.describe('Extension Loading (Chromium only)', () => {
-    
+
     test.skip('should load extension in browser', async () => {
       // This test requires a full Chromium browser with extension support
       // Skip by default as it requires special setup
-      
+
       const browser = await chromium.launchPersistentContext('', {
         headless: false,
         args: [
@@ -511,14 +666,14 @@ test.describe('Chrome Extension', () => {
           `--load-extension=${extensionPath}`,
         ],
       });
-      
+
       // Get the extension ID
-      const extensionPage = browser.pages().find(p => 
+      const extensionPage = browser.pages().find(p =>
         p.url().includes('chrome-extension://')
       );
-      
+
       expect(extensionPage).toBeTruthy();
-      
+
       await browser.close();
     });
   });

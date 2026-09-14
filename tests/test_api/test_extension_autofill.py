@@ -177,9 +177,16 @@ class TestExtensionAutofillMap:
 
     @pytest.mark.asyncio
     async def test_rate_limit_429_and_retry_after(self, authed_client):
-        blocked = RateLimitResult(allowed=False, limit=15, remaining=0, reset_seconds=120)
-        with patch("api.extension_autofill.check_rate_limit_with_headers", AsyncMock(return_value=blocked)):
-            resp = await authed_client.post(f"{BASE}/autofill/map", json=_single_field_body())
+        blocked = RateLimitResult(
+            allowed=False, limit=15, remaining=0, reset_seconds=120
+        )
+        with patch(
+            "api.extension_autofill.check_rate_limit_with_headers",
+            AsyncMock(return_value=blocked),
+        ):
+            resp = await authed_client.post(
+                f"{BASE}/autofill/map", json=_single_field_body()
+            )
         assert resp.status_code == 429
         data = resp.json()
         assert data.get("error_code") == "RATE_4001"
@@ -188,28 +195,61 @@ class TestExtensionAutofillMap:
     @pytest.mark.asyncio
     async def test_no_api_key_CFG_6001(self, authed_client):
         with (
-            patch("api.extension_autofill._get_user_api_key", AsyncMock(return_value=None)),
+            patch(
+                "api.extension_autofill._get_user_api_key", AsyncMock(return_value=None)
+            ),
             patch("api.extension_autofill._server_has_llm", return_value=False),
         ):
-            resp = await authed_client.post(f"{BASE}/autofill/map", json=_single_field_body())
+            resp = await authed_client.post(
+                f"{BASE}/autofill/map", json=_single_field_body()
+            )
         assert resp.status_code == 422
         assert resp.json().get("error_code") == "CFG_6001"
+
+    def test_local_llm_configuration_is_available_without_a_gemini_key(self):
+        from api.extension_autofill import _server_has_llm
+
+        settings = MagicMock(
+            gemini_api_key=None,
+            use_vertex_ai=False,
+            local_llm_url="http://ollama:11434/api/generate",
+            local_llm_model="qwen3:14b",
+        )
+        with patch("api.extension_autofill.get_settings", return_value=settings):
+            assert _server_has_llm() is True
 
     @pytest.mark.asyncio
     async def test_user_not_found_404(self, authed_client):
         """JWT user id has no DB row — rare after account deletion."""
         with (
-            patch("api.extension_autofill._get_user_api_key", AsyncMock(return_value=None)),
+            patch(
+                "api.extension_autofill._get_user_api_key", AsyncMock(return_value=None)
+            ),
             patch("api.extension_autofill._server_has_llm", return_value=True),
-            patch("api.extension_autofill.get_cached_tool_result", AsyncMock(return_value=None)),
+            patch(
+                "api.extension_autofill.get_cached_tool_result",
+                AsyncMock(return_value=None),
+            ),
         ):
-            resp = await authed_client.post(f"{BASE}/autofill/map", json=_single_field_body())
+            resp = await authed_client.post(
+                f"{BASE}/autofill/map", json=_single_field_body()
+            )
         assert resp.status_code == 404
         assert resp.json().get("error_code") == "RES_3001"
 
     @pytest.mark.asyncio
     async def test_legacy_prefix_same_behavior_422(self, authed_client):
-        body = {"page_url": "bad", "fields": [{"field_uid": "0", "tag": "input", "input_type": "text", "label_text": "x"}]}
+        body = {
+            "page_url": "bad",
+            "fields": [
+                {
+                    "field_uid": "0",
+                    "tag": "input",
+                    "input_type": "text",
+                    "label_text": "x",
+                }
+            ],
+        }
         resp = await authed_client.post(f"{LEGACY_BASE}/autofill/map", json=body)
         assert resp.status_code == 422
 
@@ -226,7 +266,9 @@ class TestExtensionAutofillMap:
         uid = uuid.UUID(payload["sub"])
 
         async with _NullSessionLocal() as session:
-            await session.execute(update(User).where(User.id == uid).values(profile_completed=True))
+            await session.execute(
+                update(User).where(User.id == uid).values(profile_completed=True)
+            )
             session.add(
                 UserProfile(
                     id=uuid.uuid4(),
@@ -257,12 +299,20 @@ class TestExtensionAutofillMap:
 
         try:
             with (
-                patch("api.extension_autofill.get_cached_tool_result", AsyncMock(return_value=stale_cache)),
+                patch(
+                    "api.extension_autofill.get_cached_tool_result",
+                    AsyncMock(return_value=stale_cache),
+                ),
                 patch("api.extension_autofill.get_gemini_client", AsyncMock()),
-                patch("api.extension_autofill._get_user_api_key", AsyncMock(return_value=None)),
+                patch(
+                    "api.extension_autofill._get_user_api_key",
+                    AsyncMock(return_value=None),
+                ),
                 patch("api.extension_autofill._server_has_llm", return_value=True),
             ):
-                resp = await authed_client_with_user.post(f"{BASE}/autofill/map", json=_single_field_body())
+                resp = await authed_client_with_user.post(
+                    f"{BASE}/autofill/map", json=_single_field_body()
+                )
         finally:
             app.dependency_overrides.pop(get_current_user, None)
             app.dependency_overrides.pop(get_current_user_with_complete_profile, None)
@@ -300,13 +350,27 @@ class TestExtensionAutofillMap:
 
         try:
             with (
-                patch("api.extension_autofill.get_cached_tool_result", AsyncMock(return_value=None)),
-                patch("api.extension_autofill.cache_tool_result", AsyncMock(return_value=True)),
-                patch("api.extension_autofill.get_gemini_client", AsyncMock(return_value=mock_client)),
-                patch("api.extension_autofill._get_user_api_key", AsyncMock(return_value=None)),
+                patch(
+                    "api.extension_autofill.get_cached_tool_result",
+                    AsyncMock(return_value=None),
+                ),
+                patch(
+                    "api.extension_autofill.cache_tool_result",
+                    AsyncMock(return_value=True),
+                ),
+                patch(
+                    "api.extension_autofill.get_gemini_client",
+                    AsyncMock(return_value=mock_client),
+                ),
+                patch(
+                    "api.extension_autofill._get_user_api_key",
+                    AsyncMock(return_value=None),
+                ),
                 patch("api.extension_autofill._server_has_llm", return_value=True),
             ):
-                resp = await authed_client_with_user.post(f"{BASE}/autofill/map", json=_single_field_body(extras={}))
+                resp = await authed_client_with_user.post(
+                    f"{BASE}/autofill/map", json=_single_field_body(extras={})
+                )
         finally:
             app.dependency_overrides.pop(get_current_user, None)
             app.dependency_overrides.pop(get_current_user_with_complete_profile, None)
@@ -321,7 +385,9 @@ class TestExtensionAutofillMap:
 
     @pytest.mark.asyncio
     async def test_gemini_error_returns_503(self, authed_client_with_user):
-        uid = await _ensure_profile_for_token(authed_client_with_user, summary="Gemini error path.")
+        uid = await _ensure_profile_for_token(
+            authed_client_with_user, summary="Gemini error path."
+        )
         token = authed_client_with_user.headers["Authorization"].split(" ", 1)[1]
         sec = get_security_settings()
         payload = jwt.decode(
@@ -335,16 +401,29 @@ class TestExtensionAutofillMap:
         app.dependency_overrides[get_current_user_with_complete_profile] = mock_user
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(side_effect=GeminiError("upstream failure", status_code=503))
+        mock_client.generate = AsyncMock(
+            side_effect=GeminiError("upstream failure", status_code=503)
+        )
 
         try:
             with (
-                patch("api.extension_autofill.get_cached_tool_result", AsyncMock(return_value=None)),
-                patch("api.extension_autofill.get_gemini_client", AsyncMock(return_value=mock_client)),
-                patch("api.extension_autofill._get_user_api_key", AsyncMock(return_value=None)),
+                patch(
+                    "api.extension_autofill.get_cached_tool_result",
+                    AsyncMock(return_value=None),
+                ),
+                patch(
+                    "api.extension_autofill.get_gemini_client",
+                    AsyncMock(return_value=mock_client),
+                ),
+                patch(
+                    "api.extension_autofill._get_user_api_key",
+                    AsyncMock(return_value=None),
+                ),
                 patch("api.extension_autofill._server_has_llm", return_value=True),
             ):
-                resp = await authed_client_with_user.post(f"{BASE}/autofill/map", json=_single_field_body())
+                resp = await authed_client_with_user.post(
+                    f"{BASE}/autofill/map", json=_single_field_body()
+                )
         finally:
             app.dependency_overrides.pop(get_current_user, None)
             app.dependency_overrides.pop(get_current_user_with_complete_profile, None)
@@ -354,7 +433,9 @@ class TestExtensionAutofillMap:
 
     @pytest.mark.asyncio
     async def test_unparseable_llm_response_503(self, authed_client_with_user):
-        uid = await _ensure_profile_for_token(authed_client_with_user, summary="Parse fail path.")
+        uid = await _ensure_profile_for_token(
+            authed_client_with_user, summary="Parse fail path."
+        )
         token = authed_client_with_user.headers["Authorization"].split(" ", 1)[1]
         sec = get_security_settings()
         payload = jwt.decode(
@@ -368,16 +449,29 @@ class TestExtensionAutofillMap:
         app.dependency_overrides[get_current_user_with_complete_profile] = mock_user
 
         mock_client = MagicMock()
-        mock_client.generate = AsyncMock(return_value={"response": "NOT JSON {{{", "done": True})
+        mock_client.generate = AsyncMock(
+            return_value={"response": "NOT JSON {{{", "done": True}
+        )
 
         try:
             with (
-                patch("api.extension_autofill.get_cached_tool_result", AsyncMock(return_value=None)),
-                patch("api.extension_autofill.get_gemini_client", AsyncMock(return_value=mock_client)),
-                patch("api.extension_autofill._get_user_api_key", AsyncMock(return_value=None)),
+                patch(
+                    "api.extension_autofill.get_cached_tool_result",
+                    AsyncMock(return_value=None),
+                ),
+                patch(
+                    "api.extension_autofill.get_gemini_client",
+                    AsyncMock(return_value=mock_client),
+                ),
+                patch(
+                    "api.extension_autofill._get_user_api_key",
+                    AsyncMock(return_value=None),
+                ),
                 patch("api.extension_autofill._server_has_llm", return_value=True),
             ):
-                resp = await authed_client_with_user.post(f"{BASE}/autofill/map", json=_single_field_body())
+                resp = await authed_client_with_user.post(
+                    f"{BASE}/autofill/map", json=_single_field_body()
+                )
         finally:
             app.dependency_overrides.pop(get_current_user, None)
             app.dependency_overrides.pop(get_current_user_with_complete_profile, None)
@@ -386,8 +480,12 @@ class TestExtensionAutofillMap:
         assert resp.json().get("error_code") == "EXT_5002"
 
     @pytest.mark.asyncio
-    async def test_assignment_truncated_to_field_max_length(self, authed_client_with_user):
-        uid = await _ensure_profile_for_token(authed_client_with_user, summary="Max length truncation.")
+    async def test_assignment_truncated_to_field_max_length(
+        self, authed_client_with_user
+    ):
+        uid = await _ensure_profile_for_token(
+            authed_client_with_user, summary="Max length truncation."
+        )
         token = authed_client_with_user.headers["Authorization"].split(" ", 1)[1]
         sec = get_security_settings()
         payload = jwt.decode(
@@ -424,13 +522,27 @@ class TestExtensionAutofillMap:
 
         try:
             with (
-                patch("api.extension_autofill.get_cached_tool_result", AsyncMock(return_value=None)),
-                patch("api.extension_autofill.cache_tool_result", AsyncMock(return_value=True)),
-                patch("api.extension_autofill.get_gemini_client", AsyncMock(return_value=mock_client)),
-                patch("api.extension_autofill._get_user_api_key", AsyncMock(return_value=None)),
+                patch(
+                    "api.extension_autofill.get_cached_tool_result",
+                    AsyncMock(return_value=None),
+                ),
+                patch(
+                    "api.extension_autofill.cache_tool_result",
+                    AsyncMock(return_value=True),
+                ),
+                patch(
+                    "api.extension_autofill.get_gemini_client",
+                    AsyncMock(return_value=mock_client),
+                ),
+                patch(
+                    "api.extension_autofill._get_user_api_key",
+                    AsyncMock(return_value=None),
+                ),
                 patch("api.extension_autofill._server_has_llm", return_value=True),
             ):
-                resp = await authed_client_with_user.post(f"{BASE}/autofill/map", json=body)
+                resp = await authed_client_with_user.post(
+                    f"{BASE}/autofill/map", json=body
+                )
         finally:
             app.dependency_overrides.pop(get_current_user, None)
             app.dependency_overrides.pop(get_current_user_with_complete_profile, None)
@@ -440,7 +552,9 @@ class TestExtensionAutofillMap:
 
     @pytest.mark.asyncio
     async def test_llm_skipped_unknown_field_uid_dropped(self, authed_client_with_user):
-        uid = await _ensure_profile_for_token(authed_client_with_user, summary="Skipped filter.")
+        uid = await _ensure_profile_for_token(
+            authed_client_with_user, summary="Skipped filter."
+        )
         token = authed_client_with_user.headers["Authorization"].split(" ", 1)[1]
         sec = get_security_settings()
         payload = jwt.decode(
@@ -478,13 +592,27 @@ class TestExtensionAutofillMap:
 
         try:
             with (
-                patch("api.extension_autofill.get_cached_tool_result", AsyncMock(return_value=None)),
-                patch("api.extension_autofill.cache_tool_result", AsyncMock(return_value=True)),
-                patch("api.extension_autofill.get_gemini_client", AsyncMock(return_value=mock_client)),
-                patch("api.extension_autofill._get_user_api_key", AsyncMock(return_value=None)),
+                patch(
+                    "api.extension_autofill.get_cached_tool_result",
+                    AsyncMock(return_value=None),
+                ),
+                patch(
+                    "api.extension_autofill.cache_tool_result",
+                    AsyncMock(return_value=True),
+                ),
+                patch(
+                    "api.extension_autofill.get_gemini_client",
+                    AsyncMock(return_value=mock_client),
+                ),
+                patch(
+                    "api.extension_autofill._get_user_api_key",
+                    AsyncMock(return_value=None),
+                ),
                 patch("api.extension_autofill._server_has_llm", return_value=True),
             ):
-                resp = await authed_client_with_user.post(f"{BASE}/autofill/map", json=body)
+                resp = await authed_client_with_user.post(
+                    f"{BASE}/autofill/map", json=body
+                )
         finally:
             app.dependency_overrides.pop(get_current_user, None)
             app.dependency_overrides.pop(get_current_user_with_complete_profile, None)
@@ -492,8 +620,13 @@ class TestExtensionAutofillMap:
         assert resp.status_code == 200
         skipped = resp.json().get("skipped") or []
         uids = [s["field_uid"] for s in skipped]
-        assert "0" in uids
+        assert "0" not in uids
         assert "99" not in uids
+        assignments = resp.json().get("assignments") or []
+        assert len(assignments) == 1
+        assert assignments[0]["field_uid"] == "0"
+        assert assignments[0]["answer_source"] == "manual"
+        assert "needs_user_input" in assignments[0]["review_reasons"]
 
 
 class TestExtensionAutofillHelpers:
@@ -503,7 +636,9 @@ class TestExtensionAutofillHelpers:
         from api.extension_autofill import AutofillFieldIn, _validate_assignments
 
         fields = {
-            "0": AutofillFieldIn(field_uid="0", tag="input", input_type="text", label_text="A"),
+            "0": AutofillFieldIn(
+                field_uid="0", tag="input", input_type="text", label_text="A"
+            ),
         }
         raw = [
             {"field_uid": "0", "value": "ok"},
@@ -523,8 +658,121 @@ class TestExtensionAutofillHelpers:
         out = _validate_assignments(raw, fields)
         assert out[0].value == "Roboflow's mission"
 
+    def test_validate_assignments_excludes_file_inputs(self):
+        from api.extension_autofill import AutofillFieldIn, _validate_assignments
+
+        fields = {
+            "2": AutofillFieldIn(
+                field_uid="2",
+                tag="input",
+                input_type="file",
+                label_text="Resume",
+            ),
+        }
+        out = _validate_assignments(
+            [{"field_uid": "2", "value": "", "answer_source": "ai"}], fields
+        )
+        assert out == []
+
+    def test_sensitive_portal_values_are_only_mapped_after_opt_in(self):
+        from api.extension_autofill import AutofillFieldIn, _finalize_autofill_response
+
+        fields = [
+            AutofillFieldIn(
+                field_uid="0", tag="input", label_text="PAN Card", input_type="text"
+            ),
+            AutofillFieldIn(
+                field_uid="1",
+                tag="input",
+                label_text="Date of Birth - (DD/MM/YYYY)",
+                input_type="text",
+            ),
+            AutofillFieldIn(
+                field_uid="2", tag="input", label_text="Gender*", input_type="combobox"
+            ),
+        ]
+        fields_by_uid = {field.field_uid: field for field in fields}
+        assignments, _ = _finalize_autofill_response(
+            [], [], fields_by_uid, {"profile": {}}, fields
+        )
+        assert {(item.field_uid, item.value) for item in assignments} == {
+            ("0", ""),
+            ("1", ""),
+            ("2", ""),
+        }
+        assert all("needs_user_input" in item.review_reasons for item in assignments)
+        assert all("sensitive" in item.review_reasons for item in assignments)
+
+        assignments, _ = _finalize_autofill_response(
+            [],
+            [],
+            fields_by_uid,
+            {
+                "profile": {},
+                "_sensitive_portal": {
+                    "pan": "ABCDE1234F",
+                    "date_of_birth": "01/01/1990",
+                    "gender": "Female",
+                },
+            },
+            fields,
+        )
+        assert {(item.field_uid, item.value) for item in assignments} == {
+            ("0", "ABCDE1234F"),
+            ("1", "01/01/1990"),
+            ("2", "Female"),
+        }
+        assert all(
+            item.review_reasons == ["sensitive", "user_opted_in"]
+            for item in assignments
+        )
+
+    def test_unknown_legitimate_field_is_returned_for_one_time_user_input(self):
+        from api.extension_autofill import AutofillFieldIn, _finalize_autofill_response
+
+        field = AutofillFieldIn(
+            field_uid="0",
+            tag="input",
+            label_text="LinkedIn profile URL",
+            input_type="url",
+        )
+        assignments, _ = _finalize_autofill_response(
+            [], [], {"0": field}, {"profile": {}}, [field]
+        )
+
+        assert len(assignments) == 1
+        assert assignments[0].answer_source == "manual"
+        assert assignments[0].value == ""
+        assert assignments[0].review_reasons == ["needs_user_input"]
+
+    def test_unknown_browser_secret_field_is_not_returned_for_user_input(self):
+        from api.extension_autofill import AutofillFieldIn, _finalize_autofill_response
+
+        field = AutofillFieldIn(
+            field_uid="0",
+            tag="input",
+            label_text="One-time password",
+            input_type="password",
+        )
+        assignments, _ = _finalize_autofill_response(
+            [], [], {"0": field}, {"profile": {}}, [field]
+        )
+
+        assert assignments == []
+
 
 class TestExtensionAutofillDeterministicRules:
+    def test_portal_hostname_uses_only_https_hostnames(self):
+        from api.extension_autofill import _portal_hostname
+
+        assert (
+            _portal_hostname("https://www.mycareer.accenture.com/candidate-profile")
+            == "mycareer.accenture.com"
+        )
+        assert (
+            _portal_hostname("http://mycareer.accenture.com/candidate-profile") is None
+        )
+
     """Profile-backed rules applied before returning assignments."""
 
     def _field(self, uid: str, **kwargs):
@@ -560,7 +808,9 @@ class TestExtensionAutofillDeterministicRules:
         from api.extension_autofill_rules import deterministic_value_for_field
 
         f = self._field("0", label_text="Name*")
-        assert deterministic_value_for_field(f, self._bundle()) == "Elior Nataf Lackritz"
+        assert (
+            deterministic_value_for_field(f, self._bundle()) == "Elior Nataf Lackritz"
+        )
 
     def test_us_based_yes_from_country(self):
         from api.extension_autofill_rules import deterministic_value_for_field
@@ -707,7 +957,9 @@ class TestExtensionAutofillDeterministicRules:
                 {"value": "c", "text": "8-10"},
             ],
         )
-        assert deterministic_value_for_field(f, self._bundle(years_experience=4)) == "3-5"
+        assert (
+            deterministic_value_for_field(f, self._bundle(years_experience=4)) == "3-5"
+        )
 
     def test_years_experience_nearest_bucket_when_no_exact_range(self):
         from api.extension_autofill_rules import deterministic_value_for_field
@@ -723,7 +975,9 @@ class TestExtensionAutofillDeterministicRules:
                 {"value": "d", "text": "11+"},
             ],
         )
-        assert deterministic_value_for_field(f, self._bundle(years_experience=4)) == "5-7"
+        assert (
+            deterministic_value_for_field(f, self._bundle(years_experience=4)) == "5-7"
+        )
 
     def test_nyc_tri_state_commute_yes_when_hoboken(self):
         from api.extension_autofill_rules import deterministic_value_for_field
@@ -842,7 +1096,9 @@ class TestExtensionAutofillDeterministicRules:
         from api.extension_autofill import AutofillFieldIn, _finalize_autofill_response
 
         fields = [
-            AutofillFieldIn(field_uid="0", tag="input", input_type="text", label_text="Name*"),
+            AutofillFieldIn(
+                field_uid="0", tag="input", input_type="text", label_text="Name*"
+            ),
         ]
         fields_by_uid = {f.field_uid: f for f in fields}
         llm_raw = [{"field_uid": "0", "value": "Elior Lackritz"}]
@@ -857,7 +1113,37 @@ class TestExtensionAutofillDeterministicRules:
         assert assignments[0].value == "Elior Nataf Lackritz"
         assert skipped == []
 
-    def test_first_last_middle_name_split(self):
+    def test_user_approved_answer_overrides_profile_for_exact_question(self):
+        from api.extension_autofill import AutofillFieldIn, _finalize_autofill_response
+        from models.database import JobFormAnswer
+        from services.application_automation import normalize_question
+
+        fields = [
+            AutofillFieldIn(
+                field_uid="0", tag="input", input_type="text", label_text="Nationality"
+            )
+        ]
+        approved = JobFormAnswer(
+            question="Nationality",
+            normalized_question=normalize_question("Nationality"),
+            answer="Indian",
+            approved_for_reuse=True,
+        )
+        assignments, _ = _finalize_autofill_response(
+            [],
+            [],
+            {field.field_uid: field for field in fields},
+            self._bundle(),
+            fields,
+            [approved],
+        )
+
+        assert len(assignments) == 1
+        assert assignments[0].value == "Indian"
+        assert assignments[0].answer_source == "approved_rule"
+        assert "approved_reusable_answer" in assignments[0].review_reasons
+
+    def test_first_last_split_does_not_infer_optional_middle_name(self):
         from api.extension_autofill_rules import deterministic_value_for_field
 
         bundle = self._bundle()
@@ -865,15 +1151,103 @@ class TestExtensionAutofillDeterministicRules:
         last = self._field("11", label_text="Last name*")
         middle = self._field("12", label_text="Middle name")
         all_name_fields = [first, last, middle]
-        assert deterministic_value_for_field(first, bundle, all_fields=all_name_fields) == "Elior"
-        assert deterministic_value_for_field(last, bundle, all_fields=all_name_fields) == "Lackritz"
-        assert deterministic_value_for_field(middle, bundle, all_fields=all_name_fields) == "Nataf"
+        assert (
+            deterministic_value_for_field(first, bundle, all_fields=all_name_fields)
+            == "Elior"
+        )
+        assert (
+            deterministic_value_for_field(last, bundle, all_fields=all_name_fields)
+            == "Lackritz"
+        )
+        assert (
+            deterministic_value_for_field(middle, bundle, all_fields=all_name_fields)
+            is None
+        )
+
+    def test_already_filled_and_optional_middle_fields_need_no_assignment(self):
+        from api.extension_autofill import AutofillFieldIn, _field_needs_assignment
+
+        filled_email = self._field(
+            "12",
+            label_text="Email Address*",
+            readonly=True,
+            current_value="existing@example.com",
+        )
+        middle = self._field("13", label_text="Middle Name (Optional)")
+        gender = self._field("14", label_text="Gender*")
+        assert _field_needs_assignment(filled_email) is False
+        assert _field_needs_assignment(middle) is False
+        assert _field_needs_assignment(gender) is True
 
     def test_email_from_profile_bundle(self):
         from api.extension_autofill_rules import deterministic_value_for_field
 
         f = self._field("13", input_type="email", label_text="Email*")
-        assert deterministic_value_for_field(f, self._bundle()) == "eliornataflackritz@gmail.com"
+        assert (
+            deterministic_value_for_field(f, self._bundle())
+            == "eliornataflackritz@gmail.com"
+        )
+
+    def test_phone_uses_national_number_when_country_code_is_separate(self):
+        from api.extension_autofill_rules import deterministic_value_for_field
+
+        country_code = self._field(
+            "14", input_type="combobox", label_text="Country Code*"
+        )
+        phone = self._field("15", input_type="tel", label_text="Phone Number*")
+        bundle = self._bundle(phone="+91-8912312345")
+
+        assert (
+            deterministic_value_for_field(
+                phone, bundle, all_fields=[country_code, phone]
+            )
+            == "8912312345"
+        )
+
+    def test_country_phone_code_uses_saved_profile_country(self):
+        from api.extension_autofill_rules import deterministic_value_for_field
+
+        country_code = self._field(
+            "14",
+            input_type="combobox",
+            label_text="Country Phone Code*",
+            options=[
+                {"value": "+1", "text": "United States (+1)"},
+                {"value": "+91", "text": "India (+91)"},
+            ],
+        )
+
+        assert (
+            deterministic_value_for_field(
+                country_code,
+                self._bundle(country="India", phone="+91-8912312345"),
+            )
+            == "India (+91)"
+        )
+
+    def test_postal_code_uses_saved_profile_value(self):
+        from api.extension_autofill_rules import deterministic_value_for_field
+
+        field = self._field("16", input_type="text", label_text="Postal Code*")
+
+        assert (
+            deterministic_value_for_field(
+                field,
+                self._bundle(postal_code="560095"),
+            )
+            == "560095"
+        )
+
+    def test_phone_keeps_full_value_without_separate_country_code(self):
+        from api.extension_autofill_rules import deterministic_value_for_field
+
+        phone = self._field("15", input_type="tel", label_text="Phone Number*")
+        bundle = self._bundle(phone="+91-8912312345")
+
+        assert (
+            deterministic_value_for_field(phone, bundle, all_fields=[phone])
+            == "+91-8912312345"
+        )
 
     def test_location_city_from_profile(self):
         from api.extension_autofill_rules import deterministic_value_for_field
@@ -890,6 +1264,36 @@ class TestExtensionAutofillDeterministicRules:
                 self._bundle(city="Hoboken", state="NJ"),
             )
             == "Hoboken, NJ"
+        )
+
+    @pytest.mark.parametrize(
+        ("label", "input_type", "expected"),
+        [
+            ("City*", "text", "Bengaluru"),
+            ("State*", "text", "Karnataka"),
+            ("Province *", "select", "Karnataka"),
+        ],
+    )
+    def test_plain_workday_city_and_state_from_profile(
+        self, label, input_type, expected
+    ):
+        from api.extension_autofill_rules import deterministic_value_for_field
+
+        field = self._field(
+            "321",
+            tag="input",
+            input_type=input_type,
+            label_text=label,
+            name_attr="generated-workday-field-name",
+            id_attr="generated-workday-field-id",
+        )
+
+        assert (
+            deterministic_value_for_field(
+                field,
+                self._bundle(city="Bengaluru", state="Karnataka"),
+            )
+            == expected
         )
 
     def test_ashby_location_label_from_profile(self):
@@ -959,15 +1363,21 @@ class TestExtensionAutofillDeterministicRules:
             label_text="Are you willing to relocate to our New York office?*",
             options=[{"value": "yes", "text": "Yes"}],
         )
-        assert deterministic_value_for_field(
-            f, self._bundle(city="Hoboken", state="NJ", willing_to_relocate=True)
-        ) != "Hoboken, NJ"
+        assert (
+            deterministic_value_for_field(
+                f, self._bundle(city="Hoboken", state="NJ", willing_to_relocate=True)
+            )
+            != "Hoboken, NJ"
+        )
 
     def test_country_combobox_united_states(self):
         from api.extension_autofill_rules import deterministic_value_for_field
 
         f = self._field("15", input_type="combobox", label_text="Country")
-        assert deterministic_value_for_field(f, self._bundle(country="US")) == "United States"
+        assert (
+            deterministic_value_for_field(f, self._bundle(country="US"))
+            == "United States"
+        )
 
     def test_website_prefers_portfolio_over_github(self):
         from api.extension_autofill_rules import build_deterministic_raw_assignments
@@ -1055,7 +1465,10 @@ class TestExtensionAutofillDeterministicRules:
             label_text=(
                 "Do you acknowledge the work location expectations listed on this job posting?*"
             ),
-            options=[{"value": yes_opt, "text": yes_opt}, {"value": "No", "text": "No"}],
+            options=[
+                {"value": yes_opt, "text": yes_opt},
+                {"value": "No", "text": "No"},
+            ],
         )
         assert deterministic_value_for_field(f, self._bundle()) == yes_opt
 
@@ -1112,9 +1525,15 @@ class TestExtensionAutofillDeterministicRules:
                 {"value": "no", "text": "No"},
             ],
         )
-        assert deterministic_value_for_field(f, self._bundle(years_experience=4)) == "Yes"
-        assert deterministic_value_for_field(f, self._bundle(years_experience=3)) == "No"
-        assert deterministic_value_for_field(f, self._bundle(years_experience=5)) == "Yes"
+        assert (
+            deterministic_value_for_field(f, self._bundle(years_experience=4)) == "Yes"
+        )
+        assert (
+            deterministic_value_for_field(f, self._bundle(years_experience=3)) == "No"
+        )
+        assert (
+            deterministic_value_for_field(f, self._bundle(years_experience=5)) == "Yes"
+        )
 
     def test_salary_expectations_from_profile_range(self):
         from api.extension_autofill_rules import deterministic_value_for_field
@@ -1173,8 +1592,12 @@ class TestExtensionAutofillDeterministicRules:
             label_text="Do you have 5+ years of experience?*",
             options=None,
         )
-        assert deterministic_value_for_field(f, self._bundle(years_experience=4)) == "Yes"
-        assert deterministic_value_for_field(f, self._bundle(years_experience=3)) == "No"
+        assert (
+            deterministic_value_for_field(f, self._bundle(years_experience=4)) == "Yes"
+        )
+        assert (
+            deterministic_value_for_field(f, self._bundle(years_experience=3)) == "No"
+        )
 
     def test_salary_expectations_skipped_when_profile_empty(self):
         from api.extension_autofill_rules import deterministic_value_for_field
@@ -1196,7 +1619,9 @@ class TestExtensionAutofillDeterministicRules:
             label_text="Years of Industry Experience",
             options=None,
         )
-        assert deterministic_value_for_field(f, self._bundle(years_experience=4)) == "5-7"
+        assert (
+            deterministic_value_for_field(f, self._bundle(years_experience=4)) == "5-7"
+        )
 
     def test_degree_llb_maps_to_bachelors_on_greenhouse(self):
         from api.extension_autofill_rules import build_deterministic_raw_assignments
@@ -1264,8 +1689,14 @@ class TestExtensionAutofillDeterministicRules:
         assert pick_degree_from_options("BA", greenhouse) == "Bachelor's Degree"
         assert pick_degree_from_options("LLB", greenhouse) == "Bachelor's Degree"
         assert pick_degree_from_options("Law", greenhouse) == "Bachelor's Degree"
-        assert pick_degree_from_options("LLB", greenhouse + ["Bachelor's Degree"]) == "Bachelor's Degree"
-        assert _align_degree_to_form_options("Bachelor of Arts (BA)", greenhouse) == "Bachelor's Degree"
+        assert (
+            pick_degree_from_options("LLB", greenhouse + ["Bachelor's Degree"])
+            == "Bachelor's Degree"
+        )
+        assert (
+            _align_degree_to_form_options("Bachelor of Arts (BA)", greenhouse)
+            == "Bachelor's Degree"
+        )
 
     def test_degree_alias_table_covers_common_abbreviations(self):
         from api.extension_autofill_rules import _align_degree_to_form_options
@@ -1290,9 +1721,15 @@ class TestExtensionAutofillDeterministicRules:
         assert classify_degree("Ph.D.").key == "phd"
         assert classify_degree("A.A.S.").key == "associate"
         assert pick_degree_from_options("BSc", options) == "Bachelor of Science (BS)"
-        assert pick_degree_from_options("MBA", options) == "Master of Business Administration (M.B.A.)"
+        assert (
+            pick_degree_from_options("MBA", options)
+            == "Master of Business Administration (M.B.A.)"
+        )
         assert pick_degree_from_options("MA", options) == "Master of Arts (MA)"
-        assert pick_degree_from_options("Bachelor's Degree", options) == "Bachelor's Degree"
+        assert (
+            pick_degree_from_options("Bachelor's Degree", options)
+            == "Bachelor's Degree"
+        )
         assert _align_degree_to_form_options("MSc", []) == "Master of Science (MS)"
         assert _align_degree_to_form_options("Bachelor's", []) == "Bachelor's Degree"
 
@@ -1300,17 +1737,40 @@ class TestExtensionAutofillDeterministicRules:
         from api.extension_autofill_rules import build_deterministic_raw_assignments
 
         fields = [
-            self._field("19", input_type="combobox", label_text="Degree", duplicate_label_index=0),
-            self._field("20", input_type="combobox", label_text="Discipline", duplicate_label_index=0),
-            self._field("21", input_type="combobox", label_text="Degree", duplicate_label_index=1),
-            self._field("22", input_type="combobox", label_text="Discipline", duplicate_label_index=1),
+            self._field(
+                "19",
+                input_type="combobox",
+                label_text="Degree",
+                duplicate_label_index=0,
+            ),
+            self._field(
+                "20",
+                input_type="combobox",
+                label_text="Discipline",
+                duplicate_label_index=0,
+            ),
+            self._field(
+                "21",
+                input_type="combobox",
+                label_text="Degree",
+                duplicate_label_index=1,
+            ),
+            self._field(
+                "22",
+                input_type="combobox",
+                label_text="Discipline",
+                duplicate_label_index=1,
+            ),
         ]
         out = build_deterministic_raw_assignments(
             fields,
             self._bundle(
                 education=[
                     {"degree": "Bachelor of Arts (BA)", "field_of_study": "Economics"},
-                    {"degree": "Master of Science (MS)", "field_of_study": "Computer Science"},
+                    {
+                        "degree": "Master of Science (MS)",
+                        "field_of_study": "Computer Science",
+                    },
                 ]
             ),
         )
@@ -1387,7 +1847,11 @@ class TestExtensionAutofillDeterministicRules:
         assert "relocation" in val.lower()
 
     def test_missing_required_warnings(self):
-        from api.extension_autofill import AutofillAssignmentOut, AutofillFieldIn, _missing_required_warnings
+        from api.extension_autofill import (
+            AutofillAssignmentOut,
+            AutofillFieldIn,
+            _missing_required_warnings,
+        )
 
         fields = [
             AutofillFieldIn(
@@ -1405,7 +1869,11 @@ class TestExtensionAutofillDeterministicRules:
                 required=True,
             ),
         ]
-        assignments = [AutofillAssignmentOut(field_uid="0", value="Elior Nataf Lackritz", label_text="Name*")]
+        assignments = [
+            AutofillAssignmentOut(
+                field_uid="0", value="Elior Nataf Lackritz", label_text="Name*"
+            )
+        ]
         warnings = _missing_required_warnings(fields, assignments)
         assert len(warnings) == 1
         assert "1 required field" in warnings[0]
@@ -1442,7 +1910,10 @@ class TestExtensionAutofillDeterministicEndpoint:
                     "input_type": "yes_no_buttons",
                     "label_text": "Are you currently based in the United States?*",
                     "required": True,
-                    "options": [{"value": "Yes", "text": "Yes"}, {"value": "No", "text": "No"}],
+                    "options": [
+                        {"value": "Yes", "text": "Yes"},
+                        {"value": "No", "text": "No"},
+                    ],
                 },
                 {
                     "field_uid": "2",
@@ -1450,7 +1921,10 @@ class TestExtensionAutofillDeterministicEndpoint:
                     "input_type": "yes_no_buttons",
                     "label_text": "Do you require employment sponsorship to work in the country where this job is located?*",
                     "required": True,
-                    "options": [{"value": "Yes", "text": "Yes"}, {"value": "No", "text": "No"}],
+                    "options": [
+                        {"value": "Yes", "text": "Yes"},
+                        {"value": "No", "text": "No"},
+                    ],
                 },
                 {
                     "field_uid": "3",
@@ -1476,13 +1950,18 @@ class TestExtensionAutofillDeterministicEndpoint:
                     "input_type": "yes_no_buttons",
                     "label_text": "Are you prepared to work at a startup?*",
                     "required": True,
-                    "options": [{"value": "Yes", "text": "Yes"}, {"value": "No", "text": "No"}],
+                    "options": [
+                        {"value": "Yes", "text": "Yes"},
+                        {"value": "No", "text": "No"},
+                    ],
                 },
             ],
         }
 
     @pytest.mark.asyncio
-    async def test_endpoint_applies_deterministic_screening_when_llm_empty(self, authed_client_with_user):
+    async def test_endpoint_applies_deterministic_screening_when_llm_empty(
+        self, authed_client_with_user
+    ):
         uid = await _ensure_profile_for_token(
             authed_client_with_user,
             summary="Hybrid autofill.",
@@ -1513,10 +1992,22 @@ class TestExtensionAutofillDeterministicEndpoint:
 
         try:
             with (
-                patch("api.extension_autofill.get_cached_tool_result", AsyncMock(return_value=None)),
-                patch("api.extension_autofill.cache_tool_result", AsyncMock(return_value=True)),
-                patch("api.extension_autofill.get_gemini_client", AsyncMock(return_value=mock_client)),
-                patch("api.extension_autofill._get_user_api_key", AsyncMock(return_value=None)),
+                patch(
+                    "api.extension_autofill.get_cached_tool_result",
+                    AsyncMock(return_value=None),
+                ),
+                patch(
+                    "api.extension_autofill.cache_tool_result",
+                    AsyncMock(return_value=True),
+                ),
+                patch(
+                    "api.extension_autofill.get_gemini_client",
+                    AsyncMock(return_value=mock_client),
+                ),
+                patch(
+                    "api.extension_autofill._get_user_api_key",
+                    AsyncMock(return_value=None),
+                ),
                 patch("api.extension_autofill._server_has_llm", return_value=True),
             ):
                 resp = await authed_client_with_user.post(
@@ -1560,9 +2051,15 @@ class TestExtensionAutofillDeterministicEndpoint:
 
         try:
             with (
-                patch("api.extension_autofill.get_cached_tool_result", AsyncMock(return_value=stale_cache)),
+                patch(
+                    "api.extension_autofill.get_cached_tool_result",
+                    AsyncMock(return_value=stale_cache),
+                ),
                 patch("api.extension_autofill.get_gemini_client", AsyncMock()),
-                patch("api.extension_autofill._get_user_api_key", AsyncMock(return_value=None)),
+                patch(
+                    "api.extension_autofill._get_user_api_key",
+                    AsyncMock(return_value=None),
+                ),
                 patch("api.extension_autofill._server_has_llm", return_value=True),
             ):
                 resp = await authed_client_with_user.post(

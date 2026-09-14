@@ -25,6 +25,14 @@ from models.database import (
     WorkflowSession,
     WorkflowStatusEnum,
 )
+from services.application_automation import (
+    PROGRESS_AUTOMATION_EVENT_TYPES,
+    derive_automation_progress,
+)
+from services.application_soft_delete import (
+    ApplicationSoftDeleteNotFoundError,
+    soft_delete_owned_application_in_transaction,
+)
 from utils.auth import get_current_user_with_complete_profile
 from utils.cache import invalidate_workflow_state
 from utils.database import get_database
@@ -143,6 +151,28 @@ def _dashboard_application_visibility_filter(user_id: uuid.UUID):
 # =============================================================================
 
 
+class AutomationProgressResponse(BaseModel):
+    """Response model for stage-level automation progress."""
+
+    stage: str | None = Field(None, description="Automation stage identifier")
+    stage_status: str | None = Field(None, description="Current stage status")
+    next_stage: str | None = Field(None, description="Next planned stage identifier")
+    next_stage_status: str | None = Field(None, description="Next stage status")
+    label: str | None = Field(None, description="UI display label for progress")
+    unit1_completed: bool = Field(
+        False, description="Whether Unit 1 (Stage 1) is completed"
+    )
+    completed_at: datetime | None = Field(
+        None, description="Timestamp when stage completed"
+    )
+    unit2_completed: bool = Field(
+        False, description="Whether Unit 2 (Stage 2) is completed"
+    )
+    unit2_completed_at: datetime | None = Field(
+        None, description="Timestamp when Unit 2 (Stage 2) completed"
+    )
+
+
 class ApplicationResponse(BaseModel):
     """Response model for application data."""
 
@@ -172,6 +202,9 @@ class ApplicationResponse(BaseModel):
     )
     workflow_data: dict[str, Any] = Field(
         default_factory=dict, description="Complete workflow session data"
+    )
+    automation_progress: AutomationProgressResponse | None = Field(
+        None, description="Projected stage-level automation progress"
     )
 
 
@@ -370,11 +403,31 @@ async def list_applications(
             for ws in ws_result.scalars().all():
                 workflow_sessions_map[ws.session_id] = ws
 
+        # Batch-load all automation events for this page in a single query (filtered to progress types)
+        app_ids = [app.id for app in applications]
+        events_map: dict[uuid.UUID, list[ApplicationAutomationEvent]] = {}
+        if app_ids:
+            events_result = await db.execute(
+                select(ApplicationAutomationEvent)
+                .where(
+                    ApplicationAutomationEvent.application_id.in_(app_ids),
+                    ApplicationAutomationEvent.event_type.in_(
+                        PROGRESS_AUTOMATION_EVENT_TYPES
+                    ),
+                )
+                .order_by(
+                    ApplicationAutomationEvent.created_at.asc(),
+                    ApplicationAutomationEvent.id.asc(),
+                )
+            )
+            for event in events_result.scalars().all():
+                events_map.setdefault(event.application_id, []).append(event)
+
         # Format applications for response
         formatted_applications = []
         for app in applications:
             formatted_app = await _format_application_response(
-                app, db, workflow_sessions_map
+                app, db, workflow_sessions_map, events_map=events_map
             )
             formatted_applications.append(formatted_app)
 
@@ -669,40 +722,17 @@ async def delete_application(
 
         user_id = get_user_uuid(current_user)
 
-        result = await db.execute(
-            select(JobApplication).where(
-                and_(
-                    JobApplication.id == app_uuid,
-                    JobApplication.user_id == user_id,
-                    JobApplication.deleted_at.is_(None),
-                )
+        try:
+            deletion = await soft_delete_owned_application_in_transaction(
+                db,
+                application_id=app_uuid,
+                user_id=user_id,
             )
-        )
-        existing_app = result.scalar_one_or_none()
-
-        if not existing_app:
+        except ApplicationSoftDeleteNotFoundError:
             raise not_found_error("Application not found")
 
         # Soft delete — preserves workflow data for audit purposes.
-        existing_app.deleted_at = datetime.now(UTC)
-        session_id = existing_app.session_id
-        if session_id:
-            session_result = await db.execute(
-                select(WorkflowSession).where(
-                    and_(
-                        WorkflowSession.session_id == session_id,
-                        WorkflowSession.user_id == user_id,
-                    )
-                )
-            )
-            workflow_session = session_result.scalar_one_or_none()
-            if workflow_session and workflow_session.workflow_status in {
-                WorkflowStatusEnum.INITIALIZED.value,
-                WorkflowStatusEnum.IN_PROGRESS.value,
-                WorkflowStatusEnum.AWAITING_CONFIRMATION.value,
-            }:
-                workflow_session.workflow_status = WorkflowStatusEnum.CANCELLED.value
-                workflow_session.processing_end_time = datetime.now(UTC)
+        session_id = deletion.session_id
         await db.commit()
 
         if session_id:
@@ -908,13 +938,16 @@ async def _format_application_response(
     application: JobApplication,
     db: AsyncSession,
     workflow_sessions_map: dict[str, Any] | None = None,
+    events_map: dict[uuid.UUID, list[ApplicationAutomationEvent]] | None = None,
 ) -> ApplicationResponse:
     """Format application for API response.
 
     Args:
         application: The JobApplication ORM object.
-        db: Database session (used only when workflow_sessions_map is not provided).
+        db: Database session (used only when maps are not provided).
         workflow_sessions_map: Optional pre-loaded {session_id: WorkflowSession} map.
+            Pass this when formatting a list of applications to avoid N+1 queries.
+        events_map: Optional pre-loaded {application_id: [ApplicationAutomationEvent]} map.
             Pass this when formatting a list of applications to avoid N+1 queries.
     """
     session_id = application.session_id
@@ -936,6 +969,34 @@ async def _format_application_response(
                 workflow_data = workflow_session.to_dict()
         except Exception as e:
             logger.error(f"Error fetching workflow session data: {e}", exc_info=True)
+
+    # Fetch automation events for progress derivation if not provided
+    if events_map is not None:
+        app_events = events_map.get(application.id, [])
+    else:
+        try:
+            events_result = await db.execute(
+                select(ApplicationAutomationEvent)
+                .where(
+                    ApplicationAutomationEvent.application_id == application.id,
+                    ApplicationAutomationEvent.event_type.in_(
+                        PROGRESS_AUTOMATION_EVENT_TYPES
+                    ),
+                )
+                .order_by(
+                    ApplicationAutomationEvent.created_at.asc(),
+                    ApplicationAutomationEvent.id.asc(),
+                )
+            )
+            app_events = list(events_result.scalars().all())
+        except Exception as e:
+            logger.error(f"Error fetching application events: {e}", exc_info=True)
+            app_events = []
+
+    raw_progress = derive_automation_progress(application, app_events)
+    automation_progress = (
+        AutomationProgressResponse(**raw_progress) if raw_progress else None
+    )
 
     # Fallback to workflow session data when application fields are missing
     job_title = application.job_title
@@ -990,6 +1051,7 @@ async def _format_application_response(
         updated_at=application.updated_at,
         workflow_session_id=session_id,
         workflow_data=workflow_data,
+        automation_progress=automation_progress,
     )
 
 

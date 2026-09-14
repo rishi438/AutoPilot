@@ -100,8 +100,8 @@ non-zero when it finds a rule match.
 Build and scan the same artifact that CI scans:
 
 ```powershell
-docker build -t applypilot:local .
-docker run --rm aquasec/trivy:latest image --severity HIGH,CRITICAL --ignore-unfixed applypilot:local
+docker build -t autopilot:local .
+docker run --rm aquasec/trivy:latest image --severity HIGH,CRITICAL --ignore-unfixed autopilot:local
 ```
 
 Use `--exit-code 1` when you want the local command to fail on findings, as CI

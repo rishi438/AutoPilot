@@ -1,5 +1,5 @@
 {
-  "name": "applypilot-frontend",
+  "name": "autopilot-frontend",
   "version": "1.0.0",
   "private": true,
   "description": "Frontend asset build pipeline — minify and fingerprint JS/CSS",

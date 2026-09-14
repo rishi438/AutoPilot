@@ -164,6 +164,99 @@
         return localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN) || localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN_LEGACY);
     }
 
+    /** Render private cooldown notices without account or credential metadata. */
+    function renderWorkdayCooldownNotices(notices) {
+        const section = document.getElementById('workdayCooldownSection');
+        const list = document.getElementById('workdayCooldownList');
+        if (!section || !list) return;
+        section.classList.toggle('is-hidden', notices.length === 0);
+        if (!notices.length) {
+            list.replaceChildren();
+            return;
+        }
+        list.innerHTML = notices.map((notice) => {
+            const safeTime = new Date(String(notice.safe_next_attempt_at));
+            const safeUtc = Number.isNaN(safeTime.getTime()) ? '' : safeTime.toISOString();
+            const noticeId = escapeHtml(notice.id);
+            return `<article class="application-card mb-3" role="listitem">
+                <div class="application-card-body">
+                    <h5 class="mb-1">Workday account temporarily locked</h5>
+                    <p class="mb-3">Safe next-attempt time (server UTC): <strong>${escapeHtml(safeUtc)}</strong></p>
+                    <div class="d-flex flex-wrap gap-2 mb-3">
+                        <button class="btn btn-primary btn-sm" type="button" data-action="cooldown-keep" data-notice-id="${noticeId}">Keep default wait</button>
+                        <button class="btn btn-outline-danger btn-sm" type="button" data-action="cooldown-delete" data-notice-id="${noticeId}">Delete this application</button>
+                    </div>
+                    <form data-cooldown-extend-form data-notice-id="${noticeId}">
+                        <label class="form-label" for="cooldown-until-${noticeId}">Extend wait until</label>
+                        <div class="d-flex flex-wrap gap-2">
+                            <input class="form-control" id="cooldown-until-${noticeId}" name="extend_until" type="datetime-local" required>
+                            <button class="btn btn-outline-primary btn-sm" type="submit">Extend wait</button>
+                        </div>
+                    </form>
+                </div>
+            </article>`;
+        }).join('');
+    }
+
+    async function loadWorkdayCooldownNotices() {
+        try {
+            const response = await fetch(`${API_BASE}/automation/cooldown-notices`, {
+                headers: { Authorization: `Bearer ${getAuthToken()}` },
+            });
+            if (!response.ok) throw new Error('Could not load Workday cooldown notices.');
+            renderWorkdayCooldownNotices(await response.json());
+        } catch (error) {
+            console.error('Error loading Workday cooldown notices:', error);
+        }
+    }
+
+    async function sendCooldownDecision(noticeId, payload, button) {
+        if (button) button.disabled = true;
+        try {
+            const response = await fetch(`${API_BASE}/automation/cooldown-notices/${encodeURIComponent(noticeId)}/decision`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${getAuthToken()}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || 'Could not save the cooldown decision.');
+            const message = payload.decision === 'delete'
+                ? 'Only the selected application was deleted; the account wait remains active.'
+                : 'Cooldown decision saved. No retry was queued.';
+            notify(message, 'success');
+            await Promise.all([loadWorkdayCooldownNotices(), loadApplications(true)]);
+        } catch (error) {
+            notify(error instanceof Error ? error.message : 'Could not save the cooldown decision.', 'error');
+            if (button) button.disabled = false;
+        }
+    }
+
+    async function extendWorkdayCooldown(form) {
+        const value = new FormData(form).get('extend_until');
+        if (typeof value !== 'string' || !value) return;
+        const selected = new Date(value);
+        if (Number.isNaN(selected.getTime()) || selected.getTime() <= Date.now()) {
+            notify('Choose a future date and time.', 'error');
+            return;
+        }
+        await sendCooldownDecision(
+            form.dataset.noticeId || '',
+            { decision: 'extend', extend_until: selected.toISOString() },
+            form.querySelector('button[type="submit"]'),
+        );
+    }
+
+    async function deleteCooldownApplication(noticeId, button) {
+        const confirmed = await window.showConfirm({
+            title: 'Delete this application',
+            message: 'Delete only this application? The Workday account cooldown will remain active.',
+            confirmText: 'Delete this application',
+            type: 'danger',
+        });
+        if (!confirmed) return;
+        await sendCooldownDecision(noticeId, { decision: 'delete', confirm_delete: true }, button);
+    }
+
     /** Render only server-provided hold text through escapeHtml. */
     function renderApplicationHolds(holds) {
         const section = document.getElementById('applicationHoldsSection');
@@ -177,21 +270,24 @@
         list.innerHTML = holds.map((hold) => {
             const title = [hold.job_title, hold.company_name].filter(Boolean).join(' at ') || 'Application';
             const canAnswer = Boolean(hold.question);
+            const canRescan = !canAnswer && ['unknown_required_question', 'validation_failure'].includes(hold.hold_code);
             const reloginUrl = hold.hold_code === 'expired_session' && /^https:\/\//i.test(String(hold.relogin_url || ''))
                 ? escapeHtml(hold.relogin_url)
                 : '';
             const reloginAction = reloginUrl ? `<p class="mb-2"><a class="btn btn-outline-primary btn-sm" href="${reloginUrl}" target="_blank" rel="noopener noreferrer">Sign in again</a></p>
                 <button class="btn btn-primary btn-sm" type="button" data-action="retry-after-relogin" data-hold-id="${escapeHtml(hold.id)}">I signed in — retry this job</button>` : '';
+            const rescanAction = canRescan ? `<p class="mb-2 text-muted">The required question was not captured, so there is no safe answer field to show yet.</p>
+                <button class="btn btn-primary btn-sm" type="button" data-action="rescan-hold" data-hold-id="${escapeHtml(hold.id)}">Rescan form questions</button>` : '';
             return `<article class="application-card mb-3" role="listitem">
                 <div class="application-card-body">
                     <h5 class="mb-1">${escapeHtml(title)}</h5>
                     <p class="mb-2"><strong>${escapeHtml(hold.hold_code.replaceAll('_', ' '))}</strong></p>
                     ${hold.question ? `<p class="mb-2">${escapeHtml(hold.question)}</p>` : ''}
                     <p class="text-muted mb-3">${escapeHtml(hold.remediation)}</p>
-                    ${reloginAction || (canAnswer ? `<form data-hold-answer-form data-hold-id="${escapeHtml(hold.id)}">
+                    ${reloginAction || rescanAction || (canAnswer ? `<form data-hold-answer-form data-hold-id="${escapeHtml(hold.id)}">
                         <label class="form-label" for="hold-answer-${escapeHtml(hold.id)}">Your answer</label>
                         <textarea class="form-control mb-2" id="hold-answer-${escapeHtml(hold.id)}" name="answer" rows="2" required maxlength="5000"></textarea>
-                        <label class="form-check mb-2"><input class="form-check-input" type="checkbox" name="approved_for_reuse"> Reuse this answer for an identical question</label>
+                        <label class="form-check mb-2"><input class="form-check-input" type="checkbox" name="approved_for_reuse" checked> Reuse this answer for an identical question</label>
                         <button class="btn btn-primary btn-sm" type="submit">Save answer and retry</button>
                     </form>` : '<p class="mb-0 text-muted">Complete the remediation above, then retry from the portal worker.</p>')}
                 </div>
@@ -249,6 +345,23 @@
             await Promise.all([loadApplicationHolds(), loadApplications(true)]);
         } catch (error) {
             notify(error instanceof Error ? error.message : 'Could not queue the retry.', 'error');
+            button.disabled = false;
+        }
+    }
+
+    async function rescanApplicationHold(holdId, button) {
+        button.disabled = true;
+        try {
+            const response = await fetch(`${API_BASE}/automation/holds/${encodeURIComponent(holdId)}/rescan`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${getAuthToken()}` },
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || 'Could not queue the form rescan.');
+            notify('The old hold was resolved. The application is queued for one form rescan.', 'success');
+            await Promise.all([loadApplicationHolds(), loadApplications(true)]);
+        } catch (error) {
+            notify(error instanceof Error ? error.message : 'Could not queue the form rescan.', 'error');
             button.disabled = false;
         }
     }
@@ -359,7 +472,7 @@
             draft: 'Draft', processing: 'Processing', ready: 'Ready',
             completed: 'Completed', applied: 'Applied', interview: 'Interview',
             rejected: 'Rejected', accepted: 'Accepted', failed: 'Failed',
-            queued: 'Queued', retrying: 'Retrying', blocked: 'On hold', skipped: 'Skipped',
+            queued: 'Queued', retrying: 'Retrying', blocked: 'On hold', skipped: 'Job expired',
             DRAFT: 'Draft', PROCESSING: 'Processing', READY: 'Ready',
             COMPLETED: 'Completed', APPLIED: 'Applied', INTERVIEW: 'Interview',
             REJECTED: 'Rejected', ACCEPTED: 'Accepted', FAILED: 'Failed',
@@ -368,22 +481,58 @@
     }
 
     /**
-     * Read-only AI analysis status badge (always shown top-right).
-     * Shows: Analyzing (blue) → Ready (cyan) → Failed (red).
+     * Read-only AI analysis / automation status badge (always shown top-right).
      * @param {string} status
+     * @param {Record<string,unknown>|null} [automationProgress]
      */
-    function aiStatusBadge(status) {
+    function aiStatusBadge(status, automationProgress) {
+        if (automationProgress && (automationProgress.unit2_completed || (automationProgress.stage === 'workday_unit2' && automationProgress.stage_status === 'completed'))) {
+            const label = automationProgress.label || 'Stage 2 complete — My Information saved';
+            return `<span class="card-ai-badge ai-stage1-complete" title="${escapeHtml(String(label))}"><i class="fas fa-check-double me-1" aria-hidden="true"></i>Stage 2 complete</span>`;
+        }
+        if (status === 'blocked' || (automationProgress && automationProgress.stage_status === 'review_required')) {
+            const isStage2 = automationProgress && (automationProgress.stage === 'workday_unit2' || automationProgress.unit1_completed);
+            const badgeText = isStage2 ? 'Stage 2 review required' : 'Review required';
+            const label = (automationProgress && automationProgress.label) || badgeText;
+            return `<span class="card-ai-badge ai-blocked" title="${escapeHtml(String(label))}"><i class="fas fa-pause-circle me-1" aria-hidden="true"></i>${escapeHtml(badgeText)}</span>`;
+        }
+        if (status === 'failed' || (automationProgress && automationProgress.stage_status === 'failed')) {
+            return `<span class="card-ai-badge ai-failed"><i class="fas fa-exclamation-circle me-1" aria-hidden="true"></i>Failed</span>`;
+        }
+        if (automationProgress && automationProgress.stage === 'workday_unit2' && (automationProgress.stage_status === 'in_progress' || automationProgress.stage_status === 'save_claimed' || automationProgress.stage_status === 'retry_ready')) {
+            const label = automationProgress.label || 'Stage 2 in progress';
+            return `<span class="card-ai-badge ai-processing" title="${escapeHtml(String(label))}"><i class="fas fa-spinner fa-spin me-1" aria-hidden="true"></i>Stage 2 in progress</span>`;
+        }
+        if (automationProgress && automationProgress.unit1_completed) {
+            const label = automationProgress.label || 'Stage 1 complete — ready for Stage 2';
+            return `<span class="card-ai-badge ai-stage1-complete" title="${escapeHtml(String(label))}"><i class="fas fa-check-circle me-1" aria-hidden="true"></i>Stage 1 complete</span>`;
+        }
+        if (automationProgress && automationProgress.stage === 'workday_unit1' && automationProgress.stage_status === 'in_progress') {
+            const label = automationProgress.label || 'Stage 1 in progress';
+            return `<span class="card-ai-badge ai-processing" title="${escapeHtml(String(label))}"><i class="fas fa-spinner fa-spin me-1" aria-hidden="true"></i>${escapeHtml(String(label))}</span>`;
+        }
+        if (status === 'applying') {
+            return `<span class="card-ai-badge ai-applying"><i class="fas fa-paper-plane me-1" aria-hidden="true"></i>Applying</span>`;
+        }
+        if (status === 'retrying') {
+            const label = (automationProgress && automationProgress.label) || 'Retrying';
+            return `<span class="card-ai-badge ai-retrying" title="${escapeHtml(String(label))}"><i class="fas fa-redo fa-spin me-1" aria-hidden="true"></i>${escapeHtml(String(label))}</span>`;
+        }
         if (status === 'processing') {
             return `<span class="card-ai-badge ai-processing"><i class="fas fa-spinner fa-spin me-1" aria-hidden="true"></i>Analyzing</span>`;
         }
-        if (status === 'failed') {
-            return `<span class="card-ai-badge ai-failed"><i class="fas fa-exclamation-circle me-1" aria-hidden="true"></i>Failed</span>`;
+        if (status === 'preparing') {
+            return `<span class="card-ai-badge ai-processing"><i class="fas fa-spinner fa-spin me-1" aria-hidden="true"></i>Preparing</span>`;
         }
         if (status === 'draft') {
             return `<span class="card-ai-badge ai-draft">Draft</span>`;
         }
         if (status === 'queued') {
-            return `<span class="card-ai-badge ai-draft"><i class="fas fa-clock me-1" aria-hidden="true"></i>Queued</span>`;
+            const label = (automationProgress && automationProgress.label) || 'Queued';
+            return `<span class="card-ai-badge ai-draft" title="${escapeHtml(String(label))}"><i class="fas fa-clock me-1" aria-hidden="true"></i>${escapeHtml(String(label))}</span>`;
+        }
+        if (status === 'skipped') {
+            return `<span class="card-ai-badge ai-expired"><i class="fas fa-calendar-times me-1" aria-hidden="true"></i>Job expired</span>`;
         }
         // analysis complete (completed, applied, interview, accepted, rejected, etc.)
         return `<span class="card-ai-badge ai-ready"><i class="fas fa-check me-1" aria-hidden="true"></i>Ready</span>`;
@@ -396,7 +545,7 @@
      * @param {string} appId
      */
     function trackingButtonsHtml(status, appId) {
-        const systemStatuses = ['draft', 'processing', 'failed', 'queued', 'retrying', 'blocked', 'skipped'];
+        const systemStatuses = ['draft', 'processing', 'failed', 'queued', 'retrying', 'blocked', 'skipped', 'preparing', 'applying'];
         if (systemStatuses.includes(status)) return '';
 
         const safeId = escapeHtml(appId);
@@ -520,6 +669,7 @@
         const appId      = String(app['id'] ?? '');
         const status     = String(app['status'] ?? '').toLowerCase();
         const safeAppId  = escapeHtml(appId);
+        const automationProgress = /** @type {Record<string,unknown>|null} */ (app['automation_progress'] ?? null);
 
         const createdAt = String(app['created_at'] ?? '');
         const relTime   = createdAt ? relativeTime(createdAt) : '';
@@ -566,7 +716,7 @@
         <div class="card-right">
             <div class="card-right-top">
                 ${followUpIcon}
-                ${aiStatusBadge(status)}
+                ${aiStatusBadge(status, automationProgress)}
             </div>
             <div class="card-right-bottom">
                 ${trackingButtonsHtml(status, appId)}
@@ -1459,7 +1609,7 @@
 
         // Initial load — use restored filters
         await loadApplications(true);
-        await loadApplicationHolds();
+        await Promise.all([loadApplicationHolds(), loadWorkdayCooldownNotices()]);
 
         // After first render, scroll to saved position
         if (savedScrollY > 0) {
@@ -1499,7 +1649,17 @@
                 case 'bulk-delete':    bulkDelete();     break;
                 case 'logout':         e.preventDefault(); logout(); break;
                 case 'retry-after-relogin': retryAfterRelogin(actionEl.dataset.holdId || '', actionEl); break;
+                case 'rescan-hold': rescanApplicationHold(actionEl.dataset.holdId || '', actionEl); break;
+                case 'cooldown-keep': sendCooldownDecision(actionEl.dataset.noticeId || '', { decision: 'keep' }, actionEl); break;
+                case 'cooldown-delete': deleteCooldownApplication(actionEl.dataset.noticeId || '', actionEl); break;
             }
+        });
+
+        document.getElementById('workdayCooldownList')?.addEventListener('submit', function (e) {
+            const form = /** @type {HTMLFormElement|null} */ (/** @type {Element} */ (e.target).closest('[data-cooldown-extend-form]'));
+            if (!form) return;
+            e.preventDefault();
+            extendWorkdayCooldown(form);
         });
 
         document.getElementById('applicationHoldsList')?.addEventListener('submit', function (e) {

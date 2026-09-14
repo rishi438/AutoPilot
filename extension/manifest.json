@@ -3,7 +3,7 @@
   "name": "Autopilot",
   "short_name": "Autopilot",
   "description": "Send job postings to Autopilot for full AI analysis, or match application forms to your profile for suggested field values.",
-  "version": "2.0.0",
+  "version": "2.0.9",
   "permissions": [
     "activeTab",
     "storage",

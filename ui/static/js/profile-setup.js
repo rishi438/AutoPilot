@@ -38,6 +38,8 @@
     let workExperience = [];
     /** @type {Array<{institution: string, degree: string, field_of_study: string, start_date: string, end_date: string, is_current: boolean}>} */
     let educationHistory = [];
+    /** @type {Array<{name: string, alpha2: string, alpha3?: string, dial_code: string}>} */
+    let countryPhoneCatalog = [];
 
     // In-flight request tracker — aborted on page unload
     let _pageAbortController = new AbortController();
@@ -113,6 +115,49 @@
         uk: 'GBP', canada: 'CAD', australia: 'AUD', japan: 'JPY', germany: 'EUR',
         france: 'EUR', italy: 'EUR', spain: 'EUR', netherlands: 'EUR'
     };
+
+    function normalizeCountryKey(value) {
+        return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    }
+
+    function findCountryPhoneEntry(value) {
+        const key = normalizeCountryKey(value);
+        const aliases = { uk: 'GB', britain: 'GB', america: 'US', 'south korea': 'KR', russia: 'RU' };
+        const aliasCode = aliases[key];
+        return countryPhoneCatalog.find((entry) => {
+            return normalizeCountryKey(entry.name) === key
+                || entry.alpha2.toUpperCase() === String(aliasCode || value || '').trim().toUpperCase()
+                || String(entry.alpha3 || '').toUpperCase() === String(value || '').trim().toUpperCase();
+        }) || null;
+    }
+
+    function syncCountryPhoneCode(canonicalizeCountry = false) {
+        const countryInput = /** @type {HTMLInputElement|null} */ (document.getElementById('country'));
+        const codeInput = /** @type {HTMLInputElement|null} */ (document.getElementById('country-phone-code'));
+        if (!countryInput || !codeInput) return;
+        const entry = findCountryPhoneEntry(countryInput.value);
+        codeInput.value = entry?.dial_code || '';
+        if (entry && canonicalizeCountry) countryInput.value = entry.name;
+    }
+
+    async function loadCountryPhoneCatalog() {
+        try {
+            const payload = await makeAuthenticatedApiCall('/profile/countries');
+            countryPhoneCatalog = Array.isArray(payload?.countries) ? payload.countries : [];
+            const datalist = document.getElementById('country-options');
+            if (datalist) {
+                datalist.replaceChildren(...countryPhoneCatalog.map((entry) => {
+                    const option = document.createElement('option');
+                    option.value = entry.name;
+                    option.label = `${entry.alpha2} ${entry.dial_code}`;
+                    return option;
+                }));
+            }
+        } catch (error) {
+            countryPhoneCatalog = [];
+            console.warn('Could not load country calling-code catalog.');
+        }
+    }
 
     function updateCountryAwareCareerFields() {
         const country = String(document.getElementById('country')?.value || '').trim();
@@ -208,6 +253,7 @@
 
         // Must finish loading saved profile before applying parsed resume from sessionStorage.
         // Otherwise populateFormData() can resolve after autoFillProfile() and overwrite parsed data.
+        await loadCountryPhoneCatalog();
         const profilePayload = await loadUserData();
         const completionStatus = profilePayload?.completion_status;
 
@@ -219,8 +265,14 @@
         prevBtn.addEventListener("click", goToPrevStep);
         completeBtn.addEventListener("click", completeProfile);
         document.getElementById("logout-btn").addEventListener("click", logout);
-        document.getElementById('country')?.addEventListener('input', updateCountryAwareCareerFields);
-        document.getElementById('country')?.addEventListener('change', updateCountryAwareCareerFields);
+        document.getElementById('country')?.addEventListener('input', function () {
+            syncCountryPhoneCode(false);
+            updateCountryAwareCareerFields();
+        });
+        document.getElementById('country')?.addEventListener('change', function () {
+            syncCountryPhoneCode(true);
+            updateCountryAwareCareerFields();
+        });
         document.getElementById('salary-currency')?.addEventListener('change', function () {
             this.dataset.userSelected = 'true';
         });
@@ -370,6 +422,12 @@
             document.getElementById("state").value = profileData.state;
         if (profileData.country)
             document.getElementById("country").value = profileData.country;
+        const savedCountryCode = document.getElementById("country-phone-code");
+        if (savedCountryCode && profileData.country_phone_code)
+            savedCountryCode.value = profileData.country_phone_code;
+        syncCountryPhoneCode(true);
+        if (profileData.postal_code)
+            document.getElementById("postal-code").value = profileData.postal_code;
         updateCountryAwareCareerFields();
 
         // Populate professional details
@@ -1006,6 +1064,8 @@
         if (data.city) document.getElementById("city").value = data.city;
         if (data.state) document.getElementById("state").value = data.state;
         if (data.country) document.getElementById("country").value = data.country;
+        syncCountryPhoneCode(true);
+        if (data.postal_code) document.getElementById("postal-code").value = data.postal_code;
         if (data.professional_title) document.getElementById("professional-title").value = data.professional_title;
         if (data.years_experience !== undefined) document.getElementById("years-experience").value = data.years_experience;
         if (data.summary) document.getElementById("summary").value = data.summary;
@@ -1260,6 +1320,8 @@
             { id: "city", name: "City" },
             { id: "state", name: "State" },
             { id: "country", name: "Country" },
+            { id: "country-phone-code", name: "Calling Code" },
+            { id: "postal-code", name: "Postal / PIN Code" },
             { id: "professional-title", name: "Professional Title" },
             { id: "years-experience", name: "Years of Experience" },
             { id: "summary", name: "Professional Summary" }
@@ -1597,7 +1659,7 @@
             data.is_student = data.is_student === "on";
 
             // Ensure all required fields are present (years_experience checked separately — 0 is valid)
-            const requiredFields = ["city", "state", "country", "professional_title", "summary"];
+            const requiredFields = ["city", "state", "country", "country_phone_code", "postal_code", "professional_title", "summary"];
             for (const field of requiredFields) {
                 if (!data[field]) {
                     throw new Error(`Missing required field: ${field}`);
